@@ -6,15 +6,15 @@ import kls::document;
 import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
-import kls::kotlin::symbols;
-
-const usz MAX_SYMBOLS = 512;
+import kls::kotlin::ast;
 
 /**
  * Handle textDocument/definition request.
  * Returns a Location JSON object pointing to the declaration of the
  * identifier under the cursor, or null if no definition is found.
  *
+ * Uses the parser AST for scope-aware lookup: searches from the
+ * innermost scope containing the cursor outward.
  * Only resolves definitions within the same document (no cross-file).
  */
 fn Object* handle_definition(DocumentStore* store, Object* params) {
@@ -45,53 +45,141 @@ fn Object* handle_definition(DocumentStore* store, Object* params) {
 
 	String target_name = tok.text;
 
-	// Detect call context: if the next token after the cursor token
-	// is ( or { (trailing lambda), the identifier is being invoked
-	// and we should prefer FUNCTION declarations over PROPERTY.
+	// Detect call context
 	bool is_call = is_call_context(doc.content, tok);
 
-	// Scan declarations in the document
-	Symbol[MAX_SYMBOLS] sym_buf;
-	usz sym_count = symbols::scan_declarations(doc.content, &sym_buf);
-
-	// Find matching declaration.
-	// In call context, prefer FUNCTION; fall back to first match.
-	// Otherwise, return the first match by source order.
-	usz first_match = sym_count; // sentinel: no match
-	usz func_match = sym_count;  // sentinel: no function match
-
-	for (usz i = 0; i < sym_count; i++) {
-		if (sym_buf[i].name == target_name) {
-			if (first_match == sym_count) {
-				first_match = i;
-			}
-			if (func_match == sym_count && sym_buf[i].kind == SymbolKind.FUNCTION) {
-				func_match = i;
-			}
-		}
+	// Get cached AST (parses lazily if needed)
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) {
+		return null;
 	}
 
-	if (is_call && func_match < sym_count) {
-		return build_location(uri, sym_buf[func_match]);
-	}
-	if (first_match < sym_count) {
-		return build_location(uri, sym_buf[first_match]);
+	// Find definition using scope-aware AST search
+	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
+		return build_location_from_node(uri, node);
 	}
 
 	return null;
 }
 
 /**
- * Build an LSP Location object from a Symbol.
+ * Search the AST for a declaration matching the target name.
+ * Starts from the innermost scope containing the cursor offset
+ * and works outward. Prefers function declarations in call context.
  */
-fn Object* build_location(String uri, Symbol sym) {
+fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cursor_offset, bool is_call) {
+	if (pr.node_count == 0) return ast::NOT_FOUND~;
+
+	// Find the innermost scope containing the cursor.
+	// Walk all nodes, tracking the deepest container that contains the cursor.
+	usz scope_idx = 0; // FILE node
+	for (usz i = 1; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!is_scope_node(n.kind)) continue;
+		if (cursor_offset >= n.start_offset && cursor_offset < n.end_offset) {
+			// Check if this is deeper than our current best
+			// (further in the array = more deeply nested)
+			scope_idx = i;
+		}
+	}
+
+	// Search from innermost scope outward to FILE
+	usz current = scope_idx;
+	while (true) {
+		AstNode* scope = &pr.nodes[current];
+
+		// Search direct children of this scope for matching declarations
+		AstNode* first_match = null;
+		AstNode* func_match = null;
+
+		for (usz i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.parent != current) continue;
+			if (!ast::is_declaration(n.kind)) continue;
+			if (n.name != target_name) continue;
+
+			if (first_match == null) {
+				first_match = n;
+			}
+			if (func_match == null && n.kind == FUN_DECL) {
+				func_match = n;
+			}
+		}
+
+		if (is_call && func_match != null) {
+			return func_match;
+		}
+		if (first_match != null) {
+			return first_match;
+		}
+
+		// Move to parent scope
+		if (current == 0 || scope.parent == ast::NO_PARENT) {
+			break; // Already at FILE level
+		}
+		current = scope.parent;
+	}
+
+	// ── Global fallback ───────────────────────────────────────────
+	// The scope-walk didn't find a match. This happens when the
+	// identifier refers to a member of a class/object that doesn't
+	// contain the cursor (e.g. `nob.module { }` or `Nob.new(args)`).
+	// Search ALL declarations in the entire AST as a fallback.
+	{
+		AstNode* first_match = null;
+		AstNode* func_match = null;
+
+		for (usz i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (!ast::is_declaration(n.kind)) continue;
+			if (n.name != target_name) continue;
+
+			if (first_match == null) {
+				first_match = n;
+			}
+			if (func_match == null && n.kind == FUN_DECL) {
+				func_match = n;
+			}
+		}
+
+		if (is_call && func_match != null) {
+			return func_match;
+		}
+		if (first_match != null) {
+			return first_match;
+		}
+	}
+
+	return ast::NOT_FOUND~;
+}
+
+/**
+ * Check if a node kind represents a scope that can contain declarations.
+ */
+fn bool is_scope_node(NodeKind kind) {
+	switch (kind) {
+		case FILE:
+		case CLASS_DECL:
+		case INTERFACE_DECL:
+		case OBJECT_DECL:
+		case COMPANION_OBJECT_DECL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Build an LSP Location object from an AST node's name position.
+ */
+fn Object* build_location_from_node(String uri, AstNode* node) {
 	Object* start = object::new_obj(tmem);
-	start.set("line", (int)sym.line);
-	start.set("character", (int)sym.col);
+	start.set("line", (int)node.name_line);
+	start.set("character", (int)node.name_col);
 
 	Object* end_pos = object::new_obj(tmem);
-	end_pos.set("line", (int)sym.line);
-	end_pos.set("character", (int)(sym.col + sym.len));
+	end_pos.set("line", (int)node.name_line);
+	end_pos.set("character", (int)(node.name_col + node.name_len));
 
 	Object* range = object::new_obj(tmem);
 	range.set("start", start);

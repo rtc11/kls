@@ -1,5 +1,7 @@
 module kls::test::hover_test;
 
+import std::collections::object;
+import kls::document;
 import kls::lsp::hover;
 import kls::kotlin::token;
 
@@ -250,5 +252,79 @@ fn void describe_string_literal() @test {
 		Token tok = { .kind = STRING_CONTENT, .text = `"hello"` };
 		String desc = hover::describe_token(tok)!!;
 		assert(desc.contains("String"), "description should mention String");
+	};
+}
+
+// ── AST-based hover (via handle_hover) ────────────────────────────
+
+fn Object* make_hover_params(String uri, int line, int character) {
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+
+	Object* pos = object::new_obj(tmem);
+	pos.set("line", line);
+	pos.set("character", character);
+
+	Object* params = object::new_obj(tmem);
+	params.set("textDocument", td);
+	params.set("position", pos);
+	return params;
+}
+
+fn void hover_function_shows_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet(name: String): String {}");
+		// Hover over "greet" at col 4
+		Object* params = make_hover_params("file:///test.kt", 0, 4);
+		Object* result = hover::handle_hover(&store, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("fun greet"), "expected 'fun greet' in hover, got: '%s'", value);
+		assert(value.contains("name: String"), "expected param 'name: String' in hover");
+		assert(value.contains(": String"), "expected return type in hover");
+	};
+}
+
+fn void hover_class_shows_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "data class User(val name: String)");
+		// Hover over "User" at col 11
+		Object* params = make_hover_params("file:///test.kt", 0, 11);
+		Object* result = hover::handle_hover(&store, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("data"), "expected 'data' modifier in hover, got: '%s'", value);
+		assert(value.contains("class User"), "expected 'class User' in hover");
+	};
+}
+
+fn void hover_property_shows_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val count: Int = 0");
+		// Hover over "count" at col 4
+		Object* params = make_hover_params("file:///test.kt", 0, 4);
+		Object* result = hover::handle_hover(&store, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("val count"), "expected 'val count' in hover, got: '%s'", value);
+		assert(value.contains(": Int"), "expected ': Int' in hover");
 	};
 }

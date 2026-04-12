@@ -4,23 +4,34 @@ import std::collections::object;
 import kls::document;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
+import kls::kotlin::ast;
 
 // Maximum tokens we'll encode per document.
 const usz MAX_TOKENS = 16384;
 
+// Maximum AST name positions we'll track for identifier classification.
+const usz MAX_NAME_ENTRIES = 4096;
+
 // ── Semantic token type legend (indices) ───────────────────────────
 // These indices must match the tokenTypes array in build_semantic_tokens_options().
-const int TT_KEYWORD  = 0;
-const int TT_MODIFIER = 1;
-const int TT_VARIABLE = 2;
-const int TT_STRING   = 3;
-const int TT_NUMBER   = 4;
-const int TT_COMMENT  = 5;
-const int TT_OPERATOR = 6;
-const int TT_PROPERTY = 7;
+const int TT_KEYWORD       = 0;
+const int TT_MODIFIER      = 1;
+const int TT_VARIABLE      = 2;
+const int TT_STRING        = 3;
+const int TT_NUMBER        = 4;
+const int TT_COMMENT       = 5;
+const int TT_OPERATOR      = 6;
+const int TT_PROPERTY      = 7;
+const int TT_FUNCTION      = 8;
+const int TT_CLASS         = 9;
+const int TT_INTERFACE     = 10;
+const int TT_ENUM_MEMBER   = 11;
+const int TT_TYPE          = 12;
+const int TT_PARAMETER     = 13;
+const int TT_TYPE_PARAMETER = 14;
 
 // Number of token types in the legend.
-const usz TOKEN_TYPE_COUNT = 8;
+const usz TOKEN_TYPE_COUNT = 15;
 
 // Token type names (must match indices above).
 const String[TOKEN_TYPE_COUNT] TOKEN_TYPE_NAMES = {
@@ -32,10 +43,71 @@ const String[TOKEN_TYPE_COUNT] TOKEN_TYPE_NAMES = {
 	"comment",
 	"operator",
 	"property",
+	"function",
+	"class",
+	"interface",
+	"enumMember",
+	"type",
+	"parameter",
+	"typeParameter",
 };
 
 // No modifiers for now.
 const usz TOKEN_MODIFIER_COUNT = 0;
+
+/**
+ * Entry mapping a source offset to a semantic token type,
+ * derived from AST declaration name positions.
+ */
+struct NameEntry {
+	uint offset;
+	int token_type;
+}
+
+/**
+ * Build a lookup table of (offset -> semantic token type) from the AST.
+ * Returns the number of entries written.
+ */
+fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
+	usz count = 0;
+	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name.len == 0 || n.name_len == 0) continue;
+
+		int tt;
+		switch (n.kind) {
+			case FUN_DECL:              tt = TT_FUNCTION;
+			case CLASS_DECL:            tt = TT_CLASS;
+			case INTERFACE_DECL:        tt = TT_INTERFACE;
+			case OBJECT_DECL:           tt = TT_CLASS;
+			case COMPANION_OBJECT_DECL: tt = TT_CLASS;
+			case PROPERTY_DECL:         tt = TT_PROPERTY;
+			case TYPEALIAS_DECL:        tt = TT_TYPE;
+			case CONSTRUCTOR_DECL:      tt = TT_FUNCTION;
+			case ENUM_ENTRY:            tt = TT_ENUM_MEMBER;
+			case PARAM:                 tt = TT_PARAMETER;
+			case TYPE_PARAM:            tt = TT_TYPE_PARAMETER;
+			default:                    continue;
+		}
+
+		table[count].offset = n.name_offset;
+		table[count].token_type = tt;
+		count++;
+	}
+	return count;
+}
+
+/**
+ * Look up an offset in the name table. Returns the token type or -1.
+ */
+fn int lookup_name(NameEntry[] table, usz count, uint offset) {
+	for (usz i = 0; i < count; i++) {
+		if (table[i].offset == offset) {
+			return table[i].token_type;
+		}
+	}
+	return -1;
+}
 
 /**
  * Handle textDocument/semanticTokens/full request.
@@ -50,18 +122,25 @@ fn Object* handle_semantic_tokens_full(DocumentStore* store, Object* params) {
 		return null;
 	}
 
-	return encode_semantic_tokens(doc.content);
+	// Get cached AST (parses lazily if needed)
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) {
+		return null;
+	}
+
+	return encode_semantic_tokens(doc.content, pr);
 }
 
 /**
  * Lex the content and encode all semantic tokens as a delta-encoded
- * integer array per the LSP spec.
+ * integer array per the LSP spec.  Uses the parser AST to classify
+ * identifiers at declaration name positions (function, class, etc.).
  *
  * Each token is 5 integers: deltaLine, deltaStart, length, tokenType, tokenModifiers.
  *
  * Returns a SemanticTokens object: { "data": [ ... ] }
  */
-fn Object* encode_semantic_tokens(String content) {
+fn Object* encode_semantic_tokens(String content, ParseResult* pr) {
 	Object* data = object::new_obj(tmem); // JSON array
 
 	if (content.len == 0) {
@@ -69,6 +148,10 @@ fn Object* encode_semantic_tokens(String content) {
 		result.set("data", data);
 		return result;
 	}
+
+	// Build AST name table for identifier classification
+	NameEntry[MAX_NAME_ENTRIES] name_table;
+	usz name_count = build_name_table(pr, &name_table);
 
 	Lexer lex = lexer::init(content);
 	uint prev_line = 0;
@@ -80,6 +163,15 @@ fn Object* encode_semantic_tokens(String content) {
 		if (tok.kind == EOF) break;
 
 		int token_type = map_token_type(tok.kind);
+
+		// For identifiers, check if this is a declaration name
+		if (tok.kind == IDENTIFIER && name_count > 0) {
+			int ast_type = lookup_name(name_table[..], name_count, tok.offset);
+			if (ast_type >= 0) {
+				token_type = ast_type;
+			}
+		}
+
 		if (token_type < 0) {
 			// Skip tokens with no semantic mapping (whitespace, newline, error)
 			continue;

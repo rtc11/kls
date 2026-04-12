@@ -114,12 +114,12 @@ fn void two_tokens_same_line() @test {
 		assert(data[2] == 3, "t1 length");
 		assert(data[3] == semantic_tokens::TT_KEYWORD, "t1 type");
 
-		// Token 2: x (variable) at line 0, col 4
+		// Token 2: x (property declaration name) at line 0, col 4
 		// deltaLine=0, deltaStart=4-0=4 (relative to previous token start col 0)
 		assert(data[5] == 0, "t2 deltaLine, got %d", data[5]);
 		assert(data[6] == 4, "t2 deltaStart, got %d", data[6]);
 		assert(data[7] == 1, "t2 length");
-		assert(data[8] == semantic_tokens::TT_VARIABLE, "t2 type");
+		assert(data[8] == semantic_tokens::TT_PROPERTY, "t2 type, got %d", data[8]);
 	};
 }
 
@@ -324,11 +324,11 @@ fn void multiline_mixed() @test {
 		assert(data[7] == 3, "t1 length");
 		assert(data[8] == semantic_tokens::TT_KEYWORD, "t1 type");
 
-		// Token 2: x at (1,4) -> deltaLine=0, deltaStart=4-0=4 (relative)
+		// Token 2: x (property declaration name) at (1,4) -> deltaLine=0, deltaStart=4-0=4 (relative)
 		assert(data[10] == 0, "t2 deltaLine");
 		assert(data[11] == 4, "t2 deltaStart, got %d", data[11]);
 		assert(data[12] == 1, "t2 length");
-		assert(data[13] == semantic_tokens::TT_VARIABLE, "t2 type");
+		assert(data[13] == semantic_tokens::TT_PROPERTY, "t2 type, got %d", data[13]);
 
 		// Token 3: = at (1,6) -> deltaLine=0, deltaStart=6-4=2
 		assert(data[15] == 0, "t3 deltaLine");
@@ -422,5 +422,91 @@ fn void real_kotlin_snippet() @test {
 		assert(data[1] == 0, "first deltaStart");
 		assert(data[2] == 3, "first length (fun)");
 		assert(data[3] == semantic_tokens::TT_KEYWORD, "first type");
+	};
+}
+
+// ── AST-based identifier classification ────────────────────────────
+
+fn void function_name_classified() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+
+		assert(result != null);
+		int[] data = get_data(result);
+		// Tokens: fun(kw), greet(fn), (, ), {, }
+		// Find the token for "greet" (second token, index 5..9)
+		assert(data.len >= 10, "expected at least 2 tokens");
+		assert(data[7] == 5, "greet length, got %d", data[7]); // "greet" = 5 chars
+		assert(data[8] == semantic_tokens::TT_FUNCTION, "greet should be TT_FUNCTION, got %d", data[8]);
+	};
+}
+
+fn void class_name_classified() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "class Foo {}");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+
+		assert(result != null);
+		int[] data = get_data(result);
+		// Tokens: class(kw), Foo(cls), {, }
+		assert(data.len >= 10, "expected at least 2 tokens");
+		assert(data[7] == 3, "Foo length, got %d", data[7]); // "Foo" = 3 chars
+		assert(data[8] == semantic_tokens::TT_CLASS, "Foo should be TT_CLASS, got %d", data[8]);
+	};
+}
+
+fn void enum_entry_classified() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "enum class Color { RED }");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+
+		assert(result != null);
+		int[] data = get_data(result);
+		// Find RED token: it should be TT_ENUM_MEMBER
+		// Tokens: enum(mod), class(kw), Color(cls), {, RED(enum_member), }
+		// RED is token 4 (0-indexed), at position data[20..24]
+		assert(data.len >= 25, "expected at least 5 tokens, got len=%d", (int)data.len);
+		assert(data[22] == 3, "RED length, got %d", data[22]); // "RED" = 3 chars
+		assert(data[23] == semantic_tokens::TT_ENUM_MEMBER, "RED should be TT_ENUM_MEMBER, got %d", data[23]);
+	};
+}
+
+fn void parameter_classified() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun add(a: Int) {}");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+
+		assert(result != null);
+		int[] data = get_data(result);
+		// Tokens: fun(kw), add(fn), (, a(param), :, Int(var), ), {, }
+		// 'a' is token 3 (0-indexed), at data[15..19]
+		assert(data.len >= 20, "expected at least 4 tokens, got len=%d", (int)data.len);
+		assert(data[17] == 1, "a length, got %d", data[17]); // "a" = 1 char
+		assert(data[18] == semantic_tokens::TT_PARAMETER, "a should be TT_PARAMETER, got %d", data[18]);
 	};
 }

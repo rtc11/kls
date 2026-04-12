@@ -3,28 +3,33 @@ module kls::lsp::diagnostics;
 import std::io;
 import std::collections::object;
 import kls::json_rpc;
+import kls::document;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
+import kls::kotlin::ast;
 
 /**
- * Run the lexer on content and return a JSON array of LSP Diagnostic objects
- * for any ERROR tokens found. Uses temp allocation.
+ * Run the lexer on content and return a JSON array of LSP Diagnostic
+ * objects for lexer errors.  Parser errors are added from the cached
+ * AST when available and the source is lexically clean.
  */
-fn Object* build_diagnostics_array(String content) {
+fn Object* build_diagnostics_array(String content, ParseResult* ast) {
 	Object* diagnostics = object::new_obj(tmem);
 
 	if (content.len == 0) {
 		return diagnostics;
 	}
 
+	// ── Lexer errors (ERROR tokens) ───────────────────────────────
+	usz lexer_error_count = 0;
 	Lexer lex = lexer::init(content);
 	while (true) {
 		Token tok = lex.next();
 		if (tok.kind == EOF) break;
 		if (tok.kind == ERROR) {
+			lexer_error_count++;
 			Object* diag = object::new_obj(tmem);
 
-			// Build range
 			Object* range = object::new_obj(tmem);
 			Object* start = object::new_obj(tmem);
 			start.set("line", (int)tok.line);
@@ -39,7 +44,6 @@ fn Object* build_diagnostics_array(String content) {
 			diag.set("severity", 1); // DiagnosticSeverity.Error
 			diag.set("source", "kls");
 
-			// Build message with offending character(s)
 			DString message;
 			message.tinit();
 			if (tok.text.len > 0) {
@@ -53,16 +57,57 @@ fn Object* build_diagnostics_array(String content) {
 		}
 	}
 
+	// ── Parser errors (structural) ────────────────────────────────
+	// Only include parser errors when the source is lexically clean.
+	// If there are lexer errors, the parser will also trip on them,
+	// producing redundant or misleading messages.
+	if (lexer_error_count == 0 && ast != null) {
+		for (usz i = 0; i < ast.error_count; i++) {
+			ParseError* pe = &ast.errors[i];
+			Object* diag = object::new_obj(tmem);
+
+			Object* range = object::new_obj(tmem);
+			Object* start = object::new_obj(tmem);
+			start.set("line", (int)pe.line);
+			start.set("character", (int)pe.col);
+			Object* end = object::new_obj(tmem);
+			end.set("line", (int)pe.line);
+			// Use at least 1 character width for the diagnostic range
+			uint end_col = pe.col + (pe.len > 0 ? pe.len : 1);
+			end.set("character", (int)end_col);
+			range.set("start", start);
+			range.set("end", end);
+
+			diag.set("range", range);
+			diag.set("severity", 1); // DiagnosticSeverity.Error
+			diag.set("source", "kls");
+			diag.set("message", pe.message);
+
+			diagnostics.push(diag);
+		}
+	}
+
 	return diagnostics;
 }
 
 /**
  * Publish diagnostics for a document to the client.
- * Runs the lexer on content, collects ERROR tokens as diagnostics,
- * and sends a textDocument/publishDiagnostics notification.
+ * Uses the cached AST from the DocumentStore for parser errors.
+ * Sends a textDocument/publishDiagnostics notification.
  */
-fn void publish_diagnostics(String uri, String content) {
-	Object* diagnostics = build_diagnostics_array(content);
+fn void publish_diagnostics(DocumentStore* store, String uri) {
+	Document* doc = store.get(uri) ?? null;
+	String content;
+	if (doc != null) {
+		content = doc.content;
+	} else {
+		content = "";
+	}
+
+	// Get cached AST (parses lazily if needed); null if doc not found
+	ParseResult* ast = store.get_ast(uri) ?? null;
+
+	Object* diagnostics = build_diagnostics_array(content, ast);
 
 	Object* params = object::new_obj(tmem);
 	params.set("uri", uri);

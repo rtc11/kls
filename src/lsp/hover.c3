@@ -6,6 +6,7 @@ import kls::json_rpc;
 import kls::document;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
+import kls::kotlin::ast;
 
 faultdef NO_TOKEN, NO_DESCRIPTION;
 
@@ -34,10 +35,31 @@ fn Object* handle_hover(DocumentStore* store, Object* params) {
 	}
 
 	String description;
-	if (try desc = describe_token(tok)) {
-		description = desc;
+	bool found_description = false;
+
+	// For identifiers, try AST-based lookup for rich signatures
+	if (tok.kind == IDENTIFIER) {
+		ParseResult* pr = store.get_ast(uri) ?? null;
+		if (pr != null) {
+			if (try desc = describe_identifier_from_ast(pr, tok)) {
+				description = desc;
+				found_description = true;
+			}
+		}
+		if (!found_description) {
+			// Fallback: basic identifier description
+			if (try desc = describe_token(tok)) {
+				description = desc;
+			} else {
+				return null;
+			}
+		}
 	} else {
-		return null;
+		if (try desc = describe_token(tok)) {
+			description = desc;
+		} else {
+			return null;
+		}
 	}
 
 	// Build hover response
@@ -60,6 +82,163 @@ fn Object* handle_hover(DocumentStore* store, Object* params) {
 	result.set("range", range);
 
 	return result;
+}
+
+/**
+ * Try to find a declaration matching the identifier token in the AST
+ * and return a rich signature description.
+ */
+fn String? describe_identifier_from_ast(ParseResult* pr, Token tok) {
+	if (pr.node_count == 0) return NO_DESCRIPTION~;
+
+	// Search all declarations for one matching this identifier name
+	String target = tok.text;
+	AstNode* best = null;
+
+	for (usz i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind)) continue;
+		if (n.name != target) continue;
+
+		// Prefer the first match
+		if (best == null) {
+			best = n;
+		}
+	}
+
+	if (best == null) return NO_DESCRIPTION~;
+
+	return build_signature(best, pr);
+}
+
+/**
+ * Build a markdown signature string from an AST declaration node.
+ */
+fn String build_signature(AstNode* node, ParseResult* pr) {
+	DString ds;
+	ds.tinit();
+
+	ds.appendf("```kotlin\n");
+
+	// Modifiers
+	append_modifiers(&ds, node.mod_flags);
+
+	// Declaration keyword + name
+	switch (node.kind) {
+		case FUN_DECL:
+			ds.appendf("fun %s", node.name);
+			// Append parameters
+			ds.appendf("(");
+			bool first = true;
+			for (usz i = 0; i < pr.node_count; i++) {
+				AstNode* child = &pr.nodes[i];
+				usz node_idx = ast::node_index(pr, node);
+				if (child.parent != node_idx) continue;
+				if (child.kind != PARAM) continue;
+
+				if (!first) {
+					ds.appendf(", ");
+				}
+				first = false;
+				ds.appendf("%s", child.name);
+				if (child.type_text.len > 0) {
+					ds.appendf(": %s", child.type_text);
+				}
+			}
+			ds.appendf(")");
+			if (node.type_text.len > 0) {
+				ds.appendf(": %s", node.type_text);
+			}
+
+		case CLASS_DECL:
+			ds.appendf("class %s", node.name);
+
+		case INTERFACE_DECL:
+			ds.appendf("interface %s", node.name);
+
+		case OBJECT_DECL:
+			ds.appendf("object %s", node.name);
+
+		case COMPANION_OBJECT_DECL:
+			ds.appendf("companion object %s", node.name);
+
+		case PROPERTY_DECL:
+			// Determine val vs var from modifiers (we don't track this explicitly,
+			// but if MOD_FINAL is set it was a val primary constructor param)
+			ds.appendf("val %s", node.name);
+			if (node.type_text.len > 0) {
+				ds.appendf(": %s", node.type_text);
+			}
+
+		case TYPEALIAS_DECL:
+			ds.appendf("typealias %s", node.name);
+			if (node.type_text.len > 0) {
+				ds.appendf(" = %s", node.type_text);
+			}
+
+		case CONSTRUCTOR_DECL:
+			ds.appendf("constructor(");
+			bool first = true;
+			for (usz i = 0; i < pr.node_count; i++) {
+				AstNode* child = &pr.nodes[i];
+				usz node_idx = ast::node_index(pr, node);
+				if (child.parent != node_idx) continue;
+				if (child.kind != PARAM) continue;
+
+				if (!first) {
+					ds.appendf(", ");
+				}
+				first = false;
+				ds.appendf("%s", child.name);
+				if (child.type_text.len > 0) {
+					ds.appendf(": %s", child.type_text);
+				}
+			}
+			ds.appendf(")");
+
+		case INIT_BLOCK:
+			ds.appendf("init { ... }");
+
+		case ENUM_ENTRY:
+			ds.appendf("%s", node.name);
+
+		default:
+			ds.appendf("%s", node.name);
+	}
+
+	ds.appendf("\n```");
+
+	return ds.str_view();
+}
+
+/**
+ * Append modifier keywords to a DString based on mod_flags.
+ */
+fn void append_modifiers(DString* ds, uint flags) {
+	if (flags & ast::MOD_PUBLIC != 0)      ds.appendf("public ");
+	if (flags & ast::MOD_PRIVATE != 0)     ds.appendf("private ");
+	if (flags & ast::MOD_PROTECTED != 0)   ds.appendf("protected ");
+	if (flags & ast::MOD_INTERNAL != 0)    ds.appendf("internal ");
+	if (flags & ast::MOD_ABSTRACT != 0)    ds.appendf("abstract ");
+	if (flags & ast::MOD_OPEN != 0)        ds.appendf("open ");
+	if (flags & ast::MOD_FINAL != 0)       ds.appendf("final ");
+	if (flags & ast::MOD_SEALED != 0)      ds.appendf("sealed ");
+	if (flags & ast::MOD_DATA != 0)        ds.appendf("data ");
+	if (flags & ast::MOD_ENUM != 0)        ds.appendf("enum ");
+	if (flags & ast::MOD_INNER != 0)       ds.appendf("inner ");
+	if (flags & ast::MOD_ANNOTATION != 0)  ds.appendf("annotation ");
+	if (flags & ast::MOD_VALUE != 0)       ds.appendf("value ");
+	if (flags & ast::MOD_INLINE != 0)      ds.appendf("inline ");
+	if (flags & ast::MOD_INFIX != 0)       ds.appendf("infix ");
+	if (flags & ast::MOD_OPERATOR != 0)    ds.appendf("operator ");
+	if (flags & ast::MOD_SUSPEND != 0)     ds.appendf("suspend ");
+	if (flags & ast::MOD_TAILREC != 0)     ds.appendf("tailrec ");
+	if (flags & ast::MOD_OVERRIDE != 0)    ds.appendf("override ");
+	if (flags & ast::MOD_LATEINIT != 0)    ds.appendf("lateinit ");
+	if (flags & ast::MOD_CONST != 0)       ds.appendf("const ");
+	if (flags & ast::MOD_EXTERNAL != 0)    ds.appendf("external ");
+	if (flags & ast::MOD_EXPECT != 0)      ds.appendf("expect ");
+	if (flags & ast::MOD_ACTUAL != 0)      ds.appendf("actual ");
 }
 
 /**

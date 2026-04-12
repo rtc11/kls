@@ -320,3 +320,107 @@ fn void definition_non_call_context_returns_first_match() @test {
 		assert(line == 0, "expected property declaration at line 0, got %d", line);
 	};
 }
+
+// ── Member function via receiver (global fallback) ─────────────────
+
+fn void definition_of_member_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// "module" is a member function of class Nob, called via nob.module { }
+		String content =
+			`class Nob {
+    fun module(block: Int): Int {
+        return block
+    }
+}
+fun main() {
+    val nob = Nob()
+    nob.module { }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "module" in "nob.module { }" at line 7, col 8
+		Object* params = make_params("file:///test.kt", 7, 8);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected a Location for member function");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		// "fun module(...)" is at line 1, col 8
+		assert(line == 1, "expected member fun at line 1, got %d", line);
+		assert(col == 8, "expected member fun at col 8, got %d", col);
+	};
+}
+
+// ── Companion object function (global fallback) ────────────────────
+
+fn void definition_of_companion_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// "new" is inside Nob's companion object, called via Nob.new(args)
+		String content =
+			`class Nob {
+    companion object {
+        fun new(args: Int): Nob {
+            return Nob()
+        }
+    }
+}
+fun main() {
+    val nob = Nob.new(42)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "new" in "Nob.new(42)" at line 8, col 18
+		Object* params = make_params("file:///test.kt", 8, 18);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected a Location for companion fun");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// "fun new(...)" is at line 2
+		assert(line == 2, "expected companion fun at line 2, got %d", line);
+	};
+}
+
+// ── Nested class member (global fallback) ──────────────────────────
+
+fn void definition_of_nested_class_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`class Outer {
+    class Inner {
+        fun doWork() {}
+    }
+}
+fun main() {
+    val i = Outer.Inner()
+    i.doWork()
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "doWork" in "i.doWork()" at line 7, col 6
+		Object* params = make_params("file:///test.kt", 7, 6);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected a Location for nested member");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// "fun doWork()" is at line 2
+		assert(line == 2, "expected nested fun at line 2, got %d", line);
+	};
+}

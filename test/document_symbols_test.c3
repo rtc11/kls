@@ -234,7 +234,8 @@ fn void symbol_range_correctness() @test {
 		store.init();
 		defer store.free();
 
-		// "fun greet() {}" -- "greet" starts at col 4, length 5
+		// "fun greet() {}" -- full decl starts at col 0, ends at col 14
+		// "greet" is at col 4, length 5
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_params("file:///test.kt");
@@ -244,22 +245,32 @@ fn void symbol_range_correctness() @test {
 		assert(result.get_len() == 1);
 
 		Object* sym = result.get_at(0);
-		Object* range = sym.get("range")!!;
-		Object* start = range.get("start")!!;
-		Object* end_pos = range.get("end")!!;
-		int start_line = start.get_int("line")!!;
-		int start_col = start.get_int("character")!!;
-		int end_line = end_pos.get_int("line")!!;
-		int end_col = end_pos.get_int("character")!!;
 
-		assert(start_line == 0, "expected start line 0, got %d", start_line);
-		assert(start_col == 4, "expected start col 4, got %d", start_col);
-		assert(end_line == 0, "expected end line 0, got %d", end_line);
-		assert(end_col == 9, "expected end col 9, got %d", end_col);
+		// range covers the full declaration
+		Object* range = sym.get("range")!!;
+		Object* r_start = range.get("start")!!;
+		Object* r_end = range.get("end")!!;
+		int r_start_line = r_start.get_int("line")!!;
+		int r_start_col = r_start.get_int("character")!!;
+		int r_end_line = r_end.get_int("line")!!;
+		int r_end_col = r_end.get_int("character")!!;
+		assert(r_start_line == 0, "expected range start line 0, got %d", r_start_line);
+		assert(r_start_col == 0, "expected range start col 0, got %d", r_start_col);
+		assert(r_end_line == 0, "expected range end line 0, got %d", r_end_line);
+		assert(r_end_col == 14, "expected range end col 14, got %d", r_end_col);
+
+		// selectionRange covers just the name "greet"
+		Object* sel_range = sym.get("selectionRange")!!;
+		Object* s_start = sel_range.get("start")!!;
+		Object* s_end = sel_range.get("end")!!;
+		int s_start_col = s_start.get_int("character")!!;
+		int s_end_col = s_end.get_int("character")!!;
+		assert(s_start_col == 4, "expected selectionRange start col 4, got %d", s_start_col);
+		assert(s_end_col == 9, "expected selectionRange end col 9, got %d", s_end_col);
 	};
 }
 
-// ── Selection range matches range ──────────────────────────────────
+// ── Selection range covers the name, range covers declaration ──────
 
 fn void symbol_selection_range_matches() @test {
 	@pool() {
@@ -267,6 +278,7 @@ fn void symbol_selection_range_matches() @test {
 		store.init();
 		defer store.free();
 
+		// "class Widget {}" -- full decl: col 0..15, name "Widget" at col 6..12
 		store.open("file:///test.kt", "kotlin", 1, "class Widget {}");
 
 		Object* params = make_params("file:///test.kt");
@@ -278,14 +290,17 @@ fn void symbol_selection_range_matches() @test {
 		Object* range = sym.get("range")!!;
 		Object* sel_range = sym.get("selectionRange")!!;
 
-		// Both ranges should be identical
+		// range covers full declaration
 		int r_start_col = range.get("start")!!.get_int("character")!!;
 		int r_end_col = range.get("end")!!.get_int("character")!!;
+		assert(r_start_col == 0, "expected range start col 0, got %d", r_start_col);
+		assert(r_end_col == 15, "expected range end col 15, got %d", r_end_col);
+
+		// selectionRange covers just the name "Widget"
 		int s_start_col = sel_range.get("start")!!.get_int("character")!!;
 		int s_end_col = sel_range.get("end")!!.get_int("character")!!;
-
-		assert(r_start_col == s_start_col, "range and selectionRange start should match");
-		assert(r_end_col == s_end_col, "range and selectionRange end should match");
+		assert(s_start_col == 6, "expected selectionRange start col 6, got %d", s_start_col);
+		assert(s_end_col == 12, "expected selectionRange end col 12, got %d", s_end_col);
 	};
 }
 
@@ -354,15 +369,202 @@ fn void symbol_second_line_position() @test {
 		assert(result != null);
 		assert(result.get_len() == 2);
 
-		// bar is on line 1, col 4
+		// bar is on line 1
 		Object* sym = result.get_at(1);
 		assert(sym.get_string("name")!! == "bar");
 
+		// range covers the full declaration starting at col 0
 		Object* range = sym.get("range")!!;
-		Object* start = range.get("start")!!;
-		int line = start.get_int("line")!!;
-		int col = start.get_int("character")!!;
-		assert(line == 1, "expected line 1, got %d", line);
-		assert(col == 4, "expected col 4, got %d", col);
+		Object* r_start = range.get("start")!!;
+		int r_line = r_start.get_int("line")!!;
+		int r_col = r_start.get_int("character")!!;
+		assert(r_line == 1, "expected range line 1, got %d", r_line);
+		assert(r_col == 0, "expected range col 0, got %d", r_col);
+
+		// selectionRange covers just "bar" at col 4
+		Object* sel_range = sym.get("selectionRange")!!;
+		Object* s_start = sel_range.get("start")!!;
+		int s_line = s_start.get_int("line")!!;
+		int s_col = s_start.get_int("character")!!;
+		assert(s_line == 1, "expected selectionRange line 1, got %d", s_line);
+		assert(s_col == 4, "expected selectionRange col 4, got %d", s_col);
+	};
+}
+
+// ── Hierarchical: class with members ───────────────────────────────
+
+fn void symbol_class_with_members() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`class Foo {
+    val x = 1
+    fun bar() {}
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = document_symbols::handle_document_symbol(&store, params);
+
+		assert(result != null);
+		// Top level: 1 class
+		assert(result.get_len() == 1, "expected 1 top-level symbol, got %d", (int)result.get_len());
+
+		Object* cls = result.get_at(0);
+		assert(cls.get_string("name")!! == "Foo");
+		assert(cls.get_int("kind")!! == 5); // Class
+
+		// Children: val x, fun bar
+		Object* children = cls.get("children")!!;
+		assert(children.get_len() == 2, "expected 2 children, got %d", (int)children.get_len());
+
+		Object* prop = children.get_at(0);
+		assert(prop.get_string("name")!! == "x");
+		assert(prop.get_int("kind")!! == 7); // Property
+
+		Object* fun = children.get_at(1);
+		assert(fun.get_string("name")!! == "bar");
+		assert(fun.get_int("kind")!! == 12); // Function
+	};
+}
+
+// ── Hierarchical: nested classes ───────────────────────────────────
+
+fn void symbol_nested_classes() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`class Outer {
+    class Inner {
+        fun method() {}
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = document_symbols::handle_document_symbol(&store, params);
+
+		assert(result != null);
+		assert(result.get_len() == 1);
+
+		Object* outer = result.get_at(0);
+		assert(outer.get_string("name")!! == "Outer");
+
+		Object* children = outer.get("children")!!;
+		assert(children.get_len() == 1, "expected 1 child (Inner), got %d", (int)children.get_len());
+
+		Object* inner = children.get_at(0);
+		assert(inner.get_string("name")!! == "Inner");
+		assert(inner.get_int("kind")!! == 5); // Class
+
+		// Inner has a method
+		Object* inner_children = inner.get("children")!!;
+		assert(inner_children.get_len() == 1, "expected 1 inner child, got %d", (int)inner_children.get_len());
+		assert(inner_children.get_at(0).get_string("name")!! == "method");
+	};
+}
+
+// ── Hierarchical: companion object members ─────────────────────────
+
+fn void symbol_companion_with_members() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`class Foo {
+    companion object Factory {
+        fun create(): Foo {}
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = document_symbols::handle_document_symbol(&store, params);
+
+		assert(result != null);
+		assert(result.get_len() == 1);
+
+		Object* cls = result.get_at(0);
+		Object* children = cls.get("children")!!;
+		assert(children.get_len() == 1, "expected 1 child (companion), got %d", (int)children.get_len());
+
+		Object* companion = children.get_at(0);
+		assert(companion.get_string("name")!! == "Factory");
+		assert(companion.get_int("kind")!! == 2); // Module
+
+		Object* comp_children = companion.get("children")!!;
+		assert(comp_children.get_len() == 1);
+		assert(comp_children.get_at(0).get_string("name")!! == "create");
+	};
+}
+
+// ── Hierarchical: enum with entries ────────────────────────────────
+
+fn void symbol_enum_entries() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "enum class Color { RED, GREEN, BLUE }");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = document_symbols::handle_document_symbol(&store, params);
+
+		assert(result != null);
+		assert(result.get_len() == 1);
+
+		Object* cls = result.get_at(0);
+		assert(cls.get_string("name")!! == "Color");
+
+		// Enum entries are children
+		Object* children = cls.get("children")!!;
+		assert(children.get_len() == 3, "expected 3 enum entries, got %d", (int)children.get_len());
+		assert(children.get_at(0).get_string("name")!! == "RED");
+		assert(children.get_at(1).get_string("name")!! == "GREEN");
+		assert(children.get_at(2).get_string("name")!! == "BLUE");
+
+		// Each entry should be EnumMember kind (22)
+		assert(children.get_at(0).get_int("kind")!! == 22);
+	};
+}
+
+// ── Hierarchical: interface with members ───────────────────────────
+
+fn void symbol_interface_with_members() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`interface Drawable {
+    fun draw()
+    val color: String
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = document_symbols::handle_document_symbol(&store, params);
+
+		assert(result != null);
+		assert(result.get_len() == 1);
+
+		Object* iface = result.get_at(0);
+		assert(iface.get_string("name")!! == "Drawable");
+		assert(iface.get_int("kind")!! == 11); // Interface
+
+		Object* children = iface.get("children")!!;
+		assert(children.get_len() == 2, "expected 2 children, got %d", (int)children.get_len());
+		assert(children.get_at(0).get_string("name")!! == "draw");
+		assert(children.get_at(1).get_string("name")!! == "color");
 	};
 }
