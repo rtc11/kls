@@ -1,0 +1,276 @@
+module kls::lsp::hover;
+
+import std::io;
+import std::collections::object;
+import kls::json_rpc;
+import kls::document;
+import kls::kotlin::lexer;
+import kls::kotlin::token;
+
+faultdef NO_TOKEN, NO_DESCRIPTION;
+
+/**
+ * Handle textDocument/hover request.
+ * Returns a Hover JSON object, or null if there is nothing to show.
+ */
+fn Object* handle_hover(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!!;
+	String uri = td.get_string("uri")!!;
+
+	Object* pos = params.get("position")!!;
+	uint line = (uint)pos.get_int("line")!!;
+	uint character = (uint)pos.get_int("character")!!;
+
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) {
+		return null;
+	}
+
+	Token tok;
+	if (try t = find_token_at_position(doc.content, line, character)) {
+		tok = t;
+	} else {
+		return null;
+	}
+
+	String description;
+	if (try desc = describe_token(tok)) {
+		description = desc;
+	} else {
+		return null;
+	}
+
+	// Build hover response
+	Object* contents = object::new_obj(tmem);
+	contents.set("kind", "markdown");
+	contents.set("value", description);
+
+	Object* range = object::new_obj(tmem);
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)tok.line);
+	start.set("character", (int)tok.col);
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)tok.line);
+	end_pos.set("character", (int)(tok.col + tok.len));
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	Object* result = object::new_obj(tmem);
+	result.set("contents", contents);
+	result.set("range", range);
+
+	return result;
+}
+
+/**
+ * Convert an LSP position (line, character) to a byte offset in the source.
+ * Returns the byte offset, or -1 if the position is past the end.
+ */
+fn long position_to_offset(String content, uint line, uint character) {
+	uint current_line = 0;
+	usz i = 0;
+
+	// Skip to the target line
+	while (i < content.len && current_line < line) {
+		if (content[i] == '\n') {
+			current_line++;
+		}
+		i++;
+	}
+
+	if (current_line < line) {
+		return -1; // Line is past end of content
+	}
+
+	// Add character offset
+	usz offset = i + (usz)character;
+	if (offset > content.len) {
+		return -1;
+	}
+
+	return (long)offset;
+}
+
+/**
+ * Find the token at the given LSP position by converting to a byte offset
+ * and scanning all tokens. Returns the matching token or a fault.
+ */
+fn Token? find_token_at_position(String content, uint line, uint character) {
+	long byte_offset = position_to_offset(content, line, character);
+	if (byte_offset < 0) {
+		return NO_TOKEN~;
+	}
+	usz target = (usz)byte_offset;
+
+	Lexer lex = lexer::init(content);
+	while (true) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) break;
+
+		usz tok_start = (usz)tok.offset;
+		usz tok_end = tok_start + (usz)tok.len;
+		if (target >= tok_start && target < tok_end) {
+			return tok;
+		}
+	}
+
+	return NO_TOKEN~;
+}
+
+/**
+ * Return a markdown description for a token, or a fault for tokens
+ * that should not show hover (basic punctuation).
+ */
+fn String? describe_token(Token tok) {
+	switch (tok.kind) {
+		// ── Hard Keywords ──────────────────────────────────────────
+		case KW_PACKAGE:     return "**package** (keyword)\n\nDeclares the package for the current file.";
+		case KW_IMPORT:      return "**import** (keyword)\n\nImports a class, function, or property.";
+		case KW_CLASS:       return "**class** (keyword)\n\nDeclares a class.";
+		case KW_INTERFACE:   return "**interface** (keyword)\n\nDeclares an interface.";
+		case KW_FUN:         return "**fun** (keyword)\n\nDeclares a function.";
+		case KW_OBJECT:      return "**object** (keyword)\n\nDeclares a singleton object or object expression.";
+		case KW_VAL:         return "**val** (keyword)\n\nDeclares a read-only property or local variable.";
+		case KW_VAR:         return "**var** (keyword)\n\nDeclares a mutable property or local variable.";
+		case KW_TYPEALIAS:   return "**typealias** (keyword)\n\nDeclares a type alias.";
+		case KW_CONSTRUCTOR: return "**constructor** (keyword)\n\nDeclares a secondary constructor.";
+		case KW_BY:          return "**by** (keyword)\n\nUsed for delegation or delegated properties.";
+		case KW_COMPANION:   return "**companion** (keyword)\n\nDeclares a companion object inside a class.";
+		case KW_INIT:        return "**init** (keyword)\n\nDeclares an initializer block.";
+		case KW_THIS:        return "**this** (keyword)\n\nRefers to the current instance.";
+		case KW_SUPER:       return "**super** (keyword)\n\nRefers to the superclass implementation.";
+		case KW_TYPEOF:      return "**typeof** (keyword)\n\nReserved for future use.";
+		case KW_WHERE:       return "**where** (keyword)\n\nSpecifies constraints for generic type parameters.";
+		case KW_IF:          return "**if** (keyword)\n\nConditional expression or statement.";
+		case KW_ELSE:        return "**else** (keyword)\n\nAlternative branch of an `if` expression.";
+		case KW_WHEN:        return "**when** (keyword)\n\nPattern matching expression (similar to `switch`).";
+		case KW_TRY:         return "**try** (keyword)\n\nBegins a try-catch-finally block for exception handling.";
+		case KW_CATCH:       return "**catch** (keyword)\n\nHandles exceptions thrown in a `try` block.";
+		case KW_FINALLY:     return "**finally** (keyword)\n\nBlock that always executes after `try`/`catch`.";
+		case KW_FOR:         return "**for** (keyword)\n\nIterates over an iterable or range.";
+		case KW_DO:          return "**do** (keyword)\n\nBegins a `do-while` loop.";
+		case KW_WHILE:       return "**while** (keyword)\n\nLoop that repeats while a condition is true.";
+		case KW_THROW:       return "**throw** (keyword)\n\nThrows an exception.";
+		case KW_RETURN:      return "**return** (keyword)\n\nReturns a value from a function.";
+		case KW_CONTINUE:    return "**continue** (keyword)\n\nSkips to the next iteration of a loop.";
+		case KW_BREAK:       return "**break** (keyword)\n\nExits the enclosing loop.";
+		case KW_AS:          return "**as** (keyword)\n\nType cast operator. Use `as?` for safe casts.";
+		case KW_IS:          return "**is** (keyword)\n\nType check operator. Returns true if the expression is of the given type.";
+		case KW_IN:          return "**in** (keyword)\n\nChecks containment or iterates in a `for` loop.";
+		case KW_OUT:         return "**out** (keyword)\n\nMarks a type parameter as covariant (producer).";
+		case KW_DYNAMIC:     return "**dynamic** (keyword)\n\nDynamic type for Kotlin/JS interop.";
+
+		// ── Soft Keywords (modifiers) ──────────────────────────────
+		case KW_ABSTRACT:    return "**abstract** (modifier)\n\nMarks a class or member as abstract (must be overridden).";
+		case KW_ANNOTATION:  return "**annotation** (modifier)\n\nDeclares an annotation class.";
+		case KW_DATA:        return "**data** (modifier)\n\nMarks a class as a data class (auto-generates equals, hashCode, toString, copy).";
+		case KW_ENUM:        return "**enum** (modifier)\n\nDeclares an enum class.";
+		case KW_EXTERNAL:    return "**external** (modifier)\n\nMarks a declaration as implemented outside Kotlin (e.g., in JavaScript).";
+		case KW_FINAL:       return "**final** (modifier)\n\nPrevents overriding of a member (default for classes and members).";
+		case KW_INFIX:       return "**infix** (modifier)\n\nAllows calling a function with infix notation (`a foo b`).";
+		case KW_INLINE:      return "**inline** (modifier)\n\nInlines the function body and its lambda parameters at call sites.";
+		case KW_INNER:       return "**inner** (modifier)\n\nAllows a nested class to access members of its outer class.";
+		case KW_INTERNAL:    return "**internal** (visibility)\n\nVisible within the same module.";
+		case KW_LATEINIT:    return "**lateinit** (modifier)\n\nAllows initializing a non-null property after construction.";
+		case KW_NOINLINE:    return "**noinline** (modifier)\n\nPrevents inlining of a lambda parameter in an inline function.";
+		case KW_OPEN:        return "**open** (modifier)\n\nAllows a class to be subclassed or a member to be overridden.";
+		case KW_OPERATOR:    return "**operator** (modifier)\n\nMarks a function as an operator overload.";
+		case KW_OVERRIDE:    return "**override** (modifier)\n\nOverrides a superclass member or interface method.";
+		case KW_PRIVATE:     return "**private** (visibility)\n\nVisible only within the declaring scope.";
+		case KW_PROTECTED:   return "**protected** (visibility)\n\nVisible within the class and its subclasses.";
+		case KW_PUBLIC:      return "**public** (visibility)\n\nVisible everywhere (default visibility).";
+		case KW_REIFIED:     return "**reified** (modifier)\n\nMakes a type parameter accessible at runtime in an inline function.";
+		case KW_SEALED:      return "**sealed** (modifier)\n\nRestricts a class hierarchy to a fixed set of subclasses.";
+		case KW_SUSPEND:     return "**suspend** (modifier)\n\nMarks a function or lambda as suspendable (coroutines).";
+		case KW_TAILREC:     return "**tailrec** (modifier)\n\nOptimizes a tail-recursive function into a loop.";
+		case KW_VARARG:      return "**vararg** (modifier)\n\nAllows passing a variable number of arguments.";
+		case KW_CROSSINLINE: return "**crossinline** (modifier)\n\nPrevents non-local returns in an inlined lambda.";
+		case KW_CONST:       return "**const** (modifier)\n\nMarks a property as a compile-time constant.";
+		case KW_EXPECT:      return "**expect** (modifier)\n\nDeclares a platform-specific API expectation (multiplatform).";
+		case KW_ACTUAL:      return "**actual** (modifier)\n\nProvides a platform-specific implementation (multiplatform).";
+		case KW_VALUE:       return "**value** (modifier)\n\nDeclares an inline (value) class.";
+
+		// ── Soft Keywords (property/accessor) ──────────────────────
+		case KW_GET:         return "**get** (accessor)\n\nDefines a custom getter for a property.";
+		case KW_SET:         return "**set** (accessor)\n\nDefines a custom setter for a property.";
+		case KW_FIELD:       return "**field** (accessor)\n\nRefers to the backing field in a property accessor.";
+		case KW_PROPERTY:    return "**property** (use-site target)\n\nAnnotation target for the property itself.";
+		case KW_RECEIVER:    return "**receiver** (use-site target)\n\nAnnotation target for the extension receiver parameter.";
+		case KW_PARAM:       return "**param** (use-site target)\n\nAnnotation target for the constructor parameter.";
+		case KW_SETPARAM:    return "**setparam** (use-site target)\n\nAnnotation target for the setter parameter.";
+		case KW_DELEGATE:    return "**delegate** (use-site target)\n\nAnnotation target for the delegate field.";
+		case KW_FILE:        return "**file** (use-site target)\n\nAnnotation target for the file.";
+
+		// ── Literals ───────────────────────────────────────────────
+		case INTEGER_LITERAL:
+			DString ds;
+			ds.tinit();
+			ds.appendf("**Integer literal**: `%s`\n\nType: ", tok.text);
+			if (tok.text.len > 0 && (tok.text[tok.text.len - 1] == 'L')) {
+				ds.appendf("Long");
+			} else if (tok.text.len > 1 && (tok.text[tok.text.len - 1] == 'u' || tok.text[tok.text.len - 1] == 'U')) {
+				ds.appendf("UInt");
+			} else {
+				ds.appendf("Int");
+			}
+			return ds.str_view();
+
+		case FLOAT_LITERAL:
+			DString ds;
+			ds.tinit();
+			ds.appendf("**Float literal**: `%s`\n\nType: ", tok.text);
+			if (tok.text.len > 0 && (tok.text[tok.text.len - 1] == 'f' || tok.text[tok.text.len - 1] == 'F')) {
+				ds.appendf("Float");
+			} else {
+				ds.appendf("Double");
+			}
+			return ds.str_view();
+
+		case BOOLEAN_LITERAL:
+			DString ds;
+			ds.tinit();
+			ds.appendf("**Boolean literal**: `%s`\n\nType: Boolean", tok.text);
+			return ds.str_view();
+
+		case NULL_LITERAL:
+			return "**null**\n\nThe null reference. Type: Nothing?";
+
+		case STRING_CONTENT:
+			return "**String literal**\n\nType: String";
+
+		case CHARACTER_LITERAL:
+			DString ds;
+			ds.tinit();
+			ds.appendf("**Character literal**: `%s`\n\nType: Char", tok.text);
+			return ds.str_view();
+
+		// ── Operators (interesting ones) ───────────────────────────
+		case SAFE_CALL:    return "**?.** (safe call)\n\nCalls a method or accesses a property only if the receiver is non-null.";
+		case ELVIS:        return "**?:** (elvis operator)\n\nReturns the left operand if non-null, otherwise the right operand.";
+		case NOT_NULL:     return "**!!** (not-null assertion)\n\nAsserts that a value is non-null, throwing NullPointerException if it is null.";
+		case RANGE:        return "**..** (range operator)\n\nCreates a range from the left to the right operand (inclusive).";
+		case COLONCOLON:   return "**::** (member reference)\n\nCreates a reference to a function, property, or constructor.";
+		case ARROW:        return "**->** (arrow)\n\nSeparates parameters from the body in a lambda, or conditions from results in a `when` branch.";
+		case DOUBLE_ARROW: return "**=>** (double arrow)\n\nUsed in certain annotation and builder contexts.";
+		case EQEQ:         return "**==** (structural equality)\n\nChecks structural equality (calls `equals()`).";
+		case EXCL_EQ:      return "**!=** (structural inequality)\n\nChecks structural inequality.";
+		case EQEQEQ:       return "**===** (referential equality)\n\nChecks that two references point to the same object.";
+		case EXCL_EQEQ:    return "**!==** (referential inequality)\n\nChecks that two references point to different objects.";
+		case LE:           return "**<=** (less than or equal)\n\nComparison operator.";
+		case GE:           return "**>=** (greater than or equal)\n\nComparison operator.";
+		case CONJ:         return "**&&** (logical AND)\n\nShort-circuit logical conjunction.";
+		case DISJ:         return "**||** (logical OR)\n\nShort-circuit logical disjunction.";
+		case QUEST:        return "**?** (nullable type marker)\n\nMarks a type as nullable.";
+
+		// ── Identifiers ────────────────────────────────────────────
+		case IDENTIFIER:
+			DString ds;
+			ds.tinit();
+			ds.appendf("Identifier: `%s`", tok.text);
+			return ds.str_view();
+
+		// ── Everything else (basic punctuation) ────────────────────
+		default:
+			return NO_DESCRIPTION~;
+	}
+}

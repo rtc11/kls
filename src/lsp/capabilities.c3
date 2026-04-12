@@ -18,9 +18,17 @@ fn Object* build_capabilities() {
 	// Position encoding
 	caps.set("positionEncoding", "utf-8");
 
+	// Hover support
+	caps.set("hoverProvider", true);
+
+	// Completion support
+	Object* completion_opts = object::new_obj(tmem);
+	Object* trigger_chars = object::new_obj(tmem);
+	trigger_chars.push(object::new_string(".", tmem));
+	completion_opts.set("triggerCharacters", trigger_chars);
+	caps.set("completionProvider", completion_opts);
+
 	// TODO: Add more capabilities as features are implemented:
-	// caps.set("hoverProvider", true);
-	// caps.set("completionProvider", build_completion_options());
 	// caps.set("definitionProvider", true);
 	// caps.set("documentSymbolProvider", true);
 	// caps.set("semanticTokensProvider", build_semantic_tokens_options());

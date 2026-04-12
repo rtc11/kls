@@ -7,6 +7,8 @@ import kls::json_rpc;
 import kls::document;
 import kls::lsp::lifecycle;
 import kls::lsp::sync;
+import kls::lsp::hover;
+import kls::lsp::completion;
 
 struct Server {
 	bool is_running;
@@ -100,6 +102,18 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/didClose":
 			if (params != null) {
 				sync::handle_did_close(&self.documents, params);
+			}
+
+		case "textDocument/hover":
+			if (params != null) {
+				Object* result = hover::handle_hover(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/completion":
+			if (params != null) {
+				Object* result = completion::handle_completion(&self.documents, params);
+				json_rpc::send_response(request_id, result);
 			}
 
 		default:
