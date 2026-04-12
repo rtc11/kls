@@ -55,6 +55,100 @@ fn Token Lexer.next(Lexer* self) {
 	return self.lex_operator(start, start_line, start_col);
 }
 
+/**
+ * Like next(), but emits WHITESPACE, NEWLINE, LINE_COMMENT, and
+ * BLOCK_COMMENT tokens instead of skipping them. Useful for semantic
+ * tokens where every visible token must be reported.
+ */
+fn Token Lexer.next_all(Lexer* self) {
+	if (self.pos >= self.source.len) {
+		return self.make_token(EOF, self.pos, 0);
+	}
+
+	usz start = self.pos;
+	uint start_line = self.line;
+	uint start_col = self.col;
+	char c = self.peek();
+
+	// Whitespace (spaces, tabs, carriage returns)
+	if (c == ' ' || c == '\t' || c == '\r') {
+		while (self.pos < self.source.len) {
+			char ch = self.peek();
+			if (ch == ' ' || ch == '\t' || ch == '\r') {
+				self.advance();
+			} else {
+				break;
+			}
+		}
+		return self.make_token_at(WHITESPACE, start, start_line, start_col);
+	}
+
+	// Newline
+	if (c == '\n') {
+		self.advance();
+		self.line++;
+		self.col = 0;
+		return self.make_token_at(NEWLINE, start, start_line, start_col);
+	}
+
+	// Line comment
+	if (c == '/' && self.peek_at(1) == '/') {
+		while (self.pos < self.source.len && self.peek() != '\n') {
+			self.advance();
+		}
+		return self.make_token_at(LINE_COMMENT, start, start_line, start_col);
+	}
+
+	// Block comment (nestable)
+	if (c == '/' && self.peek_at(1) == '*') {
+		self.advance(); // skip /
+		self.advance(); // skip *
+		int depth = 1;
+		while (self.pos < self.source.len && depth > 0) {
+			char bc = self.peek();
+			if (bc == '/' && self.peek_at(1) == '*') {
+				self.advance();
+				self.advance();
+				depth++;
+			} else if (bc == '*' && self.peek_at(1) == '/') {
+				self.advance();
+				self.advance();
+				depth--;
+			} else {
+				if (bc == '\n') {
+					self.line++;
+					self.col = 0;
+				}
+				self.advance();
+			}
+		}
+		return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
+	}
+
+	// Identifiers and keywords
+	if (is_ident_start(c)) {
+		return self.lex_identifier(start, start_line, start_col);
+	}
+
+	// Numeric literals
+	if (is_digit(c)) {
+		return self.lex_number(start, start_line, start_col);
+	}
+
+	// String literals
+	if (c == '"') {
+		return self.lex_string(start, start_line, start_col);
+	}
+
+	// Character literals
+	if (c == '\'') {
+		return self.lex_char(start, start_line, start_col);
+	}
+
+	// Operators and punctuation
+	return self.lex_operator(start, start_line, start_col);
+}
+
 // --- Private helpers ---
 
 fn void Lexer.skip_whitespace_and_comments(Lexer* self) {

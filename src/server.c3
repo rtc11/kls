@@ -11,6 +11,7 @@ import kls::lsp::hover;
 import kls::lsp::completion;
 import kls::lsp::definition;
 import kls::lsp::document_symbols;
+import kls::lsp::semantic_tokens;
 
 struct Server {
 	bool is_running;
@@ -127,6 +128,12 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/documentSymbol":
 			if (params != null) {
 				Object* result = document_symbols::handle_document_symbol(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/semanticTokens/full":
+			if (params != null) {
+				Object* result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			}
 

@@ -1,6 +1,7 @@
 module kls::lsp::capabilities;
 
 import std::collections::object;
+import kls::lsp::semantic_tokens;
 
 /**
  * Build the server capabilities object for the initialize response.
@@ -34,8 +35,8 @@ fn Object* build_capabilities() {
 	// Document symbol support (outline view)
 	caps.set("documentSymbolProvider", true);
 
-	// TODO: Add more capabilities as features are implemented:
-	// caps.set("semanticTokensProvider", build_semantic_tokens_options());
+	// Semantic tokens support (full document)
+	caps.set("semanticTokensProvider", semantic_tokens::build_semantic_tokens_options());
 
 	return caps;
 }
