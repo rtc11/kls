@@ -1,0 +1,19 @@
+# Build output
+build/
+
+# C3 compiler cache
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OpenCode
+.opencode/
