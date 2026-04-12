@@ -801,6 +801,348 @@ fn void parse_class_multiple_supertypes() @test {
 	};
 }
 
+// ── Debug: reproduce nob.kt class parsing ──────────────────────────
+
+fn void parse_class_with_expression_body_member() @test {
+	@pool() {
+		String content =
+`class Nob {
+    fun exit(code: Int = exit_code): Unit = System.exit(code)
+    private fun compile_with_daemon(src: File) {}
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_class_with_when_expression_body() @test {
+	@pool() {
+		String content =
+`class Nob {
+    private fun get_any_compiled_file(dir: File): File? {
+        return when {
+            dir.isFile -> dir
+            else -> null
+        }
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_top_level_extension_on_generic_type() @test {
+	@pool() {
+		String content = `fun List<Path>.into_cp(): String = joinToString(":") { it.toString() }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for extension on generic type, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_top_level_private_val_with_also() @test {
+	@pool() {
+		ParseResult* r = do_parse(`private val cache_dir = Paths.get("home", ".cache").also { it.toFile().mkdirs() }`); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for private val with .also, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_class_with_val_using_get() @test {
+	@pool() {
+		String content =
+`class Nob {
+    var kotlin_home: Path = Paths.get("KOTLIN_LIB")
+    fun compile(module: Module): Boolean {
+        val target = Paths.get(module.target).toAbsolutePath()
+        return true
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for class with .get(), got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_extension_fun_with_expression_body_get() @test {
+	@pool() {
+		String content =
+`fun Nob.main_srcs(): String = mods.map { path(it.src) }.joinToString(",")
+
+fun path(str: String): Path = Paths.get("user.dir", str).also { it.toFile().mkdirs() }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for extension fun with .get(), got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_nob_class_skeleton() @test {
+	@pool() {
+		String content =
+`class Nob(val opts: Opts) {
+    private var exit_code = 0
+    var mods = mutableSetOf<Module>()
+    var compiled = mutableSetOf<Module>()
+
+    companion object {
+        fun new(args: Array<String>): Nob {
+            var opts = Opts()
+            val nob = Nob(opts)
+            val module = nob.module {
+                name = "nob"
+                src = "nob.kt"
+                target = "out"
+            }
+            if (args.getOrNull(0) == "clean") nob.clean()
+            nob.rebuild_urself(module, args)
+            return nob
+        }
+    }
+
+    fun module(block: Module.() -> Unit): Module {
+        val module = Module(opts).apply(block)
+        module.libs = resolve_libs(opts, module)
+        mods.add(module)
+        return module
+    }
+
+    fun clean() {
+        val target = path(mods.first().target)
+        if (!Files.exists(target)) System.exit(0)
+        Files.walk(target).forEach { f ->
+            if (f.fileName.toString() !in listOf(".alive", mods.first().target)) {
+                Files.walk(f).sorted(Comparator.reverseOrder()).forEach { Files.delete(it) }
+            }
+        }
+        exit(0)
+    }
+
+    fun compile(module: Module): Boolean {
+        val start_time = System.nanoTime()
+        if (module in compiled) return false
+        module.mods.forEach { compile(it) }
+
+        val src = path(module.src).toFile()
+        var target = module.src_target()
+        val sources: Sequence<File> = when {
+            src.isFile -> sequenceOf(src)
+            src.isDirectory -> src.walkTopDown().filter { it.isFile && it.extension == "kt" }
+            else -> emptySequence()
+        }
+
+        val any_compiled_target_file = get_any_compiled_file(target.toFile())
+        val has_changes = sources.any { file ->
+            file.lastModified() > any_compiled_target_file?.lastModified() ?: 0
+        }
+
+        compiled.add(module)
+        if (!has_changes) return false
+
+        val classpath = module.compile_cp()
+        if (src.isFile && src.name == "nob.kt") target = Paths.get(module.target).toAbsolutePath().normalize()
+        compile_with_daemon(src, target, classpath, module.name)
+        return true
+    }
+
+    fun run(module: Module, main_class_fq: String, run_args: Array<String> = arrayOf()) {
+        val cmd = buildList{
+            add("java")
+            add("-cp")
+            add(module.runtime_cp())
+            add(main_class_fq)
+            run_args.forEach { add(it) }
+        }
+        exec(*cmd.toTypedArray())
+    }
+
+    fun release(module: Module) {
+        val start_time = System.nanoTime()
+        val src_target = Paths.get(module.src).toFile()
+        val compiled_dir = when {
+            src_target.isFile -> module.target
+            src_target.isDirectory -> Paths.get(module.target, module.src).toString()
+            else -> error("bad")
+        }
+
+        val runtime_libs = path(compiled_dir).resolve("runtime-libs").also { it.toFile().mkdirs() }
+        module.runtime_cp().split(':').map { Path.of(it) }.filter { it.name.substringAfterLast('.') == "jar" }.forEach {
+            exec("cp", it.toString(), runtime_libs.resolve(it.name).toString())
+        }
+
+        when (val main_class_fq = module.main_src()?.main_class_fq()) {
+            null -> exec("jar", "cf", "out.jar", "-C", compiled_dir, ".")
+            else -> exec("jar", "cfe", "out.jar", main_class_fq, "-C", compiled_dir, ".")
+        }
+        if (exit_code != 0) err("Failed")
+    }
+
+    fun release_fat(module: Module) {
+        val start_time = System.nanoTime()
+        val main_class_fq = module.main_src()!!.main_class_fq()
+        val target_dir = path(module.target)
+        val fat_jar_file = target_dir.resolve("fat.jar").toFile()
+        val added_entries = mutableSetOf<String>()
+        JarOutputStream(FileOutputStream(fat_jar_file)).use { jar ->
+            val manifest = Manifest().apply {
+                mainAttributes.put(Attributes.Name.MANIFEST_VERSION, "1.0")
+                mainAttributes.put(Attributes.Name.MAIN_CLASS, main_class_fq)
+            }
+            JarOutputStream(FileOutputStream(fat_jar_file), manifest).use { jar_stream ->
+                fun addFile(file: File, baseDir: File) {
+                    val entry_name = baseDir.toPath().relativize(file.toPath()).toString().replace("\\", "/")
+                    if (added_entries.add(entry_name)) {
+                        jar_stream.putNextEntry(JarEntry(entry_name))
+                        file.inputStream().use { it.copyTo(jar_stream) }
+                        jar_stream.closeEntry()
+                    }
+                }
+                target_dir.toFile().walkTopDown()
+                    .filter { it.isFile && it.extension == "class" }
+                    .forEach { addFile(it, target_dir.toFile()) }
+                module.libs.forEach { lib ->
+                    if (lib.jar_file.exists()) {
+                        java.util.zip.ZipFile(lib.jar_file).use { zip ->
+                            zip.entries().asSequence().forEach { entry ->
+                                val name = entry.name
+                                if (name.startsWith("META-INF/")) return@forEach
+                                if (added_entries.add(name)) {
+                                    jar_stream.putNextEntry(JarEntry(name))
+                                    zip.getInputStream(entry).use { it.copyTo(jar_stream) }
+                                    jar_stream.closeEntry()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun exec(vararg cmd: String) {
+        if (opts.verbose) info(cmd.joinToString(" "))
+        exit_code = java.lang.ProcessBuilder(*cmd).inheritIO().start().waitFor()
+    }
+
+    fun exit(code: Int = exit_code): Unit = System.exit(code)
+
+    private fun compile_with_daemon(src: File, target: Path, classpath: String, name: String, retries: Int = 3) {
+        val kotlin_libs = listOf(
+            "kotlin-stdlib.jar",
+            "kotlin-compiler.jar",
+            "kotlin-daemon.jar",
+            "kotlin-daemon-client.jar",
+        ).joinToString(File.pathSeparator) {
+            opts.kotlin_home.resolve(it).toAbsolutePath().normalize().toString()
+        }
+        val args = buildList {
+            add("-d")
+            add(target.toString())
+            add("-jvm-target")
+            add(opts.jvm_version.toString())
+        }
+        val client_alive_file = target.resolve(".alive").toFile().apply { if (!exists()) createNewFile() }
+        val daemon_reports = arrayListOf<DaemonReportMessage>()
+        val compiler_id = Files.list(opts.kotlin_home).filter { it.toString().endsWith(".jar") }.map { it.toFile() }.toList()
+        val daemon = KotlinCompilerClient.connectToCompileService(
+            compilerId = CompilerId.makeCompilerId(compiler_id),
+            clientAliveFlagFile = client_alive_file,
+            daemonJVMOptions = DaemonJVMOptions(),
+            daemonOptions = DaemonOptions(verbose = opts.verbose),
+            reportingTargets = DaemonReportingTargets(out = if (opts.verbose) System.out else null, messages = daemon_reports),
+            autostart = true,
+        ) ?: error("unable to connect")
+        try {
+            val session_id = daemon.leaseCompileSession(client_alive_file.absolutePath).get()
+            try {
+                exit_code = KotlinCompilerClient.compile(
+                    compilerService = daemon,
+                    sessionId = session_id,
+                    targetPlatform = CompileService.TargetPlatform.JVM,
+                    args = args.toTypedArray(),
+                    messageCollector = PrintingMessageCollector(System.err, MessageRenderer.PLAIN_FULL_PATHS, true),
+                    compilerMode = CompilerMode.NON_INCREMENTAL_COMPILER,
+                    reportSeverity = ReportSeverity.INFO,
+                )
+            } finally {
+                daemon.releaseCompileSession(session_id)
+            }
+        } catch (e: IllegalStateException) {
+            daemon.shutdown()
+            Thread.sleep(1000)
+            if (retries > 0) compile_with_daemon(src, target, classpath, name, retries-1)
+            else throw e
+            return
+        }
+    }
+
+    private fun rebuild_urself(module: Module, args: Array<String>) {
+        if (compile(module)) {
+            if (exit_code != 0) exit()
+            java.lang.ProcessBuilder("java", "-cp", "cp", "nob.NobKt", *args).inheritIO().start()
+            exit(0)
+        }
+    }
+
+    private fun get_any_compiled_file(dir: File): File? {
+        return when {
+            dir.isFile -> dir
+            dir.isDirectory -> dir.walkTopDown().firstOrNull { it.isFile && it.extension == "class" }
+            else -> null
+        }
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for Nob class skeleton, got %d", (int)r.error_count);
+	};
+}
+
+// ── Vararg parameter ───────────────────────────────────────────────
+
+fn void parse_fun_with_vararg_param() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun exec(vararg cmd: String) {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		assert(fun_node.kind == FUN_DECL);
+		assert(fun_node.name == "exec");
+		assert(r.error_count == 0, "expected no errors for vararg param, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_fun_with_crossinline_param() @test {
+	@pool() {
+		ParseResult* r = do_parse("inline fun run(crossinline block: () -> Unit) {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		assert(fun_node.kind == FUN_DECL);
+		assert(fun_node.name == "run");
+		assert(r.error_count == 0, "expected no errors for crossinline param, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_fun_with_noinline_param() @test {
+	@pool() {
+		ParseResult* r = do_parse("inline fun run(noinline block: () -> Unit) {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		assert(fun_node.kind == FUN_DECL);
+		assert(fun_node.name == "run");
+		assert(r.error_count == 0, "expected no errors for noinline param, got %d", (int)r.error_count);
+	};
+}
+
+// ── Expression body with .get()/.set() ─────────────────────────────
+
+fn void parse_expression_body_dot_get_not_accessor() @test {
+	@pool() {
+		ParseResult* r = do_parse(`val cache = Paths.get("home", ".cache").also { it.toFile().mkdirs() }`); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for .get() in expression body, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expression_body_dot_set_not_accessor() @test {
+	@pool() {
+		ParseResult* r = do_parse(`val x = map.set("key", "value")`); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for .set() in expression body, got %d", (int)r.error_count);
+	};
+}
+
 // ── Function type with receiver ────────────────────────────────────
 
 fn void parse_fun_with_receiver_type_param() @test {
@@ -833,5 +1175,50 @@ fn void parse_fun_with_nullable_receiver_function_type() @test {
 		assert(fun_node.kind == FUN_DECL);
 		assert(fun_node.name == "apply");
 		assert(r.error_count == 0, "expected no errors for nullable receiver function type, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_data_class_with_primary_constructor_defaults() @test {
+	@pool() {
+		String content =
+`data class Opts(
+    var jvm_version: Int = 21,
+    var kotlin_version: String = "2.2.21",
+    var kotlin_home: Path = Paths.get(System.getenv("KOTLIN_LIB")),
+    var backend_threads: Int = 0,
+    var verbose: Boolean = false,
+    var error: Boolean = true,
+    var extra: Boolean = false,
+    var debug: Boolean = false,
+)`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for data class with defaults, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_multiline_expression_body_chain() @test {
+	@pool() {
+		String content =
+`fun Nob.main_srcs(): Sequence<Path> = mods.map { path(it.src) }.asSequence()
+    .flatMap { Files.walk(it).asSequence() }
+    .filter { Files.isRegularFile(it) && it.toFile().readText().contains("fun main(") }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for multiline chain, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_top_level_fun_path_with_get_also() @test {
+	@pool() {
+		String content =
+`fun Path.main_class_fq(): String {
+    val pkg = this.toFile().useLines { lines -> lines.firstOrNull { it.trim().startsWith("package ") } }
+    val main = this.fileName.toString().removeSuffix(".kt").replaceFirstChar{ it.uppercase() } + "Kt"
+    return pkg?.let { "${'$'}pkg.${'$'}main" } ?: main
+}
+
+fun List<Path>.into_cp(): String = joinToString(File.pathSeparator) { it.toAbsolutePath().normalize().toString() }
+fun path(str: String): Path = Paths.get(System.getProperty("user.dir"), str).also { it.toFile().mkdirs() }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for path/get/also funs, got %d", (int)r.error_count);
 	};
 }

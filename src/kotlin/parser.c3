@@ -811,7 +811,21 @@ fn void Parser.parse_primary_constructor(Parser* self) {
 // ── Parameter ──────────────────────────────────────────────────────
 
 fn void Parser.parse_param(Parser* self) {
-	self.parse_param_with_mods(ast::MOD_NONE);
+	// Consume parameter-level modifiers: vararg, crossinline, noinline
+	uint mods = ast::MOD_NONE;
+	while (self.at(KW_VARARG) || self.at(KW_CROSSINLINE) || self.at(KW_NOINLINE)) {
+		if (self.at(KW_VARARG)) {
+			mods |= ast::MOD_VARARG;
+			self.advance();
+		} else if (self.at(KW_CROSSINLINE)) {
+			mods |= ast::MOD_CROSSINLINE;
+			self.advance();
+		} else if (self.at(KW_NOINLINE)) {
+			mods |= ast::MOD_NOINLINE;
+			self.advance();
+		}
+	}
+	self.parse_param_with_mods(mods);
 }
 
 fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
@@ -1188,8 +1202,14 @@ fn void Parser.skip_expression_body(Parser* self) {
 				self.advance();
 				return;
 			}
-			// Property accessors at depth 0 end the expression
-			if (self.at(KW_GET) || self.at(KW_SET)) return;
+			// Property accessors at depth 0 end the expression,
+			// but only if NOT preceded by '.' or '?.' (member access).
+			// Paths.get(...) uses 'get' as a method name, not an accessor.
+			if (self.at(KW_GET) || self.at(KW_SET)) {
+				if (self.previous.kind != DOT && self.previous.kind != SAFE_CALL) {
+					return;
+				}
+			}
 		}
 
 		self.advance();
