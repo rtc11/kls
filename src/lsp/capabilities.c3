@@ -28,8 +28,10 @@ fn Object* build_capabilities() {
 	completion_opts.set("triggerCharacters", trigger_chars);
 	caps.set("completionProvider", completion_opts);
 
+	// Go to definition support
+	caps.set("definitionProvider", true);
+
 	// TODO: Add more capabilities as features are implemented:
-	// caps.set("definitionProvider", true);
 	// caps.set("documentSymbolProvider", true);
 	// caps.set("semanticTokensProvider", build_semantic_tokens_options());
 
