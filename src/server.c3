@@ -10,6 +10,7 @@ import kls::lsp::sync;
 import kls::lsp::hover;
 import kls::lsp::completion;
 import kls::lsp::definition;
+import kls::lsp::document_symbols;
 
 struct Server {
 	bool is_running;
@@ -120,6 +121,12 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/definition":
 			if (params != null) {
 				Object* result = definition::handle_definition(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/documentSymbol":
+			if (params != null) {
+				Object* result = document_symbols::handle_document_symbol(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			}
 

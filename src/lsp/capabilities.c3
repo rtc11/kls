@@ -31,8 +31,10 @@ fn Object* build_capabilities() {
 	// Go to definition support
 	caps.set("definitionProvider", true);
 
+	// Document symbol support (outline view)
+	caps.set("documentSymbolProvider", true);
+
 	// TODO: Add more capabilities as features are implemented:
-	// caps.set("documentSymbolProvider", true);
 	// caps.set("semanticTokensProvider", build_semantic_tokens_options());
 
 	return caps;
