@@ -15,12 +15,15 @@ import kls::lsp::document_highlight;
 import kls::lsp::document_symbols;
 import kls::lsp::signature_help;
 import kls::lsp::semantic_tokens;
+import kls::lsp::workspace_symbols;
+import kls::workspace;
 
 struct Server {
 	bool is_running;
 	bool is_initialized;
 	bool is_shutdown;
 	DocumentStore documents;
+	WorkspaceIndex workspace;
 }
 
 fn void Server.init(Server* self) {
@@ -28,6 +31,7 @@ fn void Server.init(Server* self) {
 	self.is_initialized = false;
 	self.is_shutdown = false;
 	self.documents.init();
+	self.workspace.init();
 }
 
 fn void Server.run(Server* self) {
@@ -80,12 +84,13 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 	switch (method) {
 		case "initialize":
-			Object* result = lifecycle::handle_initialize(params);
+			Object* result = lifecycle::handle_initialize(params, &self.workspace);
 			json_rpc::send_response(request_id, result);
 			self.is_initialized = true;
 
 		case "initialized":
 			io::eprintfn("[kls] Client initialized");
+			self.workspace.scan_workspace();
 
 		case "shutdown":
 			Object* result = lifecycle::handle_shutdown();
@@ -97,12 +102,12 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "textDocument/didOpen":
 			if (params != null) {
-				sync::handle_did_open(&self.documents, params);
+				sync::handle_did_open(&self.documents, &self.workspace, params);
 			}
 
 		case "textDocument/didChange":
 			if (params != null) {
-				sync::handle_did_change(&self.documents, params);
+				sync::handle_did_change(&self.documents, &self.workspace, params);
 			}
 
 		case "textDocument/didClose":
@@ -112,7 +117,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "textDocument/hover":
 			if (params != null) {
-				Object* result = hover::handle_hover(&self.documents, params);
+				Object* result = hover::handle_hover(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			}
 
@@ -124,19 +129,19 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "textDocument/completion":
 			if (params != null) {
-				Object* result = completion::handle_completion(&self.documents, params);
+				Object* result = completion::handle_completion(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			}
 
 		case "textDocument/definition":
 			if (params != null) {
-				Object* result = definition::handle_definition(&self.documents, params);
+				Object* result = definition::handle_definition(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			}
 
 		case "textDocument/references":
 			if (params != null) {
-				Object* result = references::handle_references(&self.documents, params);
+				Object* result = references::handle_references(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			}
 
@@ -158,10 +163,60 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				json_rpc::send_response(request_id, result);
 			}
 
+		case "workspace/didChangeWatchedFiles":
+			if (params != null) {
+				handle_did_change_watched_files(&self.workspace, params);
+			}
+
+		case "workspace/symbol":
+			if (params != null) {
+				Object* result = workspace_symbols::handle_workspace_symbol(&self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			}
+
 		default:
 			io::eprintfn("[kls] Unknown method: %s", method);
 			if (is_request) {
 				json_rpc::send_error_response(request_id, json_rpc::METHOD_NOT_FOUND, "Method not found");
 			}
+	}
+}
+
+// ── workspace/didChangeWatchedFiles handler ────────────────────────
+
+// FileChangeType constants (LSP spec)
+const int FILE_CHANGE_CREATED = 1;
+const int FILE_CHANGE_CHANGED = 2;
+const int FILE_CHANGE_DELETED = 3;
+
+fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* params) {
+	Object* changes = params.get("changes") ?? null;
+	if (changes == null) return;
+
+	for (sz i = 0; i < changes.get_len(); i++) {
+		Object* event = changes.get_at(i);
+		String uri = event.get_string("uri") ?? "";
+		int change_type = event.get_int("type") ?? 0;
+
+		if (uri.len == 0) continue;
+
+		switch (change_type) {
+			case FILE_CHANGE_CREATED:
+			case FILE_CHANGE_CHANGED:
+				// Read file from disk and re-index
+				String file_path = workspace::uri_to_path(uri);
+				if (try content = workspace::read_file_content(file_path)) {
+					workspace.index_file(uri, content);
+					mem::free(content.ptr);
+					io::eprintfn("[kls] Re-indexed: %s", uri);
+				}
+
+			case FILE_CHANGE_DELETED:
+				workspace.remove_file(uri);
+				io::eprintfn("[kls] Removed from index: %s", uri);
+
+			default:
+				break;
+		}
 	}
 }

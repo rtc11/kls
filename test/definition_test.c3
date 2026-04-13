@@ -33,7 +33,7 @@ fn void definition_of_function_call() @test {
 
 		// Cursor on "greet" in the call at line 1, col 13
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 
@@ -62,7 +62,7 @@ fn void definition_of_variable() @test {
 
 		// Cursor on "x" at line 1, col 8
 		Object* params = make_params("file:///test.kt", 1, 8);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -87,7 +87,7 @@ fn void definition_of_class() @test {
 
 		// Cursor on "Foo" at line 1, col 18 (the constructor call)
 		Object* params = make_params("file:///test.kt", 1, 18);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -111,7 +111,7 @@ fn void definition_on_keyword_returns_null() @test {
 
 		// Cursor on "fun" keyword at col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -130,7 +130,7 @@ fn void definition_no_declaration_returns_null() @test {
 
 		// Cursor on "unknown" at col 21
 		Object* params = make_params("file:///test.kt", 0, 21);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result == null, "expected null when no declaration found");
 	};
@@ -145,7 +145,7 @@ fn void definition_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -164,7 +164,7 @@ fn void definition_on_declaration_itself() @test {
 
 		// Cursor on "foo" at col 4 -- the declaration itself
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location even on declaration itself");
 		Object* range = result.get("range")!!;
@@ -187,7 +187,7 @@ fn void definition_range_covers_name() @test {
 
 		// Cursor on "MyWidget" at line 1, col 19
 		Object* params = make_params("file:///test.kt", 1, 19);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -215,7 +215,7 @@ fn void definition_finds_first_match() @test {
 
 		// Cursor on "doWork" call at line 2
 		Object* params = make_params("file:///test.kt", 2, 14);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -237,7 +237,7 @@ fn void definition_on_whitespace() @test {
 
 		// Cursor on space between "fun" and "foo" (col 3)
 		Object* params = make_params("file:///test.kt", 0, 3);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result == null, "expected null on whitespace");
 	};
@@ -264,7 +264,7 @@ fun module(block: Int): Int {
 
 		// Cursor on "module" in "nob.module {" at line 0, col 18
 		Object* params = make_params("file:///test.kt", 0, 18);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -286,7 +286,7 @@ fn void definition_prefers_function_with_paren_call() @test {
 
 		// Cursor on "greet" in "greet("hi")" at line 2, col 13
 		Object* params = make_params("file:///test.kt", 2, 13);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -310,7 +310,7 @@ fn void definition_non_call_context_returns_first_match() @test {
 		// Cursor on "module" in "val x = module" at line 2
 		// "val x = module }" -- "module" starts at col 21
 		Object* params = make_params("file:///test.kt", 2, 21);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location result");
 		Object* range = result.get("range")!!;
@@ -344,7 +344,7 @@ fun main() {
 
 		// Cursor on "module" in "nob.module { }" at line 7, col 8
 		Object* params = make_params("file:///test.kt", 7, 8);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location for member function");
 		Object* range = result.get("range")!!;
@@ -381,7 +381,7 @@ fun main() {
 
 		// Cursor on "new" in "Nob.new(42)" at line 8, col 18
 		Object* params = make_params("file:///test.kt", 8, 18);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location for companion fun");
 		Object* range = result.get("range")!!;
@@ -414,7 +414,7 @@ fun main() {
 
 		// Cursor on "doWork" in "i.doWork()" at line 7, col 6
 		Object* params = make_params("file:///test.kt", 7, 6);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected a Location for nested member");
 		Object* range = result.get("range")!!;
@@ -442,7 +442,7 @@ fn void definition_of_local_val() @test {
 
 		// Cursor on "result" in "println(result)" at line 2, col 12
 		Object* params = make_params("file:///test.kt", 2, 12);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for local val");
 		Object* range = result.get("range")!!;
@@ -471,7 +471,7 @@ fn void definition_of_local_var() @test {
 
 		// Cursor on "count" in "println(count)" at line 3, col 12
 		Object* params = make_params("file:///test.kt", 3, 12);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for local var");
 		Object* range = result.get("range")!!;
@@ -500,7 +500,7 @@ fn void definition_of_function_param() @test {
 
 		// Cursor on "name" in "println(name)" at line 1, col 12
 		Object* params = make_params("file:///test.kt", 1, 12);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for function param");
 		Object* range = result.get("range")!!;
@@ -531,7 +531,7 @@ fn void definition_of_for_loop_variable() @test {
 
 		// Cursor on "item" in "println(item)" at line 2, col 16
 		Object* params = make_params("file:///test.kt", 2, 16);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for for-loop variable");
 		Object* range = result.get("range")!!;
@@ -564,7 +564,7 @@ fn void definition_of_catch_param() @test {
 
 		// Cursor on "e" in "println(e)" at line 4, col 16
 		Object* params = make_params("file:///test.kt", 4, 16);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for catch parameter");
 		Object* range = result.get("range")!!;
@@ -593,7 +593,7 @@ fun process() {
 
 		// Cursor on "name" in "println(name)" at line 3, col 12
 		Object* params = make_params("file:///test.kt", 3, 12);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for shadowed local val");
 		Object* range = result.get("range")!!;
@@ -621,7 +621,7 @@ fn void definition_local_var_in_binary_expr() @test {
 
 		// Cursor on "base" in "base + 5" at line 2, col 17
 		Object* params = make_params("file:///test.kt", 2, 17);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for local val 'base'");
 		Object* range = result.get("range")!!;
@@ -649,7 +649,7 @@ fun main() {
 
 		// Cursor on "process" in the call at line 2, col 4
 		Object* params = make_params("file:///test.kt", 2, 4);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for 'process' function");
 		Object* range = result.get("range")!!;
@@ -674,7 +674,7 @@ fn void definition_local_var_in_member_chain() @test {
 
 		// Cursor on "items" in "items.map { it * 2 }" at line 2, col 4
 		Object* params = make_params("file:///test.kt", 2, 4);
-		Object* result = definition::handle_definition(&store, params);
+		Object* result = definition::handle_definition(&store, null, params);
 
 		assert(result != null, "expected Location for local val 'items'");
 		Object* range = result.get("range")!!;

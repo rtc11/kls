@@ -1,14 +1,24 @@
 module kls::lsp::completion;
 
 import std::io;
+import std::collections;
 import std::collections::object;
 import kls::document;
 import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
+import kls::kotlin::symbols;
+import kls::workspace;
 
 // LSP CompletionItemKind constants
+const int COMPLETION_KIND_METHOD = 2;
+const int COMPLETION_KIND_FUNCTION = 3;
+const int COMPLETION_KIND_FIELD = 5;
 const int COMPLETION_KIND_VARIABLE = 6;
+const int COMPLETION_KIND_CLASS = 7;
+const int COMPLETION_KIND_INTERFACE = 8;
+const int COMPLETION_KIND_MODULE = 9;
+const int COMPLETION_KIND_PROPERTY = 10;
 const int COMPLETION_KIND_KEYWORD = 14;
 
 // All Kotlin keywords for completion (hard + soft + property/accessor)
@@ -35,9 +45,10 @@ const String[] KOTLIN_KEYWORDS = {
 
 /**
  * Handle textDocument/completion request.
- * Returns a CompletionList JSON object with keyword and identifier completions.
+ * Returns a CompletionList JSON object with keyword, identifier, and
+ * workspace completions.
  */
-fn Object* handle_completion(DocumentStore* store, Object* params) {
+fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
 	String uri = td.get_string("uri")!!;
 
@@ -60,6 +71,11 @@ fn Object* handle_completion(DocumentStore* store, Object* params) {
 
 	// Add identifier completions from the document
 	add_identifier_completions(items, doc.content, prefix);
+
+	// Add workspace completions from other files
+	if (workspace != null) {
+		add_workspace_completions(items, workspace, prefix, uri);
+	}
 
 	// Build CompletionList
 	Object* result = object::new_obj(tmem);
@@ -183,4 +199,76 @@ fn Object* build_empty_completion_list() {
 	result.set("isIncomplete", false);
 	result.set("items", items);
 	return result;
+}
+
+// ── Workspace completions ─────────────────────────────────────────
+
+/**
+ * Add completion items from the workspace index for symbols matching
+ * the given prefix. Skips symbols from the current document (already
+ * covered by identifier completions) and deduplicates by name.
+ */
+fn void add_workspace_completions(Object* items, WorkspaceIndex* workspace, String prefix, String current_uri) {
+	// Track seen names to avoid duplicates (also dedup against local items)
+	String[256] seen_buf;
+	usz seen_count = 0;
+
+	// Collect names already in items to avoid workspace dupes
+	for (usz i = 0; i < items.get_len() && seen_count < 256; i++) {
+		Object* item = items.get_at(i);
+		if (try label = item.get_string("label")) {
+			seen_buf[seen_count] = label;
+			seen_count++;
+		}
+	}
+
+	for (usz i = 0; i < workspace.symbols.len(); i++) {
+		WorkspaceSymbol* sym = &workspace.symbols[i];
+		if (sym.name.len == 0) continue;
+
+		// Skip symbols from current document
+		if (sym.uri == current_uri) continue;
+
+		// Filter by prefix
+		if (prefix.len > 0 && !sym.name.starts_with(prefix)) continue;
+
+		// Skip exact matches
+		if (prefix.len > 0 && sym.name == prefix) continue;
+
+		// Dedup check
+		bool already_seen = false;
+		for (usz j = 0; j < seen_count; j++) {
+			if (seen_buf[j] == sym.name) {
+				already_seen = true;
+				break;
+			}
+		}
+		if (already_seen) continue;
+
+		if (seen_count < 256) {
+			seen_buf[seen_count] = sym.name;
+			seen_count++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", sym.name);
+		item.set("kind", symbol_kind_to_completion_kind(sym.kind));
+		// Detail shows file origin
+		item.set("detail", sym.uri);
+		items.push(item);
+	}
+}
+
+/**
+ * Map a workspace SymbolKind to an LSP CompletionItemKind.
+ */
+fn int symbol_kind_to_completion_kind(SymbolKind kind) {
+	switch (kind) {
+		case FUNCTION:  return COMPLETION_KIND_FUNCTION;
+		case CLASS:     return COMPLETION_KIND_CLASS;
+		case INTERFACE: return COMPLETION_KIND_INTERFACE;
+		case OBJECT:    return COMPLETION_KIND_MODULE;
+		case PROPERTY:  return COMPLETION_KIND_PROPERTY;
+		case TYPEALIAS: return COMPLETION_KIND_CLASS;
+	}
 }

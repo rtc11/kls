@@ -1,20 +1,25 @@
 module kls::lsp::hover;
 
 import std::io;
+import std::io::file;
+import std::collections;
 import std::collections::object;
 import kls::json_rpc;
 import kls::document;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::kotlin::parser;
+import kls::workspace;
 
 faultdef NO_TOKEN, NO_DESCRIPTION;
 
 /**
  * Handle textDocument/hover request.
  * Returns a Hover JSON object, or null if there is nothing to show.
+ * Falls back to workspace index for cross-file identifiers.
  */
-fn Object* handle_hover(DocumentStore* store, Object* params) {
+fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
 	String uri = td.get_string("uri")!!;
 
@@ -42,6 +47,13 @@ fn Object* handle_hover(DocumentStore* store, Object* params) {
 		ParseResult* pr = store.get_ast(uri) ?? null;
 		if (pr != null) {
 			if (try desc = describe_identifier_from_ast(pr, tok)) {
+				description = desc;
+				found_description = true;
+			}
+		}
+		// Cross-file fallback: look up in workspace index
+		if (!found_description && workspace != null) {
+			if (try desc = describe_identifier_from_workspace(workspace, store, tok, uri)) {
 				description = desc;
 				found_description = true;
 			}
@@ -453,4 +465,114 @@ fn String? describe_token(Token tok) {
 		default:
 			return NO_DESCRIPTION~;
 	}
+}
+
+// ── Cross-file hover ──────────────────────────────────────────────
+
+/**
+ * Look up an identifier in the workspace index and try to produce a
+ * rich signature. First tries parsing the target file for an AST-based
+ * signature; falls back to a basic description from the workspace symbol.
+ */
+fn String? describe_identifier_from_workspace(WorkspaceIndex* workspace, DocumentStore* store, Token tok, String current_uri) {
+	String target = tok.text;
+
+	if (try indices = workspace.lookup_by_name(target)) {
+		// Find best match (skip same-file symbols)
+		WorkspaceSymbol* best = null;
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.name.len == 0) continue;
+			if (sym.uri == current_uri) continue;
+			best = sym;
+			break;
+		}
+
+		if (best == null) return NO_DESCRIPTION~;
+
+		// Try to get rich signature by parsing the target file
+		if (try desc = describe_from_file(best, store)) {
+			return desc;
+		}
+
+		// Fall back to basic workspace symbol info
+		return describe_workspace_symbol(best);
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Try to parse the target file and extract a rich signature for the symbol.
+ * Checks open documents first, falls back to reading from disk.
+ */
+fn String? describe_from_file(WorkspaceSymbol* sym, DocumentStore* store) {
+	String content;
+	bool from_disk = false;
+	char[] disk_data;
+
+	// Check if file is open in document store
+	if (try doc = store.get(sym.uri)) {
+		content = doc.content;
+	} else {
+		// Read from disk
+		String file_path = workspace::uri_to_path(sym.uri);
+		if (try d = file::load(tmem, file_path)) {
+			disk_data = d;
+			content = (String)disk_data;
+		} else {
+			return NO_DESCRIPTION~;
+		}
+	}
+
+	// Parse the content and find the declaration
+	ParseResult* pr = mem::new(ParseResult);
+	defer mem::free(pr);
+	parser::parse(content, pr);
+	if (pr.node_count == 0) return NO_DESCRIPTION~;
+
+	// Find the declaration node matching the symbol
+	for (usz i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind)) continue;
+		if (n.name != sym.name) continue;
+		if (n.name_line == sym.line && n.name_col == sym.col) {
+			return build_signature(n, pr);
+		}
+	}
+
+	// If exact position match failed, try first name match
+	for (usz i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind)) continue;
+		if (n.name != sym.name) continue;
+		return build_signature(n, pr);
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Build a basic hover description from a workspace symbol (no AST).
+ */
+fn String describe_workspace_symbol(WorkspaceSymbol* sym) {
+	DString ds;
+	ds.tinit();
+
+	ds.appendf("```kotlin\n");
+	switch (sym.kind) {
+		case FUNCTION:  ds.appendf("fun %s(...)", sym.name);
+		case CLASS:     ds.appendf("class %s", sym.name);
+		case INTERFACE: ds.appendf("interface %s", sym.name);
+		case OBJECT:    ds.appendf("object %s", sym.name);
+		case PROPERTY:  ds.appendf("val %s", sym.name);
+		case TYPEALIAS: ds.appendf("typealias %s", sym.name);
+	}
+	ds.appendf("\n```");
+
+	if (sym.package_name.len > 0) {
+		ds.appendf("\n\n*%s*", sym.package_name);
+	}
+
+	return ds.str_view();
 }

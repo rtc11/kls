@@ -3,13 +3,15 @@ module kls::lsp::sync;
 import std::io;
 import std::collections::object;
 import kls::document;
+import kls::workspace;
 import kls::lsp::diagnostics;
 
 /**
  * Handle textDocument/didOpen notification.
  * Stores the document content in the document store.
+ * Also updates the workspace index with the latest symbols.
  */
-fn void handle_did_open(DocumentStore* store, Object* params) {
+fn void handle_did_open(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
 
 	String uri = td.get_string("uri")!!;
@@ -19,14 +21,16 @@ fn void handle_did_open(DocumentStore* store, Object* params) {
 
 	io::eprintfn("[kls] Document opened: %s (lang=%s, v=%d)", uri, language_id, version);
 	store.open(uri, language_id, version, text);
+	workspace.index_file(uri, text);
 	diagnostics::publish_diagnostics(store, uri);
 }
 
 /**
  * Handle textDocument/didChange notification.
  * Updates the document content (full sync mode).
+ * Also updates the workspace index with the latest symbols.
  */
-fn void handle_did_change(DocumentStore* store, Object* params) {
+fn void handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
 
 	String uri = td.get_string("uri")!!;
@@ -39,12 +43,15 @@ fn void handle_did_change(DocumentStore* store, Object* params) {
 
 	io::eprintfn("[kls] Document changed: %s (v=%d, len=%d)", uri, version, text.len);
 	store.update(uri, version, text);
+	workspace.index_file(uri, text);
 	diagnostics::publish_diagnostics(store, uri);
 }
 
 /**
  * Handle textDocument/didClose notification.
  * Removes the document from the store.
+ * Note: We do NOT remove from workspace index -- the file still exists on disk.
+ * The workspace index retains the last-known symbols for cross-file features.
  */
 fn void handle_did_close(DocumentStore* store, Object* params) {
 	Object* td = params.get("textDocument")!!;

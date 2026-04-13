@@ -1,12 +1,14 @@
 module kls::lsp::definition;
 
 import std::io;
+import std::collections;
 import std::collections::object;
 import kls::document;
 import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::workspace;
 
 /**
  * Handle textDocument/definition request.
@@ -15,9 +17,9 @@ import kls::kotlin::ast;
  *
  * Uses the parser AST for scope-aware lookup: searches from the
  * innermost scope containing the cursor outward.
- * Only resolves definitions within the same document (no cross-file).
+ * Falls back to workspace index for cross-file definitions.
  */
-fn Object* handle_definition(DocumentStore* store, Object* params) {
+fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
 	String uri = td.get_string("uri")!!;
 
@@ -57,6 +59,13 @@ fn Object* handle_definition(DocumentStore* store, Object* params) {
 	// Find definition using scope-aware AST search
 	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
 		return build_location_from_node(uri, node);
+	}
+
+	// ── Cross-file fallback via workspace index ──────────────────
+	if (workspace != null) {
+		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri)) {
+			return result;
+		}
 	}
 
 	return null;
@@ -236,4 +245,69 @@ fn bool is_call_context_ast(ParseResult* pr, uint offset) {
 		}
 	}
 	return false;
+}
+
+// ── Cross-file definition lookup ──────────────────────────────────
+
+faultdef NOT_FOUND_IN_WORKSPACE;
+
+/**
+ * Look up a definition in the workspace index. Searches all indexed files
+ * for a symbol matching the target name. In call context, prefers FUNCTION
+ * kind. Skips symbols from the current document (already searched via AST).
+ */
+fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String target_name, bool is_call, String current_uri) {
+	List{usz}* indices = workspace.lookup_by_name(target_name)!;
+
+	WorkspaceSymbol* first_match = null;
+	WorkspaceSymbol* func_match = null;
+
+	for (usz i = 0; i < indices.len(); i++) {
+		WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+		if (sym.name.len == 0) continue;
+
+		// Skip symbols from the current file (already checked via AST)
+		if (sym.uri == current_uri) continue;
+
+		if (first_match == null) {
+			first_match = sym;
+		}
+		if (func_match == null && sym.kind == FUNCTION) {
+			func_match = sym;
+		}
+	}
+
+	WorkspaceSymbol* chosen = null;
+	if (is_call && func_match != null) {
+		chosen = func_match;
+	} else if (first_match != null) {
+		chosen = first_match;
+	}
+
+	if (chosen == null) return NOT_FOUND_IN_WORKSPACE~;
+
+	return build_location_from_workspace_symbol(chosen);
+}
+
+/**
+ * Build an LSP Location object from a workspace symbol.
+ */
+fn Object* build_location_from_workspace_symbol(WorkspaceSymbol* sym) {
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)sym.line);
+	start.set("character", (int)sym.col);
+
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)sym.line);
+	end_pos.set("character", (int)(sym.col + sym.name_len));
+
+	Object* range = object::new_obj(tmem);
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	Object* location = object::new_obj(tmem);
+	location.set("uri", sym.uri);
+	location.set("range", range);
+
+	return location;
 }

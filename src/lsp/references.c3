@@ -1,12 +1,15 @@
 module kls::lsp::references;
 
 import std::io;
+import std::io::file;
+import std::collections;
 import std::collections::object;
 import kls::document;
 import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::workspace;
 
 /**
  * Handle textDocument/references request.
@@ -16,9 +19,9 @@ import kls::kotlin::ast;
  * Scans the lexer token stream for all IDENTIFIER tokens matching the
  * target name. When context.includeDeclaration is false, filters out
  * locations that correspond to AST declaration name positions.
- * Only resolves references within the same document (no cross-file).
+ * Also scans workspace files for cross-file references.
  */
-fn Object* handle_references(DocumentStore* store, Object* params) {
+fn Object* handle_references(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
 	String uri = td.get_string("uri")!!;
 
@@ -80,6 +83,11 @@ fn Object* handle_references(DocumentStore* store, Object* params) {
 		locations.push(location);
 	}
 
+	// ── Cross-file references via workspace index ────────────────
+	if (workspace != null) {
+		add_cross_file_references(locations, workspace, store, target_name, uri);
+	}
+
 	// Return null if no references found
 	if (locations.get_len() == 0) {
 		return null;
@@ -125,4 +133,83 @@ fn Object* build_location(String uri, Token tok) {
 	location.set("range", range);
 
 	return location;
+}
+
+// ── Cross-file reference scanning ─────────────────────────────────
+
+/**
+ * Scan workspace files (other than current_uri) for IDENTIFIER tokens
+ * matching target_name, and add them as Location objects.
+ * Checks the document store first for open files, falls back to disk.
+ */
+fn void add_cross_file_references(Object* locations, WorkspaceIndex* workspace, DocumentStore* store, String target_name, String current_uri) {
+	// First find which files might contain the name via the workspace index.
+	// Collect unique URIs of files that have a symbol matching the name,
+	// then also scan files that don't have declarations but might have usages.
+	// For efficiency, we only scan files that have the target name in their symbols.
+	// This is a heuristic -- a file might reference a name without declaring it.
+	// For a more complete solution we'd need a full-text index, but scanning
+	// all workspace files would be too expensive. We scan files that:
+	// 1. Have a symbol with the target name (likely contains references)
+	// 2. Any file that imports or uses patterns suggesting the name
+
+	// Collect unique URIs that have at least one symbol with this name
+	String[128] uris_to_scan;
+	usz uri_count = 0;
+
+	if (try indices = workspace.lookup_by_name(target_name)) {
+		for (usz i = 0; i < indices.len() && uri_count < 128; i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.name.len == 0) continue;
+			if (sym.uri == current_uri) continue;
+
+			// Dedup URIs
+			bool already_have = false;
+			for (usz j = 0; j < uri_count; j++) {
+				if (uris_to_scan[j] == sym.uri) {
+					already_have = true;
+					break;
+				}
+			}
+			if (!already_have) {
+				uris_to_scan[uri_count] = sym.uri;
+				uri_count++;
+			}
+		}
+	}
+
+	// Scan each file for all IDENTIFIER tokens matching target_name
+	for (usz f = 0; f < uri_count; f++) {
+		String file_uri = uris_to_scan[f];
+
+		// Check if the file is open in the document store first
+		if (try doc = store.get(file_uri)) {
+			scan_file_for_references(locations, file_uri, doc.content, target_name);
+			continue;
+		}
+
+		// Fall back to reading from disk
+		String file_path = workspace::uri_to_path(file_uri);
+		if (try content = workspace::read_file_content(file_path)) {
+			defer mem::free(content.ptr);
+			scan_file_for_references(locations, file_uri, content, target_name);
+		}
+	}
+}
+
+/**
+ * Lex a file's content and add Location objects for every IDENTIFIER
+ * token matching the target name.
+ */
+fn void scan_file_for_references(Object* locations, String uri, String content, String target_name) {
+	Lexer lex = lexer::init(content);
+	while (true) {
+		Token t = lex.next();
+		if (t.kind == EOF) break;
+		if (t.kind != IDENTIFIER) continue;
+		if (t.text != target_name) continue;
+
+		Object* location = build_location(uri, t);
+		locations.push(location);
+	}
 }

@@ -3,12 +3,14 @@ module kls::lsp::lifecycle;
 import std::io;
 import std::collections::object;
 import kls::lsp::capabilities;
+import kls::workspace;
 
 /**
  * Handle the "initialize" request.
  * Returns the InitializeResult with server capabilities.
+ * Extracts rootUri and stores it in the workspace index.
  */
-fn Object* handle_initialize(Object* params) {
+fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 	io::eprintfn("[kls] Handling initialize");
 
 	// Extract client info if available
@@ -16,6 +18,19 @@ fn Object* handle_initialize(Object* params) {
 		if (try client_info = params.get("clientInfo")) {
 			if (try name = client_info.get_string("name")) {
 				io::eprintfn("[kls] Client: %s", name);
+			}
+		}
+
+		// Extract workspace root URI
+		if (try root_uri = params.get_string("rootUri")) {
+			workspace.set_root(root_uri);
+		} else {
+			// Fallback to rootPath (deprecated but still used by some clients)
+			if (try root_path = params.get_string("rootPath")) {
+				DString uri;
+				uri.tinit();
+				uri.appendf("file://%s", root_path);
+				workspace.set_root(uri.str_view());
 			}
 		}
 	}

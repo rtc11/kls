@@ -49,8 +49,28 @@ fn Object* build_capabilities() {
 	// Document symbol support (outline view)
 	caps.set("documentSymbolProvider", true);
 
+	// Workspace symbol support (Ctrl+T search)
+	caps.set("workspaceSymbolProvider", true);
+
 	// Semantic tokens support (full document)
 	caps.set("semanticTokensProvider", semantic_tokens::build_semantic_tokens_options());
+
+	// Workspace capabilities
+	Object* workspace_caps = object::new_obj(tmem);
+	Object* file_operations = object::new_obj(tmem);
+
+	// Register interest in .kt file changes
+	Object* watchers = object::new_obj(tmem);
+	Object* watcher = object::new_obj(tmem);
+	watcher.set("globPattern", "**/*.kt");
+	watcher.set("kind", 7); // Create=1 | Change=2 | Delete=4 = 7 (all)
+	watchers.push(watcher);
+
+	Object* change_reg = object::new_obj(tmem);
+	change_reg.set("watchers", watchers);
+	file_operations.set("didChangeWatchedFiles", change_reg);
+	workspace_caps.set("fileOperations", file_operations);
+	caps.set("workspace", workspace_caps);
 
 	return caps;
 }

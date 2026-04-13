@@ -60,7 +60,7 @@ fn void references_of_function() @test {
 
 		// Cursor on "greet" in the call at line 1, col 13
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		assert(result.get_len() == 2, "expected 2 references, got %d", (int)result.get_len());
@@ -88,7 +88,7 @@ fn void references_of_variable() @test {
 
 		// Cursor on "x" at line 0, col 4 (the declaration)
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		assert(result.get_len() == 2, "expected 2 references, got %d", (int)result.get_len());
@@ -116,7 +116,7 @@ fn void references_of_class() @test {
 
 		// Cursor on "Foo" at line 0, col 6 (declaration)
 		Object* params = make_params("file:///test.kt", 0, 6);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		// "Foo" appears 3 times: class Foo, : Foo, Foo()
@@ -146,7 +146,7 @@ fn void references_exclude_declaration() @test {
 
 		// Cursor on "greet" at line 1, col 13 -- exclude declaration
 		Object* params = make_params("file:///test.kt", 1, 13, false);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		// Only the call site, not the declaration
@@ -168,7 +168,7 @@ fn void references_on_keyword_returns_null() @test {
 
 		// Cursor on "fun" keyword at col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -183,7 +183,7 @@ fn void references_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -201,7 +201,7 @@ fn void references_on_whitespace() @test {
 
 		// Cursor on space at col 3
 		Object* params = make_params("file:///test.kt", 0, 3);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result == null, "expected null on whitespace");
 	};
@@ -220,7 +220,7 @@ fn void references_single_occurrence() @test {
 
 		// Cursor on "uniqueName" at col 4
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		assert(result.get_len() == 1, "expected 1 reference, got %d", (int)result.get_len());
@@ -241,7 +241,7 @@ fn void references_range_covers_name() @test {
 
 		// Cursor on "MyWidget" at line 0, col 6
 		Object* params = make_params("file:///test.kt", 0, 6);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		// All locations should have end_col = start_col + 8 ("MyWidget" length)
@@ -273,7 +273,7 @@ fun main() {
 
 		// Cursor on "doWork" at line 0, col 4 (declaration)
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		// 1 declaration + 3 calls = 4
@@ -298,7 +298,7 @@ fn void references_preserve_uri() @test {
 		store.open("file:///my/file.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///my/file.kt", 0, 4);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		for (usz i = 0; i < result.get_len(); i++) {
@@ -330,7 +330,7 @@ fun main() {
 
 		// Cursor on "bar" at line 1, col 8 (declaration)
 		Object* params = make_params("file:///test.kt", 1, 8);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		// "bar" appears: declaration (line 1), call in baz (line 2), call in main (line 6)
@@ -351,7 +351,7 @@ fn void references_exclude_variable_declaration() @test {
 
 		// Cursor on "counter" at line 1, col 11 -- exclude declaration
 		Object* params = make_params("file:///test.kt", 1, 11, false);
-		Object* result = references::handle_references(&store, params);
+		Object* result = references::handle_references(&store, null, params);
 
 		assert(result != null, "expected references array");
 		// 2 usages only, excluding the declaration

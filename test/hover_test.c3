@@ -280,7 +280,7 @@ fn void hover_function_shows_signature() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet(name: String): String {}");
 		// Hover over "greet" at col 4
 		Object* params = make_hover_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, params);
+		Object* result = hover::handle_hover(&store, null, params);
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -300,7 +300,7 @@ fn void hover_class_shows_signature() @test {
 		store.open("file:///test.kt", "kotlin", 1, "data class User(val name: String)");
 		// Hover over "User" at col 11
 		Object* params = make_hover_params("file:///test.kt", 0, 11);
-		Object* result = hover::handle_hover(&store, params);
+		Object* result = hover::handle_hover(&store, null, params);
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -319,7 +319,7 @@ fn void hover_property_shows_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "val count: Int = 0");
 		// Hover over "count" at col 4
 		Object* params = make_hover_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, params);
+		Object* result = hover::handle_hover(&store, null, params);
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
