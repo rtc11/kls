@@ -424,3 +424,262 @@ fun main() {
 		assert(line == 2, "expected nested fun at line 2, got %d", line);
 	};
 }
+
+// ── Go to definition of local variable ─────────────────────────────
+
+fn void definition_of_local_val() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process() {
+    val result = compute()
+    println(result)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "result" in "println(result)" at line 2, col 12
+		Object* params = make_params("file:///test.kt", 2, 12);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for local val");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		// "val result" -- "result" starts at col 8 on line 1
+		assert(line == 1, "expected local val at line 1, got %d", line);
+		assert(col == 8, "expected local val at col 8, got %d", col);
+	};
+}
+
+fn void definition_of_local_var() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process() {
+    var count = 0
+    count = count + 1
+    println(count)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "count" in "println(count)" at line 3, col 12
+		Object* params = make_params("file:///test.kt", 3, 12);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for local var");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		// "var count" -- "count" starts at col 8 on line 1
+		assert(line == 1, "expected local var at line 1, got %d", line);
+		assert(col == 8, "expected local var at col 8, got %d", col);
+	};
+}
+
+// ── Go to definition of function parameter ─────────────────────────
+
+fn void definition_of_function_param() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun greet(name: String) {
+    println(name)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "name" in "println(name)" at line 1, col 12
+		Object* params = make_params("file:///test.kt", 1, 12);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for function param");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		// "fun greet(name: String)" -- "name" starts at col 10 on line 0
+		assert(line == 0, "expected param at line 0, got %d", line);
+		assert(col == 10, "expected param at col 10, got %d", col);
+	};
+}
+
+// ── Go to definition of for-loop variable ──────────────────────────
+
+fn void definition_of_for_loop_variable() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process(items: List<String>) {
+    for (item in items) {
+        println(item)
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "item" in "println(item)" at line 2, col 16
+		Object* params = make_params("file:///test.kt", 2, 16);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for for-loop variable");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		// "for (item in items)" -- "item" starts at col 9 on line 1
+		assert(line == 1, "expected for-loop var at line 1, got %d", line);
+		assert(col == 9, "expected for-loop var at col 9, got %d", col);
+	};
+}
+
+// ── Go to definition of catch parameter ────────────────────────────
+
+fn void definition_of_catch_param() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println(e)
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "e" in "println(e)" at line 4, col 16
+		Object* params = make_params("file:///test.kt", 4, 16);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for catch parameter");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// "catch (e: Exception)" -- "e" is on line 3
+		assert(line == 3, "expected catch param at line 3, got %d", line);
+	};
+}
+
+// ── Local val shadows top-level val (scope-aware) ──────────────────
+
+fn void definition_local_shadows_top_level() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`val name = "global"
+fun process() {
+    val name = "local"
+    println(name)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "name" in "println(name)" at line 3, col 12
+		Object* params = make_params("file:///test.kt", 3, 12);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for shadowed local val");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should find the LOCAL val on line 2, not the top-level on line 0
+		assert(line == 2, "expected local val at line 2, got %d", line);
+	};
+}
+
+// ── Local variable in expression context ───────────────────────────
+
+fn void definition_local_var_in_binary_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun calculate() {
+    val base = 10
+    val result = base + 5
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "base" in "base + 5" at line 2, col 17
+		Object* params = make_params("file:///test.kt", 2, 17);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for local val 'base'");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		assert(line == 1, "expected line 1 for 'base' decl, got %d", line);
+		assert(col == 8, "expected col 8 for 'base' decl, got %d", col);
+	};
+}
+
+fn void definition_fun_call_with_ast_context() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Function declared, then called with a trailing lambda (no parens)
+		String content =
+`fun process(action: () -> Unit) {}
+fun main() {
+    process { println("hello") }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "process" in the call at line 2, col 4
+		Object* params = make_params("file:///test.kt", 2, 4);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for 'process' function");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 0, "expected line 0 for 'process' decl, got %d", line);
+	};
+}
+
+fn void definition_local_var_in_member_chain() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process() {
+    val items = listOf(1, 2, 3)
+    items.map { it * 2 }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "items" in "items.map { it * 2 }" at line 2, col 4
+		Object* params = make_params("file:///test.kt", 2, 4);
+		Object* result = definition::handle_definition(&store, params);
+
+		assert(result != null, "expected Location for local val 'items'");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 1, "expected line 1 for 'items' decl, got %d", line);
+	};
+}

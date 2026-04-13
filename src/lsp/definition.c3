@@ -45,14 +45,14 @@ fn Object* handle_definition(DocumentStore* store, Object* params) {
 
 	String target_name = tok.text;
 
-	// Detect call context
-	bool is_call = is_call_context(doc.content, tok);
-
 	// Get cached AST (parses lazily if needed)
 	ParseResult* pr = store.get_ast(uri) ?? null;
 	if (pr == null) {
 		return null;
 	}
+
+	// Detect call context: prefer AST-based detection, fall back to lexer
+	bool is_call = is_call_context_ast(pr, tok.offset) || is_call_context(doc.content, tok);
 
 	// Find definition using scope-aware AST search
 	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
@@ -95,7 +95,7 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 		for (usz i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
 			if (n.parent != current) continue;
-			if (!ast::is_declaration(n.kind)) continue;
+			if (!is_definition_target(n.kind)) continue;
 			if (n.name != target_name) continue;
 
 			if (first_match == null) {
@@ -131,7 +131,7 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 
 		for (usz i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
-			if (!ast::is_declaration(n.kind)) continue;
+			if (!is_definition_target(n.kind)) continue;
 			if (n.name != target_name) continue;
 
 			if (first_match == null) {
@@ -163,10 +163,25 @@ fn bool is_scope_node(NodeKind kind) {
 		case INTERFACE_DECL:
 		case OBJECT_DECL:
 		case COMPANION_OBJECT_DECL:
+		case FUN_DECL:
+		case BLOCK:
+		case FOR_STMT:
+		case CATCH_CLAUSE:
+		case LAMBDA_EXPR:
 			return true;
 		default:
 			return false;
 	}
+}
+
+/**
+ * Check if a node kind can be a definition target (declarations + parameters).
+ * Unlike is_declaration(), this also includes PARAM nodes so that function
+ * parameters, for-loop variables, and catch parameters are resolvable.
+ */
+fn bool is_definition_target(NodeKind kind) {
+	if (ast::is_declaration(kind)) return true;
+	return kind == PARAM;
 }
 
 /**
@@ -206,4 +221,19 @@ fn bool is_call_context(String content, Token tok) {
 	Token next = lex.next();
 
 	return next.kind == LPAREN || next.kind == LCURL || next.kind == LANGLE;
+}
+
+/**
+ * AST-based call context detection: check if the identifier at the
+ * given offset is the name of a CALL_EXPR node. This is more reliable
+ * than the lexer-based heuristic for multi-line calls and trailing lambdas.
+ */
+fn bool is_call_context_ast(ParseResult* pr, uint offset) {
+	for (usz i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind == CALL_EXPR && n.name_offset == offset && n.name_len > 0) {
+			return true;
+		}
+	}
+	return false;
 }

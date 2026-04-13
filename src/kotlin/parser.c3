@@ -565,8 +565,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 		self.parse_block();
 	} else if (self.eat(ASSIGNMENT)) {
 		// Expression body: fun foo() = expr
-		// Skip until we hit something that ends the expression
-		self.skip_expression_body();
+		self.parse_expression_body();
 	}
 
 	self.adopt_children(idx, children_start);
@@ -636,7 +635,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 
 	// Initializer: = expression
 	if (self.eat(ASSIGNMENT)) {
-		self.skip_expression_body();
+		self.parse_expression_body();
 	}
 
 	// Property accessors: get() = ..., set(value) { ... }
@@ -647,7 +646,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 
 	// Delegation: by expression
 	if (self.eat(KW_BY)) {
-		self.skip_expression_body();
+		self.parse_expression_body();
 	}
 
 	self.adopt_children(idx, children_start);
@@ -1024,31 +1023,1529 @@ fn void Parser.parse_enum_entries(Parser* self) {
 	self.eat(SEMICOLON);
 }
 
-// ── Opaque block ───────────────────────────────────────────────────
+// ── Block with statement parsing ───────────────────────────────────
 
 /**
- * Parse an opaque block: { ... }
- * Tracks brace nesting to find the matching closing brace.
- * Does not parse the interior -- this is phase 1.
+ * Parse a block: { statements... }
+ * Now parses interior statements to produce child nodes for
+ * local declarations, control flow, etc.
  */
 fn void Parser.parse_block(Parser* self) {
 	usz idx = self.add_node(BLOCK);
 	self.node_start(idx, self.current);
 	self.advance(); // consume '{'
+	usz children_start = self.result.node_count;
 
-	int depth = 1;
-	while (depth > 0 && !self.at_eof()) {
+	while (!self.at(RCURL) && !self.at_eof()) {
+		self.eat(SEMICOLON); // skip optional semicolons between statements
+		if (self.at(RCURL) || self.at_eof()) break;
+
+		// Save position to detect stuck parser
+		uint saved_pos = self.current.offset;
+
+		if (!self.parse_statement()) {
+			// Could not parse a statement -- skip token and try again
+			if (!self.at(RCURL) && !self.at_eof()) {
+				self.advance();
+			}
+		} else if (self.current.offset == saved_pos) {
+			// Statement claimed to parse but didn't advance -- force advance
+			if (!self.at(RCURL) && !self.at_eof()) {
+				self.advance();
+			}
+		}
+	}
+
+	self.expect(RCURL);
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+// ── Statement dispatcher ──────────────────────────────────────────
+
+/**
+ * Try to parse a statement inside a block.
+ * Returns true if something was parsed, false otherwise.
+ */
+fn bool Parser.parse_statement(Parser* self) {
+	switch (self.current.kind) {
+		case KW_VAL:
+			nextcase;
+		case KW_VAR:
+			self.parse_property_decl(ast::MOD_NONE);
+			return true;
+
+		case KW_IF:
+			self.parse_if_expr();
+			return true;
+
+		case KW_WHEN:
+			self.parse_when_expr();
+			return true;
+
+		case KW_FOR:
+			self.parse_for_stmt();
+			return true;
+
+		case KW_WHILE:
+			self.parse_while_stmt();
+			return true;
+
+		case KW_DO:
+			self.parse_do_while_stmt();
+			return true;
+
+		case KW_TRY:
+			self.parse_try_expr();
+			return true;
+
+		case KW_RETURN:
+			self.parse_return_expr();
+			return true;
+
+		case KW_THROW:
+			self.parse_throw_expr();
+			return true;
+
+		case KW_BREAK:
+			self.parse_break_continue(BREAK_EXPR);
+			return true;
+
+		case KW_CONTINUE:
+			self.parse_break_continue(CONTINUE_EXPR);
+			return true;
+
+		default:
+			break;
+	}
+
+	// Check for modifiers + declaration (local fun, local class)
+	if (is_modifier_keyword(self.current.kind) || self.at(AT)) {
+		uint mods = self.parse_modifiers();
+		if (is_declaration_start(self.current.kind)) {
+			return self.parse_declaration(mods);
+		}
+		// Modifiers without a declaration keyword -- probably an expression
+		// starting with a soft keyword used as an identifier. Fall through
+		// to expression statement. But we already consumed the modifiers
+		// as tokens, so we can just try to parse an expression.
+		if (!self.at(RCURL) && !self.at_eof()) {
+			self.parse_expression_statement();
+		}
+		return true;
+	}
+
+	// Declaration without modifiers (local fun, local class, etc.)
+	if (is_declaration_start(self.current.kind)) {
+		return self.parse_declaration(ast::MOD_NONE);
+	}
+
+	// Expression statement
+	return self.parse_expression_statement();
+}
+
+// ── If expression ─────────────────────────────────────────────────
+
+/**
+ * Parse if expression:
+ *   if (condition) block/statement
+ *   if (condition) block/statement else block/statement
+ *   if (condition) block/statement else if (condition) ...
+ */
+fn void Parser.parse_if_expr(Parser* self) {
+	usz idx = self.add_node(IF_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'if'
+	usz children_start = self.result.node_count;
+
+	// Condition: (expr)
+	if (self.at(LPAREN)) {
+		self.skip_balanced_parens();
+	}
+
+	// Then branch: block or single statement
+	if (self.at(LCURL)) {
+		self.parse_block();
+	} else if (!self.at(RCURL) && !self.at_eof()) {
+		// Single-statement then branch -- parse one statement
+		self.parse_statement();
+	}
+
+	// Else branch
+	if (self.eat(KW_ELSE)) {
+		if (self.at(KW_IF)) {
+			// else if -- recursive
+			self.parse_if_expr();
+		} else if (self.at(LCURL)) {
+			self.parse_block();
+		} else if (!self.at(RCURL) && !self.at_eof()) {
+			self.parse_statement();
+		}
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+// ── When expression ───────────────────────────────────────────────
+
+/**
+ * Parse when expression:
+ *   when { conditions -> body, ... }
+ *   when (subject) { conditions -> body, ... }
+ */
+fn void Parser.parse_when_expr(Parser* self) {
+	usz idx = self.add_node(WHEN_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'when'
+	usz children_start = self.result.node_count;
+
+	// Optional subject: (expr)
+	if (self.at(LPAREN)) {
+		self.skip_balanced_parens();
+	}
+
+	// Body: { branches }
+	if (self.at(LCURL)) {
+		self.advance(); // consume '{'
+
+		while (!self.at(RCURL) && !self.at_eof()) {
+			self.eat(SEMICOLON);
+			if (self.at(RCURL)) break;
+
+			uint saved_pos = self.current.offset;
+
+			// Skip condition part(s) until ->
+			self.skip_when_condition();
+
+			// Arrow: ->
+			if (self.eat(ARROW)) {
+				// Branch body: block or statement(s)
+				if (self.at(LCURL)) {
+					self.parse_block();
+				} else if (!self.at(RCURL) && !self.at_eof()) {
+					// Single expression/statement branch
+					self.parse_statement();
+				}
+			}
+
+			// Stuck detection
+			if (self.current.offset == saved_pos) {
+				if (!self.at(RCURL) && !self.at_eof()) {
+					self.advance();
+				}
+			}
+		}
+
+		self.expect(RCURL);
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+/**
+ * Skip the condition part of a when branch until we find ->.
+ * Handles: literals, is/in checks, commas between conditions,
+ * and nested expressions in parens/brackets.
+ */
+fn void Parser.skip_when_condition(Parser* self) {
+	int depth = 0;
+	while (!self.at_eof()) {
 		if (self.at(LCURL)) {
+			if (depth == 0) return; // start of a block, not part of condition
 			depth++;
-		} else if (self.at(RCURL)) {
+			self.advance();
+			continue;
+		}
+		if (self.at(RCURL)) {
+			if (depth == 0) return;
 			depth--;
-			if (depth == 0) break;
+			self.advance();
+			continue;
+		}
+		if (self.at(LPAREN)) { depth++; self.advance(); continue; }
+		if (self.at(RPAREN)) {
+			if (depth == 0) return;
+			depth--;
+			self.advance();
+			continue;
+		}
+		if (self.at(LSQUARE)) { depth++; self.advance(); continue; }
+		if (self.at(RSQUARE)) {
+			if (depth == 0) return;
+			depth--;
+			self.advance();
+			continue;
+		}
+
+		// Arrow at depth 0 ends the condition
+		if (depth == 0 && self.at(ARROW)) return;
+
+		self.advance();
+	}
+}
+
+// ── For statement ─────────────────────────────────────────────────
+
+/**
+ * Parse for statement:
+ *   for (variable in collection) block
+ *   for ((a, b) in collection) block
+ */
+fn void Parser.parse_for_stmt(Parser* self) {
+	usz idx = self.add_node(FOR_STMT);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'for'
+	usz children_start = self.result.node_count;
+
+	if (self.eat(LPAREN)) {
+		// Loop variable -- may be destructuring: (a, b)
+		if (self.at(LPAREN)) {
+			// Destructuring declaration -- skip it
+			self.skip_balanced_parens();
+		} else if (self.at_identifier()) {
+			// Simple loop variable -- create a PARAM node for it
+			usz param_idx = self.add_node(PARAM);
+			self.node_start(param_idx, self.current);
+			Token name = self.expect_identifier();
+			self.node_set_name(param_idx, name);
+
+			// Optional type annotation: variable: Type
+			if (self.eat(COLON)) {
+				uint type_start = self.current.offset;
+				self.skip_type_ref();
+				uint type_end = self.previous.offset + self.previous.len;
+				if (type_end > type_start) {
+					self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+				}
+			}
+			self.node_end(param_idx);
+		}
+
+		// 'in' keyword
+		if (self.at(KW_IN)) {
+			self.advance();
+		}
+
+		// Skip collection expression until closing ')'
+		self.skip_until_closing_paren();
+
+		self.expect(RPAREN);
+	}
+
+	// Body
+	if (self.at(LCURL)) {
+		self.parse_block();
+	} else if (!self.at(RCURL) && !self.at_eof()) {
+		self.parse_statement();
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+/**
+ * Skip tokens until a matching closing ')' at depth 0.
+ * Does NOT consume the ')'.
+ */
+fn void Parser.skip_until_closing_paren(Parser* self) {
+	int depth = 0;
+	while (!self.at_eof()) {
+		if (self.at(LPAREN)) { depth++; self.advance(); continue; }
+		if (self.at(RPAREN)) {
+			if (depth == 0) return;
+			depth--;
+			self.advance();
+			continue;
+		}
+		if (self.at(LCURL)) { depth++; self.advance(); continue; }
+		if (self.at(RCURL)) {
+			if (depth == 0) return;
+			depth--;
+			self.advance();
+			continue;
 		}
 		self.advance();
 	}
+}
 
-	self.expect(RCURL); // consume closing '}'
+// ── While statement ───────────────────────────────────────────────
+
+/**
+ * Parse while statement: while (condition) block
+ */
+fn void Parser.parse_while_stmt(Parser* self) {
+	usz idx = self.add_node(WHILE_STMT);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'while'
+	usz children_start = self.result.node_count;
+
+	// Condition: (expr)
+	if (self.at(LPAREN)) {
+		self.skip_balanced_parens();
+	}
+
+	// Body
+	if (self.at(LCURL)) {
+		self.parse_block();
+	} else if (!self.at(RCURL) && !self.at_eof()) {
+		self.parse_statement();
+	}
+
+	self.adopt_children(idx, children_start);
 	self.node_end(idx);
+}
+
+// ── Do-while statement ────────────────────────────────────────────
+
+/**
+ * Parse do-while statement: do block while (condition)
+ */
+fn void Parser.parse_do_while_stmt(Parser* self) {
+	usz idx = self.add_node(DO_WHILE_STMT);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'do'
+	usz children_start = self.result.node_count;
+
+	// Body
+	if (self.at(LCURL)) {
+		self.parse_block();
+	} else if (!self.at(RCURL) && !self.at_eof()) {
+		self.parse_statement();
+	}
+
+	// while (condition)
+	if (self.eat(KW_WHILE)) {
+		if (self.at(LPAREN)) {
+			self.skip_balanced_parens();
+		}
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+// ── Try expression ────────────────────────────────────────────────
+
+/**
+ * Parse try expression:
+ *   try { ... } catch (e: Type) { ... } finally { ... }
+ */
+fn void Parser.parse_try_expr(Parser* self) {
+	usz idx = self.add_node(TRY_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'try'
+	usz children_start = self.result.node_count;
+
+	// Try block
+	if (self.at(LCURL)) {
+		self.parse_block();
+	}
+
+	// Catch clauses
+	while (self.at(KW_CATCH)) {
+		self.parse_catch_clause();
+	}
+
+	// Finally block
+	if (self.eat(KW_FINALLY)) {
+		if (self.at(LCURL)) {
+			self.parse_block();
+		}
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+/**
+ * Parse a catch clause: catch (e: ExceptionType) { ... }
+ * The CATCH_CLAUSE node acts as a scope for the exception parameter.
+ */
+fn void Parser.parse_catch_clause(Parser* self) {
+	usz idx = self.add_node(CATCH_CLAUSE);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'catch'
+	usz children_start = self.result.node_count;
+
+	// Parameter: (e: Type)
+	if (self.eat(LPAREN)) {
+		if (self.at_identifier()) {
+			usz param_idx = self.add_node(PARAM);
+			self.node_start(param_idx, self.current);
+			Token name = self.expect_identifier();
+			self.node_set_name(param_idx, name);
+
+			if (self.eat(COLON)) {
+				uint type_start = self.current.offset;
+				self.skip_type_ref();
+				uint type_end = self.previous.offset + self.previous.len;
+				if (type_end > type_start) {
+					self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+				}
+			}
+			self.node_end(param_idx);
+		}
+		self.expect(RPAREN);
+	}
+
+	// Catch body
+	if (self.at(LCURL)) {
+		self.parse_block();
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+// ── Return / throw ────────────────────────────────────────────────
+
+/**
+ * Parse return expression: return expr?
+ * May have a label: return@label expr
+ */
+fn void Parser.parse_return_expr(Parser* self) {
+	usz idx = self.add_node(RETURN_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'return'
+	usz children_start = self.result.node_count;
+
+	// Optional label: @label
+	if (self.eat(AT)) {
+		if (self.at_identifier()) {
+			self.advance();
+		}
+	}
+
+	// Optional return value
+	if (!self.at(RCURL) && !self.at(SEMICOLON) && !self.at_eof()) {
+		if (!is_statement_start(self.current.kind)) {
+			self.parse_expression(PREC_NONE);
+		}
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+/**
+ * Parse throw expression: throw expr
+ */
+fn void Parser.parse_throw_expr(Parser* self) {
+	usz idx = self.add_node(THROW_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'throw'
+	usz children_start = self.result.node_count;
+
+	// Skip the thrown expression
+	if (!self.at(RCURL) && !self.at(SEMICOLON) && !self.at_eof()) {
+		self.parse_expression(PREC_NONE);
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+}
+
+// ── Break / continue ──────────────────────────────────────────────
+
+/**
+ * Parse break or continue: break@label? / continue@label?
+ */
+fn void Parser.parse_break_continue(Parser* self, NodeKind kind) {
+	usz idx = self.add_node(kind);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'break' or 'continue'
+
+	// Optional label: @label
+	if (self.eat(AT)) {
+		if (self.at_identifier()) {
+			self.advance();
+		}
+	}
+
+	self.node_end(idx);
+}
+
+// ── Expression parsing (Pratt precedence climbing) ────────────────
+
+/**
+ * Precedence levels for Kotlin operators (low to high).
+ * Higher values bind more tightly.
+ */
+const int PREC_NONE        = 0;
+const int PREC_ASSIGNMENT   = 1;  // =, +=, -=, *=, /=, %=
+const int PREC_DISJUNCTION  = 2;  // ||
+const int PREC_CONJUNCTION  = 3;  // &&
+const int PREC_EQUALITY     = 4;  // ==, !=, ===, !==
+const int PREC_COMPARISON   = 5;  // <, >, <=, >=
+const int PREC_NAMED_CHECK  = 6;  // in, !in, is, !is
+const int PREC_ELVIS        = 7;  // ?:
+const int PREC_RANGE        = 8;  // ..
+const int PREC_ADDITIVE     = 9;  // +, -
+const int PREC_MULTIPLICATIVE = 10; // *, /, %
+const int PREC_TYPE_CAST    = 11; // as, as?
+const int PREC_PREFIX       = 12; // -, !, ++, --
+const int PREC_POSTFIX      = 13; // ++, --, !!, ., ?., (), [], ::
+
+/**
+ * Get the infix/binary precedence level for a token kind.
+ * Returns PREC_NONE if the token is not a binary operator.
+ */
+fn int infix_precedence(TokenKind kind) {
+	switch (kind) {
+		case ASSIGNMENT:   return PREC_ASSIGNMENT;
+		case ADD_ASSIGN:   return PREC_ASSIGNMENT;
+		case SUB_ASSIGN:   return PREC_ASSIGNMENT;
+		case MULT_ASSIGN:  return PREC_ASSIGNMENT;
+		case DIV_ASSIGN:   return PREC_ASSIGNMENT;
+		case MOD_ASSIGN:   return PREC_ASSIGNMENT;
+		case DISJ:         return PREC_DISJUNCTION;
+		case CONJ:         return PREC_CONJUNCTION;
+		case EQEQ:         return PREC_EQUALITY;
+		case EXCL_EQ:      return PREC_EQUALITY;
+		case EQEQEQ:       return PREC_EQUALITY;
+		case EXCL_EQEQ:    return PREC_EQUALITY;
+		// NOTE: LANGLE and RANGLE are intentionally omitted.
+		// They are ambiguous with generic type arguments (e.g. List<Int>),
+		// and correct disambiguation requires type information.
+		// LE (<=) and GE (>=) are unambiguous and included.
+		case LE:           return PREC_COMPARISON;
+		case GE:           return PREC_COMPARISON;
+		case KW_IN:        return PREC_NAMED_CHECK;
+		case NOT_IN:       return PREC_NAMED_CHECK;
+		case KW_IS:        return PREC_NAMED_CHECK;
+		case NOT_IS:       return PREC_NAMED_CHECK;
+		case ELVIS:        return PREC_ELVIS;
+		case RANGE:        return PREC_RANGE;
+		case ADD:          return PREC_ADDITIVE;
+		case SUB:          return PREC_ADDITIVE;
+		case MULT:         return PREC_MULTIPLICATIVE;
+		case DIV:          return PREC_MULTIPLICATIVE;
+		case MOD:          return PREC_MULTIPLICATIVE;
+		case KW_AS:        return PREC_TYPE_CAST;
+		case AS_SAFE:      return PREC_TYPE_CAST;
+		default:           return PREC_NONE;
+	}
+}
+
+/**
+ * Check if a binary operator is right-associative.
+ */
+fn bool is_right_assoc(TokenKind kind) {
+	switch (kind) {
+		case ASSIGNMENT:  return true;
+		case ADD_ASSIGN:  return true;
+		case SUB_ASSIGN:  return true;
+		case MULT_ASSIGN: return true;
+		case DIV_ASSIGN:  return true;
+		case MOD_ASSIGN:  return true;
+		case ELVIS:       return true;
+		default:          return false;
+	}
+}
+
+/**
+ * Check if a token kind is an assignment operator.
+ */
+fn bool is_assignment_op(TokenKind kind) {
+	switch (kind) {
+		case ASSIGNMENT:  return true;
+		case ADD_ASSIGN:  return true;
+		case SUB_ASSIGN:  return true;
+		case MULT_ASSIGN: return true;
+		case DIV_ASSIGN:  return true;
+		case MOD_ASSIGN:  return true;
+		default:          return false;
+	}
+}
+
+/**
+ * Parse an expression statement: parse a full expression, then
+ * consume an optional semicolon. Returns true if tokens were consumed.
+ */
+fn bool Parser.parse_expression_statement(Parser* self) {
+	if (self.at(RCURL) || self.at_eof()) return false;
+
+	usz before = self.result.node_count;
+	self.parse_expression(PREC_NONE);
+
+	if (self.result.node_count == before) {
+		// No expression was parsed -- skip one token for error recovery
+		if (!self.at(RCURL) && !self.at_eof()) {
+			self.advance();
+		}
+		return true;
+	}
+
+	self.eat(SEMICOLON);
+	return true;
+}
+
+/**
+ * Parse an expression with Pratt precedence climbing.
+ * min_prec is the minimum precedence that this call will consume.
+ * Returns the index of the expression node, or the current node_count if nothing parsed.
+ */
+fn usz Parser.parse_expression(Parser* self, int min_prec) {
+	// Parse prefix / primary
+	usz left = self.parse_prefix_or_primary();
+	if (left >= self.result.node_count) return left; // nothing parsed
+
+	// Parse postfix suffixes: .name, ?.name, (), [], !!, ++, --
+	left = self.parse_postfix_chain(left);
+
+	// Parse infix / binary operators via precedence climbing
+	while (!self.at_eof()) {
+		int prec = infix_precedence(self.current.kind);
+		if (prec == PREC_NONE || prec < min_prec) break;
+
+		// Handle is/!is and as/as? specially (right side is a type, not expression)
+		if (self.current.kind == KW_IS || self.current.kind == NOT_IS) {
+			left = self.parse_type_check(left);
+			left = self.parse_postfix_chain(left);
+			continue;
+		}
+		if (self.current.kind == KW_AS || self.current.kind == AS_SAFE) {
+			left = self.parse_type_cast(left);
+			left = self.parse_postfix_chain(left);
+			continue;
+		}
+
+		TokenKind op_kind = self.current.kind;
+		Token op_tok = self.current;
+		int next_prec = is_right_assoc(op_kind) ? prec : prec + 1;
+
+		// Create the binary/assignment node
+		NodeKind node_kind = is_assignment_op(op_kind) ? ASSIGNMENT_EXPR : BINARY_EXPR;
+		usz bin_idx = self.add_node(node_kind);
+		self.result.nodes[bin_idx].start_offset = self.result.nodes[left].start_offset;
+		self.result.nodes[bin_idx].start_line = self.result.nodes[left].start_line;
+		self.result.nodes[bin_idx].start_col = self.result.nodes[left].start_col;
+		self.result.nodes[bin_idx].extra_text = op_tok.text;
+
+		self.advance(); // consume operator
+
+		// Adopt left operand
+		self.result.nodes[left].parent = bin_idx;
+
+		// Parse right operand
+		usz right = self.parse_expression(next_prec);
+
+		// Adopt right operand (if parsed)
+		if (right < self.result.node_count) {
+			self.result.nodes[right].parent = bin_idx;
+		}
+
+		self.result.nodes[bin_idx].child_count =
+			(right < self.result.node_count) ? 2 : 1;
+		self.node_end(bin_idx);
+		left = bin_idx;
+	}
+
+	return left;
+}
+
+/**
+ * Parse a prefix unary expression or a primary expression.
+ */
+fn usz Parser.parse_prefix_or_primary(Parser* self) {
+	switch (self.current.kind) {
+		case SUB:
+			nextcase;
+		case EXCL:
+			nextcase;
+		case INCR:
+			nextcase;
+		case DECR:
+			return self.parse_prefix_expr();
+		case MULT:
+			// Spread operator: *array
+			return self.parse_spread_expr();
+		default:
+			return self.parse_primary();
+	}
+}
+
+/**
+ * Parse a prefix unary expression: -expr, !expr, ++expr, --expr
+ */
+fn usz Parser.parse_prefix_expr(Parser* self) {
+	usz idx = self.add_node(PREFIX_EXPR);
+	self.node_start(idx, self.current);
+	self.result.nodes[idx].extra_text = self.current.text;
+	self.advance(); // consume operator
+
+	usz children_start = self.result.node_count;
+	usz operand = self.parse_prefix_or_primary();
+	if (operand < self.result.node_count) {
+		operand = self.parse_postfix_chain(operand);
+	}
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse spread expression: *array
+ */
+fn usz Parser.parse_spread_expr(Parser* self) {
+	usz idx = self.add_node(SPREAD_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume '*'
+
+	usz children_start = self.result.node_count;
+	usz operand = self.parse_prefix_or_primary();
+	if (operand < self.result.node_count) {
+		operand = self.parse_postfix_chain(operand);
+	}
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a primary expression.
+ */
+fn usz Parser.parse_primary(Parser* self) {
+	switch (self.current.kind) {
+		case IDENTIFIER:
+			return self.parse_name_expr();
+
+		case INTEGER_LITERAL:
+			nextcase;
+		case FLOAT_LITERAL:
+			nextcase;
+		case CHARACTER_LITERAL:
+			nextcase;
+		case BOOLEAN_LITERAL:
+			nextcase;
+		case NULL_LITERAL:
+			nextcase;
+		case STRING_CONTENT:
+			return self.parse_literal_expr();
+
+		case STRING_OPEN:
+			nextcase;
+		case MULTILINE_STRING_OPEN:
+			return self.parse_string_template_expr();
+
+		case KW_THIS:
+			return self.parse_this_expr();
+
+		case KW_SUPER:
+			return self.parse_super_expr();
+
+		case LPAREN:
+			return self.parse_paren_expr();
+
+		case LCURL:
+			return self.parse_lambda_expr();
+
+		case COLONCOLON:
+			return self.parse_callable_ref_expr();
+
+		case KW_OBJECT:
+			return self.parse_object_expr();
+
+		case KW_IF:
+			return self.parse_if_as_expr();
+
+		case KW_WHEN:
+			return self.parse_when_as_expr();
+
+		case KW_TRY:
+			return self.parse_try_as_expr();
+
+		default:
+			break;
+	}
+
+	// Soft keywords can be identifiers in expression position
+	if (is_soft_keyword(self.current.kind)) {
+		return self.parse_name_expr();
+	}
+
+	// Some hard keywords can also appear as identifiers in expression position
+	// (e.g. 'out' as named argument: foo(out = bar))
+	if (self.current.kind == KW_OUT || self.current.kind == KW_IN) {
+		return self.parse_name_expr();
+	}
+
+	return self.result.node_count; // nothing parsed
+}
+
+/**
+ * Parse a simple identifier reference: NAME_EXPR.
+ */
+fn usz Parser.parse_name_expr(Parser* self) {
+	usz idx = self.add_node(NAME_EXPR);
+	self.node_start(idx, self.current);
+	self.node_set_name(idx, self.current);
+	self.advance(); // consume identifier/soft keyword
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a literal expression: integer, float, char, boolean, null.
+ */
+fn usz Parser.parse_literal_expr(Parser* self) {
+	usz idx = self.add_node(LITERAL_EXPR);
+	self.node_start(idx, self.current);
+	self.result.nodes[idx].extra_text = self.current.text;
+	self.advance();
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a string template expression: "...", """..."""
+ * Skips string content tokens until close.
+ */
+fn usz Parser.parse_string_template_expr(Parser* self) {
+	usz idx = self.add_node(STRING_TEMPLATE_EXPR);
+	self.node_start(idx, self.current);
+	usz children_start = self.result.node_count;
+
+	TokenKind close_kind = (self.current.kind == STRING_OPEN) ? STRING_CLOSE : MULTILINE_STRING_CLOSE;
+	self.advance(); // consume open
+
+	while (!self.at_eof()) {
+		if (self.current.kind == close_kind) {
+			self.advance(); // consume close
+			break;
+		}
+		if (self.current.kind == STRING_TEMPLATE_REF) {
+			// $identifier -- create a NAME_EXPR child
+			usz ref_idx = self.add_node(NAME_EXPR);
+			self.node_start(ref_idx, self.current);
+			// The text includes $ prefix, so strip it for the name
+			String ref_text = self.current.text;
+			if (ref_text.len > 1 && ref_text[0] == '$') {
+				ref_text = ref_text[1..];
+			}
+			self.result.nodes[ref_idx].name = ref_text;
+			self.result.nodes[ref_idx].name_offset = self.current.offset + 1;
+			self.result.nodes[ref_idx].name_line = self.current.line;
+			self.result.nodes[ref_idx].name_col = self.current.col + 1;
+			self.result.nodes[ref_idx].name_len = self.current.len > 1 ? self.current.len - 1 : 0;
+			self.node_end(ref_idx);
+			self.advance();
+			continue;
+		}
+		if (self.current.kind == STRING_TEMPLATE_START) {
+			// ${ ... } -- parse enclosed expression
+			self.advance(); // consume ${
+			if (!self.at(RCURL) && !self.at_eof()) {
+				self.parse_expression(PREC_NONE);
+			}
+			self.eat(RCURL);
+			continue;
+		}
+		// STRING_CONTENT or other string tokens -- skip
+		self.advance();
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse 'this' expression, optionally with label: this@label
+ */
+fn usz Parser.parse_this_expr(Parser* self) {
+	usz idx = self.add_node(THIS_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'this'
+
+	// Optional label: @label
+	if (self.eat(AT)) {
+		if (self.at_identifier()) {
+			self.result.nodes[idx].name = self.current.text;
+			self.advance();
+		}
+	}
+
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse 'super' expression: super, super@label, super<Type>
+ */
+fn usz Parser.parse_super_expr(Parser* self) {
+	usz idx = self.add_node(SUPER_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'super'
+
+	// Generic qualifier: super<Type>
+	if (self.at(LANGLE)) {
+		self.skip_angle_brackets();
+	}
+
+	// Optional label: @label
+	if (self.eat(AT)) {
+		if (self.at_identifier()) {
+			self.result.nodes[idx].name = self.current.text;
+			self.advance();
+		}
+	}
+
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse parenthesized expression: (expr)
+ */
+fn usz Parser.parse_paren_expr(Parser* self) {
+	usz idx = self.add_node(PAREN_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume '('
+	usz children_start = self.result.node_count;
+
+	if (!self.at(RPAREN) && !self.at_eof()) {
+		self.parse_expression(PREC_NONE);
+	}
+
+	self.expect(RPAREN);
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse lambda expression: { body } or { params -> body }
+ * Lambda parameters create PARAM child nodes.
+ */
+fn usz Parser.parse_lambda_expr(Parser* self) {
+	usz idx = self.add_node(LAMBDA_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume '{'
+	usz children_start = self.result.node_count;
+
+	// Try to detect lambda parameters by looking for '->'
+	// Heuristic: if we see `identifier ->` or `identifier, identifier ->` or
+	// `identifier: Type ->` early on, these are lambda parameters.
+	if (self.looks_like_lambda_params()) {
+		self.parse_lambda_params();
+		self.eat(ARROW); // consume '->'
+	}
+
+	// Parse body statements
+	while (!self.at(RCURL) && !self.at_eof()) {
+		self.eat(SEMICOLON);
+		if (self.at(RCURL) || self.at_eof()) break;
+
+		uint saved_pos = self.current.offset;
+
+		if (!self.parse_statement()) {
+			if (!self.at(RCURL) && !self.at_eof()) {
+				self.advance();
+			}
+		} else if (self.current.offset == saved_pos) {
+			if (!self.at(RCURL) && !self.at_eof()) {
+				self.advance();
+			}
+		}
+	}
+
+	self.expect(RCURL);
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Heuristic: look ahead to see if the beginning of a brace block
+ * looks like lambda parameters (identifier(s) followed by ->).
+ * This is an approximation -- we don't consume any tokens.
+ */
+fn bool Parser.looks_like_lambda_params(Parser* self) {
+	// Save state for lookahead
+	Lexer saved_lexer = self.lexer;
+	Token saved_current = self.current;
+	Token saved_previous = self.previous;
+
+	bool result = false;
+	int depth = 0;
+	int token_count = 0;
+	const int MAX_LOOKAHEAD = 50; // don't look too far
+
+	while (!self.at_eof() && token_count < MAX_LOOKAHEAD) {
+		if (self.at(ARROW) && depth == 0) {
+			result = true;
+			break;
+		}
+		if (self.at(RCURL) && depth == 0) break; // end of block, no arrow found
+		if (self.at(SEMICOLON) && depth == 0) break; // statement separator
+
+		// Track nesting
+		if (self.at(LPAREN) || self.at(LSQUARE) || self.at(LANGLE)) { depth++; }
+		if (self.at(RPAREN) || self.at(RSQUARE) || self.at(RANGLE)) { depth--; }
+
+		// If we see a statement keyword at depth 0, this is not params
+		if (depth == 0 && is_statement_start(self.current.kind)) break;
+
+		self.advance();
+		token_count++;
+	}
+
+	// Restore state
+	self.lexer = saved_lexer;
+	self.current = saved_current;
+	self.previous = saved_previous;
+	return result;
+}
+
+/**
+ * Parse lambda parameters before the -> arrow.
+ * Creates PARAM nodes for each parameter.
+ */
+fn void Parser.parse_lambda_params(Parser* self) {
+	while (!self.at(ARROW) && !self.at(RCURL) && !self.at_eof()) {
+		if (self.at_identifier()) {
+			usz param_idx = self.add_node(PARAM);
+			self.node_start(param_idx, self.current);
+			Token name = self.expect_identifier();
+			self.node_set_name(param_idx, name);
+
+			// Optional type: : Type
+			if (self.eat(COLON)) {
+				uint type_start = self.current.offset;
+				self.skip_type_ref();
+				uint type_end = self.previous.offset + self.previous.len;
+				if (type_end > type_start) {
+					self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+				}
+			}
+
+			self.node_end(param_idx);
+		} else if (self.at(LPAREN)) {
+			// Destructuring parameter: (a, b)
+			self.skip_balanced_parens();
+		}
+
+		if (!self.eat(COMMA)) break;
+	}
+}
+
+/**
+ * Parse callable reference: ::name
+ * (Type::name is handled as postfix on a name expression)
+ */
+fn usz Parser.parse_callable_ref_expr(Parser* self) {
+	usz idx = self.add_node(CALLABLE_REF_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume '::'
+
+	if (self.at_identifier() || self.at(KW_CLASS)) {
+		self.node_set_name(idx, self.current);
+		self.advance();
+	}
+
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse object expression: object : SuperType { body }
+ */
+fn usz Parser.parse_object_expr(Parser* self) {
+	usz idx = self.add_node(OBJECT_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'object'
+	usz children_start = self.result.node_count;
+
+	// Super types: : Type
+	if (self.at(COLON)) {
+		self.skip_super_types();
+	}
+
+	// Body
+	if (self.at(LCURL)) {
+		self.parse_class_body(false);
+	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse if as an expression (reuses parse_if_expr).
+ * Returns the index of the IF_EXPR node.
+ */
+fn usz Parser.parse_if_as_expr(Parser* self) {
+	usz idx = self.result.node_count;
+	self.parse_if_expr();
+	return idx;
+}
+
+/**
+ * Parse when as an expression (reuses parse_when_expr).
+ * Returns the index of the WHEN_EXPR node.
+ */
+fn usz Parser.parse_when_as_expr(Parser* self) {
+	usz idx = self.result.node_count;
+	self.parse_when_expr();
+	return idx;
+}
+
+/**
+ * Parse try as an expression (reuses parse_try_expr).
+ * Returns the index of the TRY_EXPR node.
+ */
+fn usz Parser.parse_try_as_expr(Parser* self) {
+	usz idx = self.result.node_count;
+	self.parse_try_expr();
+	return idx;
+}
+
+/**
+ * Parse a chain of postfix operators on an expression.
+ * Handles: .name, ?.name, (args), [index], !!, ++, --, ::name
+ */
+fn usz Parser.parse_postfix_chain(Parser* self, usz left) {
+	while (!self.at_eof()) {
+		switch (self.current.kind) {
+			case DOT:
+				left = self.parse_dot_access(left, false);
+			case SAFE_CALL:
+				left = self.parse_dot_access(left, true);
+			case LPAREN:
+				left = self.parse_call_expr(left);
+			case LSQUARE:
+				left = self.parse_index_expr(left);
+			case NOT_NULL:
+				left = self.parse_not_null_postfix(left);
+			case INCR:
+				// Postfix ++ only if no line break before
+				// For simplicity, always treat as postfix here
+				left = self.parse_postfix_incr_decr(left);
+			case DECR:
+				left = self.parse_postfix_incr_decr(left);
+			case COLONCOLON:
+				left = self.parse_member_ref(left);
+			case LANGLE:
+				// Generic type arguments: name<Type>() or name<A, B>
+				// Only after name-like expressions. Skip the angle brackets.
+				if (self.is_generic_context(left)) {
+					self.skip_angle_brackets();
+				} else {
+					return left;
+				}
+			case LCURL:
+				// Trailing lambda: only after call-like expressions or identifiers
+				// Heuristic: if the previous expression is a name or call, this is a trailing lambda
+				if (self.is_trailing_lambda_context(left)) {
+					left = self.parse_trailing_lambda(left);
+				} else {
+					return left;
+				}
+			default:
+				return left;
+		}
+	}
+	return left;
+}
+
+/**
+ * Check if a trailing lambda makes sense after the given expression.
+ */
+fn bool Parser.is_trailing_lambda_context(Parser* self, usz left) {
+	if (left >= self.result.node_count) return false;
+	NodeKind kind = self.result.nodes[left].kind;
+	switch (kind) {
+		case NAME_EXPR:
+		case CALL_EXPR:
+		case DOT_EXPR:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Check if generic type arguments (<...>) make sense after the given expression.
+ * Only valid after name-like expressions.
+ */
+fn bool Parser.is_generic_context(Parser* self, usz left) {
+	if (left >= self.result.node_count) return false;
+	NodeKind kind = self.result.nodes[left].kind;
+	switch (kind) {
+		case NAME_EXPR:
+		case DOT_EXPR:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Parse dot access: expr.name or expr?.name
+ */
+fn usz Parser.parse_dot_access(Parser* self, usz left, bool safe) {
+	usz idx = self.add_node(DOT_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+	if (safe) {
+		self.result.nodes[idx].extra_text = "?.";
+	}
+
+	self.advance(); // consume '.' or '?.'
+
+	// Member name: identifiers, soft keywords, and some hard keywords
+	// In Kotlin, keywords like 'class', 'in', 'out' can appear as member names
+	if (self.at_identifier() || self.at(KW_CLASS) || self.at(KW_OUT) || self.at(KW_IN)) {
+		self.node_set_name(idx, self.current);
+		self.advance();
+	}
+
+	// Adopt left operand as child
+	self.result.nodes[left].parent = idx;
+	self.result.nodes[idx].child_count = 1;
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse call expression: expr(args)
+ * Also supports trailing lambda: expr(args) { lambda }
+ */
+fn usz Parser.parse_call_expr(Parser* self, usz left) {
+	usz idx = self.add_node(CALL_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+
+	// Copy name from left if it's a simple name
+	if (self.result.nodes[left].kind == NAME_EXPR) {
+		self.result.nodes[idx].name = self.result.nodes[left].name;
+		self.result.nodes[idx].name_offset = self.result.nodes[left].name_offset;
+		self.result.nodes[idx].name_line = self.result.nodes[left].name_line;
+		self.result.nodes[idx].name_col = self.result.nodes[left].name_col;
+		self.result.nodes[idx].name_len = self.result.nodes[left].name_len;
+	} else if (self.result.nodes[left].kind == DOT_EXPR) {
+		// For member calls like obj.method(), copy the member name
+		self.result.nodes[idx].name = self.result.nodes[left].name;
+		self.result.nodes[idx].name_offset = self.result.nodes[left].name_offset;
+		self.result.nodes[idx].name_line = self.result.nodes[left].name_line;
+		self.result.nodes[idx].name_col = self.result.nodes[left].name_col;
+		self.result.nodes[idx].name_len = self.result.nodes[left].name_len;
+	}
+
+	// Adopt left (callee) as child
+	self.result.nodes[left].parent = idx;
+
+	self.advance(); // consume '('
+	usz children_start = self.result.node_count;
+
+	// Parse arguments
+	while (!self.at(RPAREN) && !self.at_eof()) {
+		// Named argument: name = expr
+		// Regular argument: expr
+		self.parse_expression(PREC_NONE);
+		if (!self.eat(COMMA)) break;
+	}
+
+	self.expect(RPAREN);
+	self.adopt_children(idx, children_start);
+	self.result.nodes[idx].child_count += 1; // +1 for the callee already adopted
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse index expression: expr[index]
+ */
+fn usz Parser.parse_index_expr(Parser* self, usz left) {
+	usz idx = self.add_node(INDEX_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+
+	self.result.nodes[left].parent = idx;
+
+	self.advance(); // consume '['
+	usz children_start = self.result.node_count;
+
+	while (!self.at(RSQUARE) && !self.at_eof()) {
+		self.parse_expression(PREC_NONE);
+		if (!self.eat(COMMA)) break;
+	}
+
+	self.expect(RSQUARE);
+	self.adopt_children(idx, children_start);
+	self.result.nodes[idx].child_count += 1; // +1 for the receiver
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse not-null assertion: expr!!
+ */
+fn usz Parser.parse_not_null_postfix(Parser* self, usz left) {
+	usz idx = self.add_node(POSTFIX_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+	self.result.nodes[idx].extra_text = "!!";
+
+	self.result.nodes[left].parent = idx;
+	self.result.nodes[idx].child_count = 1;
+
+	self.advance(); // consume '!!'
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse postfix ++/-- on an expression.
+ */
+fn usz Parser.parse_postfix_incr_decr(Parser* self, usz left) {
+	usz idx = self.add_node(POSTFIX_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+	self.result.nodes[idx].extra_text = self.current.text;
+
+	self.result.nodes[left].parent = idx;
+	self.result.nodes[idx].child_count = 1;
+
+	self.advance(); // consume '++' or '--'
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse member reference: expr::name
+ */
+fn usz Parser.parse_member_ref(Parser* self, usz left) {
+	usz idx = self.add_node(CALLABLE_REF_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+
+	self.result.nodes[left].parent = idx;
+	self.result.nodes[idx].child_count = 1;
+
+	self.advance(); // consume '::'
+
+	if (self.at_identifier() || self.at(KW_CLASS)) {
+		self.node_set_name(idx, self.current);
+		self.advance();
+	}
+
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a trailing lambda: expr { ... }
+ * Wraps expr + lambda into a CALL_EXPR.
+ */
+fn usz Parser.parse_trailing_lambda(Parser* self, usz left) {
+	usz idx = self.add_node(CALL_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+
+	// Copy name from left
+	if (left < self.result.node_count) {
+		self.result.nodes[idx].name = self.result.nodes[left].name;
+		self.result.nodes[idx].name_offset = self.result.nodes[left].name_offset;
+		self.result.nodes[idx].name_line = self.result.nodes[left].name_line;
+		self.result.nodes[idx].name_col = self.result.nodes[left].name_col;
+		self.result.nodes[idx].name_len = self.result.nodes[left].name_len;
+	}
+
+	self.result.nodes[left].parent = idx;
+
+	usz children_start = self.result.node_count;
+	self.parse_lambda_expr();
+	self.adopt_children(idx, children_start);
+	self.result.nodes[idx].child_count += 1; // +1 for left already adopted
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a type check: expr is Type / expr !is Type
+ */
+fn usz Parser.parse_type_check(Parser* self, usz left) {
+	usz idx = self.add_node(TYPE_CHECK_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+	self.result.nodes[idx].extra_text = self.current.text;
+
+	self.result.nodes[left].parent = idx;
+	self.result.nodes[idx].child_count = 1;
+
+	self.advance(); // consume 'is' or '!is'
+
+	// Parse the type
+	uint type_start = self.current.offset;
+	self.skip_type_ref();
+	uint type_end = self.previous.offset + self.previous.len;
+	if (type_end > type_start) {
+		self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+	}
+
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a type cast: expr as Type / expr as? Type
+ */
+fn usz Parser.parse_type_cast(Parser* self, usz left) {
+	usz idx = self.add_node(TYPE_CAST_EXPR);
+	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
+	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
+	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
+	self.result.nodes[idx].extra_text = self.current.text;
+
+	self.result.nodes[left].parent = idx;
+	self.result.nodes[idx].child_count = 1;
+
+	self.advance(); // consume 'as' or 'as?'
+
+	// Parse the type
+	uint type_start = self.current.offset;
+	self.skip_type_ref();
+	uint type_end = self.previous.offset + self.previous.len;
+	if (type_end > type_start) {
+		self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+	}
+
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Check if a token kind can start a statement inside a block.
+ * Used for heuristic statement boundary detection.
+ */
+fn bool is_statement_start(TokenKind kind) {
+	switch (kind) {
+		// Declarations
+		case KW_CLASS: case KW_INTERFACE: case KW_OBJECT: case KW_FUN:
+		case KW_VAL: case KW_VAR: case KW_TYPEALIAS: case KW_CONSTRUCTOR:
+		case KW_INIT: case KW_COMPANION:
+			return true;
+		// Control flow
+		case KW_IF: case KW_WHEN: case KW_FOR: case KW_WHILE: case KW_DO:
+		case KW_TRY: case KW_RETURN: case KW_THROW: case KW_BREAK:
+		case KW_CONTINUE:
+			return true;
+		default:
+			return false;
+	}
 }
 
 // ── Skip helpers ───────────────────────────────────────────────────
@@ -1164,61 +2661,28 @@ fn void Parser.skip_type_ref(Parser* self) {
 }
 
 /**
- * Skip an expression body (after = in fun or val).
- * Heuristic: skip until we see something at brace depth 0 that
- * starts a new declaration or ends the enclosing scope.
+ * Parse an expression body (after = in fun or val).
+ * Uses the expression parser to produce AST nodes.
+ * The expression ends at the same boundaries as the old skip heuristic:
+ * declaration starters, modifiers, get/set at depth 0, semicolons, or '}'.
  */
-fn void Parser.skip_expression_body(Parser* self) {
-	int depth = 0;
-	while (!self.at_eof()) {
-		if (self.at(LCURL)) {
-			depth++;
-			self.advance();
-			continue;
-		}
-		if (self.at(RCURL)) {
-			if (depth == 0) return; // end of enclosing scope
-			depth--;
-			self.advance();
-			continue;
-		}
-		if (self.at(LPAREN)) {
-			depth++;
-			self.advance();
-			continue;
-		}
-		if (self.at(RPAREN)) {
-			if (depth == 0) return;
-			depth--;
-			self.advance();
-			continue;
-		}
-
-		// At depth 0, check for declaration starters
-		if (depth == 0) {
-			if (is_declaration_start(self.current.kind)) return;
-			if (is_modifier_keyword(self.current.kind)) return;
-			if (self.at(SEMICOLON)) {
-				self.advance();
-				return;
-			}
-			// Property accessors at depth 0 end the expression,
-			// but only if NOT preceded by '.' or '?.' (member access).
-			// Paths.get(...) uses 'get' as a method name, not an accessor.
-			if (self.at(KW_GET) || self.at(KW_SET)) {
-				if (self.previous.kind != DOT && self.previous.kind != SAFE_CALL) {
-					return;
-				}
-			}
-		}
-
-		self.advance();
-	}
+fn void Parser.parse_expression_body(Parser* self) {
+	// We rely on the expression parser to naturally stop when it
+	// encounters something it can't parse. However, Kotlin's soft
+	// keywords (get, set, modifier keywords) look like identifiers
+	// and would be incorrectly consumed. We handle this by checking
+	// if the current token is a property accessor or top-level boundary
+	// BEFORE the expression parser gets to it.
+	//
+	// Strategy: parse a single expression. The Pratt parser will
+	// stop at tokens with no prefix/infix binding power.
+	self.parse_expression(PREC_NONE);
+	self.eat(SEMICOLON);
 }
 
 /**
  * Skip a parameter default value expression.
- * Similar to skip_expression_body but also stops at comma and closing paren.
+ * Similar to parse_expression_body but also stops at comma and closing paren.
  */
 fn void Parser.skip_param_default(Parser* self) {
 	int depth = 0;
@@ -1291,7 +2755,7 @@ fn void Parser.skip_property_accessor(Parser* self) {
 		}
 	} else if (self.eat(ASSIGNMENT)) {
 		// Expression body
-		self.skip_expression_body();
+		self.parse_expression_body();
 	}
 }
 

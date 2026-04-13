@@ -510,3 +510,91 @@ fn void parameter_classified() @test {
 		assert(data[18] == semantic_tokens::TT_PARAMETER, "a should be TT_PARAMETER, got %d", data[18]);
 	};
 }
+
+// ── Expression-level identifier classification ─────────────────────
+
+fn void call_expr_classified_as_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// "println" in the body is a CALL_EXPR and should be classified as TT_FUNCTION
+		store.open("file:///test.kt", "kotlin", 1, "fun main() {\n    println(42)\n}");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		assert(result != null);
+		int[] data = get_data(result);
+
+		// Find "println" token: should be TT_FUNCTION (not TT_VARIABLE)
+		// Tokens on line 1: println, (, 42, )
+		// We need to find the token with length=7 on line 1
+		bool found = false;
+		for (usz i = 0; i + 4 < data.len; i += 5) {
+			if (data[i + 2] == 7) { // length == 7 ("println")
+				assert(data[i + 3] == semantic_tokens::TT_FUNCTION,
+					"println should be TT_FUNCTION, got %d", data[i + 3]);
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected to find 'println' token");
+	};
+}
+
+fn void member_access_classified_as_property() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// "length" in "name.length" should be classified as TT_PROPERTY
+		store.open("file:///test.kt", "kotlin", 1, "fun foo() {\n    name.length\n}");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		assert(result != null);
+		int[] data = get_data(result);
+
+		// Find "length" token: should be TT_PROPERTY (length=6)
+		bool found = false;
+		for (usz i = 0; i + 4 < data.len; i += 5) {
+			if (data[i + 2] == 6) { // length == 6 ("length")
+				assert(data[i + 3] == semantic_tokens::TT_PROPERTY,
+					"'length' should be TT_PROPERTY, got %d", data[i + 3]);
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected to find 'length' token");
+	};
+}
+
+fn void member_call_classified_as_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// "toString" in "x.toString()" should be TT_FUNCTION (it's a CALL_EXPR)
+		store.open("file:///test.kt", "kotlin", 1, "fun foo() {\n    x.toString()\n}");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		assert(result != null);
+		int[] data = get_data(result);
+
+		// Find "toString" token: length=8, should be TT_FUNCTION
+		bool found = false;
+		for (usz i = 0; i + 4 < data.len; i += 5) {
+			if (data[i + 2] == 8) { // length == 8 ("toString")
+				assert(data[i + 3] == semantic_tokens::TT_FUNCTION,
+					"'toString' should be TT_FUNCTION, got %d", data[i + 3]);
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected to find 'toString' token");
+	};
+}

@@ -26,6 +26,40 @@ enum NodeKind : int {
 	TYPE_REF,
 	BLOCK,
 
+	// Statements / expressions (inside blocks)
+	IF_EXPR,
+	WHEN_EXPR,
+	FOR_STMT,
+	WHILE_STMT,
+	DO_WHILE_STMT,
+	TRY_EXPR,
+	CATCH_CLAUSE,
+	RETURN_EXPR,
+	THROW_EXPR,
+	BREAK_EXPR,
+	CONTINUE_EXPR,
+
+	// Expression nodes (Pratt parser)
+	NAME_EXPR,           // simple identifier reference
+	LITERAL_EXPR,        // integer, float, string, char, boolean, null
+	THIS_EXPR,           // this / this@label
+	SUPER_EXPR,          // super / super@label / super<Type>
+	PAREN_EXPR,          // (expr)
+	CALL_EXPR,           // expr(args) -- name in name field if simple call
+	DOT_EXPR,            // expr.name / expr?.name -- member name in name field
+	INDEX_EXPR,          // expr[index]
+	PREFIX_EXPR,         // -expr, !expr, ++expr, --expr -- operator in extra_text
+	POSTFIX_EXPR,        // expr++, expr--, expr!! -- operator in extra_text
+	BINARY_EXPR,         // expr op expr -- operator in extra_text
+	ASSIGNMENT_EXPR,     // expr = expr, expr += expr -- operator in extra_text
+	LAMBDA_EXPR,         // { params -> body } or { body }
+	CALLABLE_REF_EXPR,   // ::name or Type::name -- name in name field
+	STRING_TEMPLATE_EXPR,// "...$x...${expr}..."
+	OBJECT_EXPR,         // object : Type { body }
+	SPREAD_EXPR,         // *array
+	TYPE_CHECK_EXPR,     // expr is Type / expr !is Type
+	TYPE_CAST_EXPR,      // expr as Type / expr as? Type
+
 	// Error recovery
 	ERROR_NODE,
 }
@@ -112,7 +146,7 @@ struct ParseError {
 // ── Parse result ───────────────────────────────────────────────────
 
 const usz NO_PARENT = usz.max;
-const usz MAX_NODES = 8192;
+const usz MAX_NODES = 16384;
 const usz MAX_ERRORS = 256;
 
 struct ParseResult {

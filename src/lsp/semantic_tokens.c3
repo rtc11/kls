@@ -66,10 +66,13 @@ struct NameEntry {
 
 /**
  * Build a lookup table of (offset -> semantic token type) from the AST.
+ * Includes both declaration names and expression identifiers.
  * Returns the number of entries written.
  */
 fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 	usz count = 0;
+
+	// Pass 1: declaration names (highest priority)
 	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.name.len == 0 || n.name_len == 0) continue;
@@ -94,6 +97,41 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 		table[count].token_type = tt;
 		count++;
 	}
+
+	// Pass 2: call expressions (function calls override variable/property)
+	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name.len == 0 || n.name_len == 0) continue;
+
+		int tt;
+		switch (n.kind) {
+			case CALL_EXPR:             tt = TT_FUNCTION;
+			case CALLABLE_REF_EXPR:     tt = TT_FUNCTION;
+			default:                    continue;
+		}
+
+		// Skip if this offset is already classified
+		if (lookup_name(table[..], count, n.name_offset) >= 0) continue;
+
+		table[count].offset = n.name_offset;
+		table[count].token_type = tt;
+		count++;
+	}
+
+	// Pass 3: dot access expressions (property access, lower priority than calls)
+	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name.len == 0 || n.name_len == 0) continue;
+		if (n.kind != DOT_EXPR) continue;
+
+		// Skip if this offset is already classified (e.g. by CALL_EXPR)
+		if (lookup_name(table[..], count, n.name_offset) >= 0) continue;
+
+		table[count].offset = n.name_offset;
+		table[count].token_type = TT_PROPERTY;
+		count++;
+	}
+
 	return count;
 }
 

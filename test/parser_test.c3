@@ -1222,3 +1222,1406 @@ fun path(str: String): Path = Paths.get(System.getProperty("user.dir"), str).als
 		assert(r.error_count == 0, "expected no errors for path/get/also funs, got %d", (int)r.error_count);
 	};
 }
+
+// ── Statement parsing: helpers ─────────────────────────────────────
+
+// Get the BLOCK child of a FUN_DECL node
+fn AstNode* fun_block(ParseResult* r, AstNode* fun_node) {
+	for (usz i = 0; i < fun_node.child_count; i++) {
+		AstNode* ch = ast::get_child(r, fun_node, i)!!;
+		if (ch.kind == BLOCK) return ch;
+	}
+	unreachable("expected BLOCK child in FUN_DECL");
+	return null;
+}
+
+// Find the first child of a given kind
+fn AstNode* find_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
+	for (usz i = 0; i < parent.child_count; i++) {
+		AstNode* ch = ast::get_child(r, parent, i)!!;
+		if (ch.kind == kind) return ch;
+	}
+	unreachable("expected child of kind %d", (int)kind);
+	return null;
+}
+
+// Count children of a given kind
+fn usz count_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
+	usz count = 0;
+	for (usz i = 0; i < parent.child_count; i++) {
+		AstNode* ch = ast::get_child(r, parent, i)!!;
+		if (ch.kind == kind) count++;
+	}
+	return count;
+}
+
+// ── Local val/var inside function body ──────────────────────────────
+
+fn void parse_local_val_in_fun() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val x = 42
+    val y: String = "hello"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		assert(fun_node.kind == FUN_DECL);
+
+		AstNode* block = fun_block(r, fun_node);
+		usz prop_count = count_kind(r, block, PROPERTY_DECL);
+		assert(prop_count == 2, "expected 2 local val declarations, got %d", (int)prop_count);
+
+		// Check first local val
+		AstNode* x = find_kind(r, block, PROPERTY_DECL);
+		assert(x.name == "x", "expected 'x', got '%s'", x.name);
+	};
+}
+
+fn void parse_local_var_in_fun() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    var count = 0
+    var name: String = "test"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* block = fun_block(r, fun_node);
+		usz prop_count = count_kind(r, block, PROPERTY_DECL);
+		assert(prop_count == 2, "expected 2 local var declarations, got %d", (int)prop_count);
+	};
+}
+
+fn void parse_local_val_with_type() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val name: String = "hello"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* prop = find_kind(r, block, PROPERTY_DECL);
+		assert(prop.name == "name", "expected 'name', got '%s'", prop.name);
+		assert(prop.type_text == "String", "expected type 'String', got '%s'", prop.type_text);
+	};
+}
+
+// ── If expression ──────────────────────────────────────────────────
+
+fn void parse_if_statement() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    if (x > 0) {
+        println("positive")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz if_count = count_kind(r, block, IF_EXPR);
+		assert(if_count == 1, "expected 1 IF_EXPR, got %d", (int)if_count);
+	};
+}
+
+fn void parse_if_else() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    if (x > 0) {
+        println("positive")
+    } else {
+        println("non-positive")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz if_count = count_kind(r, block, IF_EXPR);
+		assert(if_count == 1, "expected 1 IF_EXPR, got %d", (int)if_count);
+	};
+}
+
+fn void parse_if_else_if() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    if (x > 0) {
+        println("positive")
+    } else if (x < 0) {
+        println("negative")
+    } else {
+        println("zero")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_if_with_local_val() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    if (cond) {
+        val result = compute()
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// The local val should be inside the if's block
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* if_node = find_kind(r, block, IF_EXPR);
+		// The if has a BLOCK child which has the PROPERTY_DECL
+		AstNode* if_block = find_kind(r, if_node, BLOCK);
+		usz prop_count = count_kind(r, if_block, PROPERTY_DECL);
+		assert(prop_count == 1, "expected 1 local val inside if block, got %d", (int)prop_count);
+	};
+}
+
+// ── When expression ────────────────────────────────────────────────
+
+fn void parse_when_statement() @test {
+	@pool() {
+		String content =
+`fun foo(x: Int) {
+    when (x) {
+        1 -> println("one")
+        2 -> println("two")
+        else -> println("other")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz when_count = count_kind(r, block, WHEN_EXPR);
+		assert(when_count == 1, "expected 1 WHEN_EXPR, got %d", (int)when_count);
+	};
+}
+
+fn void parse_when_without_subject() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    when {
+        x > 0 -> println("positive")
+        x < 0 -> println("negative")
+        else -> println("zero")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_when_with_blocks() @test {
+	@pool() {
+		String content =
+`fun foo(x: Int) {
+    when (x) {
+        1 -> {
+            val y = 1
+            println(y)
+        }
+        else -> {
+            println("other")
+        }
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_when_with_is_and_in() @test {
+	@pool() {
+		String content =
+`fun foo(x: Any) {
+    when (x) {
+        is String -> println("string")
+        is Int -> println("int")
+        in 1..10 -> println("range")
+        else -> println("other")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── For statement ──────────────────────────────────────────────────
+
+fn void parse_for_loop() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    for (item in list) {
+        println(item)
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz for_count = count_kind(r, block, FOR_STMT);
+		assert(for_count == 1, "expected 1 FOR_STMT, got %d", (int)for_count);
+
+		// Check that the for has a PARAM child for the loop variable
+		AstNode* for_node = find_kind(r, block, FOR_STMT);
+		usz param_count = count_kind(r, for_node, PARAM);
+		assert(param_count == 1, "expected 1 PARAM in for loop, got %d", (int)param_count);
+
+		AstNode* param = find_kind(r, for_node, PARAM);
+		assert(param.name == "item", "expected 'item', got '%s'", param.name);
+	};
+}
+
+fn void parse_for_with_local_val() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    for (i in 1..10) {
+        val doubled = i * 2
+        println(doubled)
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── While statement ────────────────────────────────────────────────
+
+fn void parse_while_loop() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    while (running) {
+        process()
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz while_count = count_kind(r, block, WHILE_STMT);
+		assert(while_count == 1, "expected 1 WHILE_STMT, got %d", (int)while_count);
+	};
+}
+
+// ── Do-while statement ─────────────────────────────────────────────
+
+fn void parse_do_while_loop() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    do {
+        val line = readLine()
+    } while (line != null)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz do_count = count_kind(r, block, DO_WHILE_STMT);
+		assert(do_count == 1, "expected 1 DO_WHILE_STMT, got %d", (int)do_count);
+	};
+}
+
+// ── Try/catch/finally ──────────────────────────────────────────────
+
+fn void parse_try_catch() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    try {
+        riskyOperation()
+    } catch (e: Exception) {
+        println(e.message)
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz try_count = count_kind(r, block, TRY_EXPR);
+		assert(try_count == 1, "expected 1 TRY_EXPR, got %d", (int)try_count);
+
+		// Check catch clause has PARAM for the exception variable
+		AstNode* try_node = find_kind(r, block, TRY_EXPR);
+		AstNode* catch_node = find_kind(r, try_node, CATCH_CLAUSE);
+		AstNode* param = find_kind(r, catch_node, PARAM);
+		assert(param.name == "e", "expected catch param 'e', got '%s'", param.name);
+		assert(param.type_text == "Exception", "expected type 'Exception', got '%s'", param.type_text);
+	};
+}
+
+fn void parse_try_catch_finally() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    try {
+        open()
+    } catch (e: IOException) {
+        log(e)
+    } finally {
+        close()
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_try_multiple_catch() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    try {
+        parse()
+    } catch (e: NumberFormatException) {
+        handleNumber(e)
+    } catch (e: IllegalArgumentException) {
+        handleArg(e)
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* try_node = find_kind(r, block, TRY_EXPR);
+		usz catch_count = count_kind(r, try_node, CATCH_CLAUSE);
+		assert(catch_count == 2, "expected 2 CATCH_CLAUSEs, got %d", (int)catch_count);
+	};
+}
+
+// ── Return / throw / break / continue ──────────────────────────────
+
+fn void parse_return_statement() @test {
+	@pool() {
+		String content =
+`fun foo(): Int {
+    return 42
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz ret_count = count_kind(r, block, RETURN_EXPR);
+		assert(ret_count == 1, "expected 1 RETURN_EXPR, got %d", (int)ret_count);
+	};
+}
+
+fn void parse_return_with_label() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    list.forEach {
+        if (it == 0) return@forEach
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_throw_statement() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    throw IllegalArgumentException("bad")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz throw_count = count_kind(r, block, THROW_EXPR);
+		assert(throw_count == 1, "expected 1 THROW_EXPR, got %d", (int)throw_count);
+	};
+}
+
+fn void parse_break_continue() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    for (i in list) {
+        if (i == 0) continue
+        if (i < 0) break
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Local function ─────────────────────────────────────────────────
+
+fn void parse_local_function() @test {
+	@pool() {
+		String content =
+`fun outer() {
+    fun inner(x: Int): Int {
+        return x * 2
+    }
+    val result = inner(21)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz fun_count = count_kind(r, block, FUN_DECL);
+		assert(fun_count == 1, "expected 1 local FUN_DECL, got %d", (int)fun_count);
+
+		AstNode* inner = find_kind(r, block, FUN_DECL);
+		assert(inner.name == "inner", "expected 'inner', got '%s'", inner.name);
+	};
+}
+
+// ── Local class ────────────────────────────────────────────────────
+
+fn void parse_local_class() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    class Local {
+        fun method() {}
+    }
+    val obj = Local()
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		usz class_count = count_kind(r, block, CLASS_DECL);
+		assert(class_count == 1, "expected 1 local CLASS_DECL, got %d", (int)class_count);
+	};
+}
+
+// ── Nested control flow ────────────────────────────────────────────
+
+fn void parse_nested_control_flow() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    for (item in list) {
+        if (item.isValid()) {
+            when (item.type) {
+                "A" -> process(item)
+                else -> skip(item)
+            }
+        }
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Mixed statements ───────────────────────────────────────────────
+
+fn void parse_mixed_statements() @test {
+	@pool() {
+		String content =
+`fun process(items: List<String>): Int {
+    var count = 0
+    for (item in items) {
+        val trimmed = item.trim()
+        if (trimmed.isEmpty()) continue
+        try {
+            count += trimmed.toInt()
+        } catch (e: NumberFormatException) {
+            println("skipping: $trimmed")
+        }
+    }
+    return count
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for mixed statements, got %d", (int)r.error_count);
+	};
+}
+
+// ── Expression statements (should be skipped without errors) ───────
+
+fn void parse_expression_statements() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    println("hello")
+    list.add(item)
+    x = 42
+    obj.method().chain()
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for expression statements, got %d", (int)r.error_count);
+	};
+}
+
+// ── Real-world: function bodies from nob.kt ────────────────────────
+
+fn void parse_real_world_compile_function() @test {
+	@pool() {
+		String content =
+`fun compile(module: Module): Boolean {
+    val start_time = System.nanoTime()
+    if (module in compiled) return false
+    module.mods.forEach { compile(it) }
+
+    val src = path(module.src).toFile()
+    var target = module.src_target()
+    val sources: Sequence<File> = when {
+        src.isFile -> sequenceOf(src)
+        src.isDirectory -> src.walkTopDown().filter { it.isFile && it.extension == "kt" }
+        else -> emptySequence()
+    }
+
+    val any_compiled_target_file = get_any_compiled_file(target.toFile())
+    val has_changes = sources.any { file ->
+        file.lastModified() > any_compiled_target_file?.lastModified() ?: 0
+    }
+
+    compiled.add(module)
+    if (!has_changes) return false
+
+    val classpath = module.compile_cp()
+    if (src.isFile && src.name == "nob.kt") target = Paths.get(module.target).toAbsolutePath().normalize()
+    compile_with_daemon(src, target, classpath, module.name)
+    return true
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for real-world compile function, got %d", (int)r.error_count);
+
+		// Verify local variables are parsed
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* block = fun_block(r, fun_node);
+
+		// Should find local val/var declarations
+		usz prop_count = count_kind(r, block, PROPERTY_DECL);
+		assert(prop_count >= 5, "expected at least 5 local declarations, got %d", (int)prop_count);
+	};
+}
+
+fn void parse_real_world_try_catch_function() @test {
+	@pool() {
+		String content =
+`fun compile_with_daemon(src: File, target: Path, classpath: String, name: String, retries: Int = 3) {
+    val kotlin_libs = listOf("a.jar", "b.jar").joinToString(":") { it }
+    val args = buildList {
+        add("-d")
+        add(target.toString())
+    }
+    val client_alive_file = target.resolve(".alive").toFile()
+    try {
+        val session_id = daemon.leaseCompileSession(client_alive_file.absolutePath).get()
+        try {
+            exit_code = compile(daemon, session_id)
+        } finally {
+            daemon.releaseCompileSession(session_id)
+        }
+    } catch (e: IllegalStateException) {
+        daemon.shutdown()
+        Thread.sleep(1000)
+        if (retries > 0) compile_with_daemon(src, target, classpath, name, retries-1)
+        else throw e
+        return
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for try/catch function, got %d", (int)r.error_count);
+	};
+}
+
+// ── Expression parsing tests ───────────────────────────────────────
+
+// Helper: get the first expression statement (direct child of block) of a given kind
+fn AstNode* first_expr(ParseResult* r, AstNode* block, NodeKind kind) {
+	for (usz i = 0; i < block.child_count; i++) {
+		AstNode* ch = ast::get_child(r, block, i)!!;
+		if (ch.kind == kind) return ch;
+	}
+	unreachable("expected expression child of kind %d", (int)kind);
+	return null;
+}
+
+// ── Simple name expression ─────────────────────────────────────────
+
+fn void parse_expr_name() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    bar
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz name_count = count_kind(r, block, NAME_EXPR);
+		assert(name_count == 1, "expected 1 NAME_EXPR, got %d", (int)name_count);
+
+		AstNode* name_node = first_expr(r, block, NAME_EXPR);
+		assert(name_node.name == "bar", "expected name 'bar', got '%s'", name_node.name);
+	};
+}
+
+// ── Literal expressions ────────────────────────────────────────────
+
+fn void parse_expr_integer_literal() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    42
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz lit_count = count_kind(r, block, LITERAL_EXPR);
+		assert(lit_count == 1, "expected 1 LITERAL_EXPR, got %d", (int)lit_count);
+
+		AstNode* lit = first_expr(r, block, LITERAL_EXPR);
+		assert(lit.extra_text == "42", "expected '42', got '%s'", lit.extra_text);
+	};
+}
+
+fn void parse_expr_string_literal() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    "hello world"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_boolean_literal() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    true
+    false
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz lit_count = count_kind(r, block, LITERAL_EXPR);
+		assert(lit_count == 2, "expected 2 LITERAL_EXPR, got %d", (int)lit_count);
+	};
+}
+
+fn void parse_expr_null_literal() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    null
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz lit_count = count_kind(r, block, LITERAL_EXPR);
+		assert(lit_count == 1, "expected 1 LITERAL_EXPR, got %d", (int)lit_count);
+	};
+}
+
+// ── Function call expressions ──────────────────────────────────────
+
+fn void parse_expr_simple_call() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    println("hello")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz call_count = count_kind(r, block, CALL_EXPR);
+		assert(call_count == 1, "expected 1 CALL_EXPR, got %d", (int)call_count);
+
+		AstNode* call = first_expr(r, block, CALL_EXPR);
+		assert(call.name == "println", "expected name 'println', got '%s'", call.name);
+	};
+}
+
+fn void parse_expr_call_multiple_args() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    add(1, 2, 3)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		AstNode* call = first_expr(r, block, CALL_EXPR);
+		assert(call.name == "add", "expected name 'add', got '%s'", call.name);
+	};
+}
+
+fn void parse_expr_chained_calls() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    list.map { it }.filter { it > 0 }.toList()
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Dot access expressions ─────────────────────────────────────────
+
+fn void parse_expr_dot_access() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    obj.name
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz dot_count = count_kind(r, block, DOT_EXPR);
+		assert(dot_count == 1, "expected 1 DOT_EXPR, got %d", (int)dot_count);
+
+		AstNode* dot = first_expr(r, block, DOT_EXPR);
+		assert(dot.name == "name", "expected member 'name', got '%s'", dot.name);
+	};
+}
+
+fn void parse_expr_safe_call() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    obj?.name
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		AstNode* dot = first_expr(r, block, DOT_EXPR);
+		assert(dot.name == "name", "expected member 'name', got '%s'", dot.name);
+		assert(dot.extra_text == "?.", "expected '?.' safe call");
+	};
+}
+
+fn void parse_expr_member_call() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    obj.method(42)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz call_count = count_kind(r, block, CALL_EXPR);
+		assert(call_count == 1, "expected 1 CALL_EXPR, got %d", (int)call_count);
+
+		AstNode* call = first_expr(r, block, CALL_EXPR);
+		assert(call.name == "method", "expected name 'method', got '%s'", call.name);
+	};
+}
+
+fn void parse_expr_chained_dot_access() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    a.b.c.d
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		// The outermost should be a DOT_EXPR with name "d"
+		AstNode* outer = first_expr(r, block, DOT_EXPR);
+		assert(outer.name == "d", "expected outermost member 'd', got '%s'", outer.name);
+	};
+}
+
+// ── Binary expressions ─────────────────────────────────────────────
+
+fn void parse_expr_binary_add() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    a + b
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz bin_count = count_kind(r, block, BINARY_EXPR);
+		assert(bin_count == 1, "expected 1 BINARY_EXPR, got %d", (int)bin_count);
+
+		AstNode* bin = first_expr(r, block, BINARY_EXPR);
+		assert(bin.extra_text == "+", "expected operator '+', got '%s'", bin.extra_text);
+	};
+}
+
+fn void parse_expr_binary_comparison() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x >= 10
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz bin_count = count_kind(r, block, BINARY_EXPR);
+		assert(bin_count == 1, "expected 1 BINARY_EXPR, got %d", (int)bin_count);
+
+		AstNode* bin = first_expr(r, block, BINARY_EXPR);
+		assert(bin.extra_text == ">=", "expected operator '>=', got '%s'", bin.extra_text);
+	};
+}
+
+fn void parse_expr_binary_logical() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    a && b || c
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Should produce nested BINARY_EXPRs due to precedence
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		// The outermost should be || (lower precedence)
+		AstNode* outer = first_expr(r, block, BINARY_EXPR);
+		assert(outer.extra_text == "||", "expected outermost operator '||', got '%s'", outer.extra_text);
+	};
+}
+
+fn void parse_expr_binary_equality() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x == y
+    a != b
+    p === q
+    m !== n
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz bin_count = count_kind(r, block, BINARY_EXPR);
+		assert(bin_count == 4, "expected 4 BINARY_EXPR, got %d", (int)bin_count);
+	};
+}
+
+fn void parse_expr_binary_arithmetic() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    a + b * c - d / e % f
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_elvis() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    name ?: "default"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz bin_count = count_kind(r, block, BINARY_EXPR);
+		assert(bin_count == 1, "expected 1 BINARY_EXPR for elvis, got %d", (int)bin_count);
+	};
+}
+
+fn void parse_expr_range() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    1..10
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz bin_count = count_kind(r, block, BINARY_EXPR);
+		assert(bin_count == 1, "expected 1 BINARY_EXPR for range, got %d", (int)bin_count);
+	};
+}
+
+fn void parse_expr_infix_function() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    a to b
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Assignment expressions ─────────────────────────────────────────
+
+fn void parse_expr_assignment() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x = 42
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz assign_count = count_kind(r, block, ASSIGNMENT_EXPR);
+		assert(assign_count == 1, "expected 1 ASSIGNMENT_EXPR, got %d", (int)assign_count);
+
+		AstNode* assign = first_expr(r, block, ASSIGNMENT_EXPR);
+		assert(assign.extra_text == "=", "expected operator '=', got '%s'", assign.extra_text);
+	};
+}
+
+fn void parse_expr_compound_assignment() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x += 1
+    y -= 2
+    z *= 3
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz assign_count = count_kind(r, block, ASSIGNMENT_EXPR);
+		assert(assign_count == 3, "expected 3 ASSIGNMENT_EXPR, got %d", (int)assign_count);
+	};
+}
+
+// ── Prefix expressions ─────────────────────────────────────────────
+
+fn void parse_expr_prefix_negate() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    -x
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz prefix_count = count_kind(r, block, PREFIX_EXPR);
+		assert(prefix_count == 1, "expected 1 PREFIX_EXPR, got %d", (int)prefix_count);
+
+		AstNode* prefix = first_expr(r, block, PREFIX_EXPR);
+		assert(prefix.extra_text == "-", "expected operator '-', got '%s'", prefix.extra_text);
+	};
+}
+
+fn void parse_expr_prefix_not() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    !flag
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz prefix_count = count_kind(r, block, PREFIX_EXPR);
+		assert(prefix_count == 1, "expected 1 PREFIX_EXPR, got %d", (int)prefix_count);
+	};
+}
+
+fn void parse_expr_prefix_increment() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    ++x
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz prefix_count = count_kind(r, block, PREFIX_EXPR);
+		assert(prefix_count == 1, "expected 1 PREFIX_EXPR, got %d", (int)prefix_count);
+	};
+}
+
+fn void parse_expr_prefix_decrement() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    --y
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz prefix_count = count_kind(r, block, PREFIX_EXPR);
+		assert(prefix_count == 1, "expected 1 PREFIX_EXPR, got %d", (int)prefix_count);
+	};
+}
+
+// ── Postfix expressions ────────────────────────────────────────────
+
+fn void parse_expr_postfix_increment() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x++
+    y--
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz postfix_count = count_kind(r, block, POSTFIX_EXPR);
+		assert(postfix_count == 2, "expected 2 POSTFIX_EXPR, got %d", (int)postfix_count);
+	};
+}
+
+fn void parse_expr_not_null_assertion() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x!!
+    obj!!.name
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Index expressions ──────────────────────────────────────────────
+
+fn void parse_expr_index() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    arr[0]
+    map[key]
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz idx_count = count_kind(r, block, INDEX_EXPR);
+		assert(idx_count == 2, "expected 2 INDEX_EXPR, got %d", (int)idx_count);
+	};
+}
+
+// ── Parenthesized expressions ──────────────────────────────────────
+
+fn void parse_expr_paren() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    (a + b) * c
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── This/super expressions ─────────────────────────────────────────
+
+fn void parse_expr_this() @test {
+	@pool() {
+		String content =
+`class Foo {
+    fun bar() {
+        this
+        this.name
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_super() @test {
+	@pool() {
+		String content =
+`class Foo : Bar() {
+    override fun bar() {
+        super.bar()
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Lambda expressions ─────────────────────────────────────────────
+
+fn void parse_expr_lambda_simple() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val f = { x: Int -> x + 1 }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_lambda_trailing() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    listOf(1, 2, 3).map { it * 2 }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_lambda_multi_params() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val f = { a: Int, b: Int -> a + b }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Callable reference expressions ─────────────────────────────────
+
+fn void parse_expr_callable_ref() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    ::bar
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz ref_count = count_kind(r, block, CALLABLE_REF_EXPR);
+		assert(ref_count == 1, "expected 1 CALLABLE_REF_EXPR, got %d", (int)ref_count);
+
+		AstNode* ref_node = first_expr(r, block, CALLABLE_REF_EXPR);
+		assert(ref_node.name == "bar", "expected name 'bar', got '%s'", ref_node.name);
+	};
+}
+
+// ── Type check/cast expressions ────────────────────────────────────
+
+fn void parse_expr_is_check() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x is String
+    y !is Int
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz check_count = count_kind(r, block, TYPE_CHECK_EXPR);
+		assert(check_count == 2, "expected 2 TYPE_CHECK_EXPR, got %d", (int)check_count);
+	};
+}
+
+fn void parse_expr_as_cast() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    x as String
+    y as? Int
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz cast_count = count_kind(r, block, TYPE_CAST_EXPR);
+		assert(cast_count == 2, "expected 2 TYPE_CAST_EXPR, got %d", (int)cast_count);
+	};
+}
+
+// ── Spread expression ──────────────────────────────────────────────
+
+fn void parse_expr_spread() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    bar(*args)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+// ── Complex expression combinations ────────────────────────────────
+
+fn void parse_expr_complex_chain() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    obj.method(1, 2).field?.toString()
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_complex_mixed() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val result = if (x > 0) x * 2 else -x
+    val name = obj?.name ?: "unknown"
+    items.filter { it != null }.map { it!! }
+    val sum = list.fold(0) { acc, item -> acc + item }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for complex mixed expressions, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_when_as_expression() @test {
+	@pool() {
+		String content =
+`fun foo(x: Any) {
+    val result = when (x) {
+        is String -> x.length
+        is Int -> x + 1
+        else -> 0
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_string_template() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val name = "world"
+    println("hello $name")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_object_expression() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val listener = object : Runnable {
+        override fun run() {
+            println("running")
+        }
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_nested_calls_with_lambdas() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    buildList {
+        add("a")
+        addAll(other.map { it.uppercase() })
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_in_val_initializer() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val x = a + b * c
+    val y = listOf(1, 2, 3).size
+    val z = if (flag) 1 else 2
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* block = fun_block(r, child(r, file_node(r), 0));
+		usz prop_count = count_kind(r, block, PROPERTY_DECL);
+		assert(prop_count == 3, "expected 3 PROPERTY_DECL, got %d", (int)prop_count);
+	};
+}
+
+fn void parse_expr_member_ref_after_dot() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    list.map(String::length)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_real_world_builder_pattern() @test {
+	@pool() {
+		String content =
+`fun createConfig(): Config {
+    return Config.builder()
+        .setName("test")
+        .setPort(8080)
+        .setDebug(true)
+        .build()
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for builder pattern, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_expr_real_world_coroutine() @test {
+	@pool() {
+		String content =
+`suspend fun fetchData(url: String): Result {
+    val response = client.get(url)
+    val body = response.body?.string() ?: throw Exception("Empty body")
+    return Result(body.length, body.hashCode())
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for coroutine function, got %d", (int)r.error_count);
+	};
+}
