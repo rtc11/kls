@@ -119,10 +119,11 @@ fn void send_notification(String method, Object* params) {
  * Write a JSON object as an LSP message to stdout.
  */
 fn void write_message(Object* msg) {
-	// Serialize JSON body to a temp DString
+	// Serialize JSON body to a temp DString using our
+	// custom serializer that properly escapes strings.
 	DString body;
 	body.tinit();
-	body.appendf("%s", msg);
+	json_serialize(&body, msg);
 	String body_str = body.str_view();
 
 	// Write Content-Length header + body
@@ -130,4 +131,97 @@ fn void write_message(Object* msg) {
 	io::fprintf(stdout, "Content-Length: %d\r\n\r\n", body_str.len)!!;
 	io::fprint(stdout, body_str)!!;
 	stdout.flush()!!;
+}
+
+// ── Custom JSON serializer with proper string escaping ─────────────
+
+/**
+ * Append an RFC 8259 JSON-escaped string (with surrounding quotes) to out.
+ * Escapes: \" \\ \n \r \t \b \f and control chars 0x00-0x1F as \u00XX.
+ */
+fn void json_escape_string(DString* out, String s) {
+	out.appendf(`"`);
+	foreach (c : s) {
+		switch (c) {
+			case '"':  out.appendf(`\"`);
+			case '\\': out.appendf(`\\`);
+			case '\n': out.appendf(`\n`);
+			case '\r': out.appendf(`\r`);
+			case '\t': out.appendf(`\t`);
+			case '\b': out.appendf(`\b`);
+			case 0x0C: out.appendf(`\f`); // form feed
+			default:
+				if (c < 0x20) {
+					// Control character: emit \u00XX
+					out.appendf(`\u00%s%s`,
+						HEX_DIGITS[(c >> 4) & 0x0F],
+						HEX_DIGITS[c & 0x0F]);
+				} else {
+					out.append_char(c);
+				}
+		}
+	}
+	out.appendf(`"`);
+}
+
+const String[16] HEX_DIGITS = {
+	"0", "1", "2", "3", "4", "5", "6", "7",
+	"8", "9", "a", "b", "c", "d", "e", "f",
+};
+
+/**
+ * Recursively serialize an Object tree to a DString as valid JSON.
+ * Unlike Object.to_format (appendf "%s"), this properly escapes
+ * string values and map keys per RFC 8259.
+ */
+fn void json_serialize(DString* out, Object* obj) {
+	if (obj.is_null()) {
+		out.appendf("null");
+		return;
+	}
+	if (obj.is_bool()) {
+		out.appendf(obj.b ? "true" : "false");
+		return;
+	}
+	if (obj.is_string()) {
+		json_escape_string(out, obj.s);
+		return;
+	}
+	if (obj.is_int()) {
+		out.appendf("%d", (long)obj.i);
+		return;
+	}
+	if (obj.is_float()) {
+		out.appendf("%g", obj.f);
+		return;
+	}
+	if (obj.is_array()) {
+		out.appendf("[");
+		for (sz i = 0; i < obj.get_len(); i++) {
+			if (i > 0) out.appendf(",");
+			json_serialize(out, obj.get_at(i));
+		}
+		out.appendf("]");
+		return;
+	}
+	if (obj.is_map()) {
+		out.appendf("{");
+		bool first = true;
+		obj.@each_entry(; String key, Object* value) {
+			if (!first) out.appendf(",");
+			first = false;
+			json_escape_string(out, key);
+			out.appendf(":");
+			json_serialize(out, value);
+		};
+		out.appendf("}");
+		return;
+	}
+	// Empty object (new_obj with no set/push) -> empty JSON object
+	if (obj.is_empty()) {
+		out.appendf("{}");
+		return;
+	}
+	// Fallback for any other type (shouldn't happen in practice)
+	out.appendf("null");
 }
