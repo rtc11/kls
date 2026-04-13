@@ -32,6 +32,9 @@ fn Object* build_capabilities() {
 	// Go to definition support
 	caps.set("definitionProvider", true);
 
+	// Find references support
+	caps.set("referencesProvider", true);
+
 	// Document symbol support (outline view)
 	caps.set("documentSymbolProvider", true);
 
