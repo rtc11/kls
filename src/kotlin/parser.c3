@@ -2624,12 +2624,12 @@ fn void Parser.skip_type_ref(Parser* self) {
 		return;
 	}
 
-	// Handle suspend function types: suspend (A) -> B
+	// Handle suspend function types: suspend (A) -> B, suspend Type.() -> B
 	if (self.at(KW_SUSPEND)) {
 		self.advance();
-		if (self.at(LPAREN)) {
-			self.skip_type_ref(); // recurse to handle the function type
-		}
+		// After suspend, the rest is a regular function type or receiver function type
+		// Recurse to handle: (A) -> B  or  Type.() -> B  or  Type<G>.() -> B
+		self.skip_type_ref();
 		return;
 	}
 

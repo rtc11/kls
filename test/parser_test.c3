@@ -2804,3 +2804,38 @@ fun foo() {
 		assert(r.error_count == 0, "expected no errors for nob.kt patterns, got %d", (int)r.error_count);
 	};
 }
+
+fn void parse_suspend_receiver_function_type() @test {
+	@pool() {
+		String content =
+`class Route(
+    val method: String,
+    val handler: suspend Exchange.() -> Any?,
+)
+
+fun get(path: String = "", handler: suspend Exchange.() -> Any?) {}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for suspend receiver function type, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+		assert(cls.name == "Route", "expected 'Route', got '%s'", cls.name);
+
+		// Check the handler param has correct type text
+		bool found_handler = false;
+		for (usz i = 0; i < cls.child_count; i++) {
+			AstNode* ch = ast::get_child(r, cls, i)!!;
+			if (ch.kind == PARAM && ch.name == "handler") {
+				found_handler = true;
+				assert(ch.type_text == "suspend Exchange.() -> Any?",
+					"expected type 'suspend Exchange.() -> Any?', got '%s'", ch.type_text);
+			}
+		}
+		assert(found_handler, "expected to find handler param");
+
+		AstNode* fun = child(r, f, 1);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "get", "expected 'get', got '%s'", fun.name);
+	};
+}
