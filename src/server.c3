@@ -13,6 +13,7 @@ import kls::lsp::definition;
 import kls::lsp::references;
 import kls::lsp::document_highlight;
 import kls::lsp::document_symbols;
+import kls::lsp::signature_help;
 import kls::lsp::semantic_tokens;
 
 struct Server {
@@ -112,6 +113,12 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/hover":
 			if (params != null) {
 				Object* result = hover::handle_hover(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/signatureHelp":
+			if (params != null) {
+				Object* result = signature_help::handle_signature_help(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			}
 

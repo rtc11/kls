@@ -29,6 +29,14 @@ fn Object* build_capabilities() {
 	completion_opts.set("triggerCharacters", trigger_chars);
 	caps.set("completionProvider", completion_opts);
 
+	// Signature help support
+	Object* sig_help_opts = object::new_obj(tmem);
+	Object* sig_trigger_chars = object::new_obj(tmem);
+	sig_trigger_chars.push(object::new_string("(", tmem));
+	sig_trigger_chars.push(object::new_string(",", tmem));
+	sig_help_opts.set("triggerCharacters", sig_trigger_chars);
+	caps.set("signatureHelpProvider", sig_help_opts);
+
 	// Go to definition support
 	caps.set("definitionProvider", true);
 
