@@ -11,6 +11,7 @@ import kls::lsp::hover;
 import kls::lsp::completion;
 import kls::lsp::definition;
 import kls::lsp::references;
+import kls::lsp::document_highlight;
 import kls::lsp::document_symbols;
 import kls::lsp::semantic_tokens;
 
@@ -129,6 +130,12 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/references":
 			if (params != null) {
 				Object* result = references::handle_references(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/documentHighlight":
+			if (params != null) {
+				Object* result = document_highlight::handle_document_highlight(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			}
 

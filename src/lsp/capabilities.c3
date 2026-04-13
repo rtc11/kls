@@ -35,6 +35,9 @@ fn Object* build_capabilities() {
 	// Find references support
 	caps.set("referencesProvider", true);
 
+	// Document highlight support (same-symbol highlighting)
+	caps.set("documentHighlightProvider", true);
+
 	// Document symbol support (outline view)
 	caps.set("documentSymbolProvider", true);
 
