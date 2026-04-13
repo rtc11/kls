@@ -1252,6 +1252,11 @@ fn void Parser.parse_when_expr(Parser* self) {
 fn void Parser.skip_when_condition(Parser* self) {
 	int depth = 0;
 	while (!self.at_eof()) {
+		// Skip string literals atomically (they may contain RCURL from templates)
+		if (self.at(STRING_OPEN) || self.at(MULTILINE_STRING_OPEN)) {
+			self.skip_string_tokens();
+			continue;
+		}
 		if (self.at(LCURL)) {
 			if (depth == 0) return; // start of a block, not part of condition
 			depth++;
@@ -1352,6 +1357,11 @@ fn void Parser.parse_for_stmt(Parser* self) {
 fn void Parser.skip_until_closing_paren(Parser* self) {
 	int depth = 0;
 	while (!self.at_eof()) {
+		// Skip string literals atomically (they may contain RCURL from templates)
+		if (self.at(STRING_OPEN) || self.at(MULTILINE_STRING_OPEN)) {
+			self.skip_string_tokens();
+			continue;
+		}
 		if (self.at(LPAREN)) { depth++; self.advance(); continue; }
 		if (self.at(RPAREN)) {
 			if (depth == 0) return;
@@ -2691,12 +2701,44 @@ fn void Parser.parse_expression_body(Parser* self) {
 }
 
 /**
+ * Skip over a string literal's token sequence (STRING_OPEN ... STRING_CLOSE
+ * or MULTILINE_STRING_OPEN ... MULTILINE_STRING_CLOSE), including any nested
+ * template expressions that contain LCURL/RCURL tokens.
+ * Caller must be positioned ON the STRING_OPEN/MULTILINE_STRING_OPEN token.
+ */
+fn void Parser.skip_string_tokens(Parser* self) {
+	TokenKind open_kind = self.current.kind;
+	TokenKind close_kind = (open_kind == MULTILINE_STRING_OPEN)
+		? MULTILINE_STRING_CLOSE
+		: STRING_CLOSE;
+	self.advance(); // consume opening token
+	int nesting = 1;
+	while (nesting > 0 && !self.at_eof()) {
+		if (self.current.kind == open_kind) {
+			nesting++;
+		} else if (self.current.kind == close_kind) {
+			nesting--;
+			if (nesting == 0) {
+				self.advance(); // consume closing token
+				return;
+			}
+		}
+		self.advance();
+	}
+}
+
+/**
  * Skip a parameter default value expression.
  * Similar to parse_expression_body but also stops at comma and closing paren.
  */
 fn void Parser.skip_param_default(Parser* self) {
 	int depth = 0;
 	while (!self.at_eof()) {
+		// Skip string literals atomically (they may contain RCURL from templates)
+		if (self.at(STRING_OPEN) || self.at(MULTILINE_STRING_OPEN)) {
+			self.skip_string_tokens();
+			continue;
+		}
 		if (self.at(LCURL)) { depth++; self.advance(); continue; }
 		if (self.at(RCURL)) {
 			if (depth == 0) return;
@@ -2751,6 +2793,10 @@ fn void Parser.skip_property_accessor(Parser* self) {
 		int depth = 1;
 		self.advance(); // consume '{'
 		while (depth > 0 && !self.at_eof()) {
+			if (self.at(STRING_OPEN) || self.at(MULTILINE_STRING_OPEN)) {
+				self.skip_string_tokens();
+				continue;
+			}
 			if (self.at(LCURL)) {
 				depth++;
 			} else if (self.at(RCURL)) {

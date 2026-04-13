@@ -334,6 +334,7 @@ fn String? describe_token(Token tok) {
 		case KW_CONTINUE:    return "**continue** (keyword)\n\nSkips to the next iteration of a loop.";
 		case KW_BREAK:       return "**break** (keyword)\n\nExits the enclosing loop.";
 		case KW_AS:          return "**as** (keyword)\n\nType cast operator. Use `as?` for safe casts.";
+		case AS_SAFE:        return "**as?** (keyword)\n\nSafe type cast operator. Returns null if the cast fails.";
 		case KW_IS:          return "**is** (keyword)\n\nType check operator. Returns true if the expression is of the given type.";
 		case KW_IN:          return "**in** (keyword)\n\nChecks containment or iterates in a `for` loop.";
 		case KW_OUT:         return "**out** (keyword)\n\nMarks a type parameter as covariant (producer).";

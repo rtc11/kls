@@ -381,6 +381,20 @@ fn Token Lexer.lex_identifier(Lexer* self, usz start, uint start_line, uint star
 	}
 	String text = self.source[start:self.pos - start];
 	TokenKind kind = lookup_keyword(text);
+
+	// Handle compound keyword operators: as? -> AS_SAFE
+	if (kind == KW_AS && self.pos < self.source.len && self.peek() == '?') {
+		self.advance(); // consume '?'
+		return {
+			.kind = AS_SAFE,
+			.text = self.source[start:self.pos - start],
+			.line = start_line,
+			.col = start_col,
+			.offset = (uint)start,
+			.len = (uint)(self.pos - start),
+		};
+	}
+
 	return {
 		.kind = kind,
 		.text = text,

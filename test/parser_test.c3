@@ -2739,6 +2739,45 @@ fn void parse_fun_function_type_nullable_param() @test {
 	};
 }
 
+fn void parse_data_class_with_string_template_defaults() @test {
+	@pool() {
+		String content =
+`data class Lib(
+    val group_id: String,
+    val artifact_id: String,
+    val version: String,
+    val scope: String = "compile",
+    val repo: String = "https://repo1.maven.org/maven2",
+    val jar_path: Path = cache.resolve(group_id).resolve("${artifact_id}-$version.jar"),
+    val base_url: String = "$repo/${group_id.replace('.', '/')}/$artifact_id",
+    val pom_url: String = "$base_url/$version/$artifact_id-$version.pom",
+) {
+    val jar_file get() = File("${group_id}/${artifact_id}-${version}.jar")
+    override fun toString() = "$group_id:$artifact_id:$version"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for data class with template defaults, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_as_safe_cast() @test {
+	@pool() {
+		String content =
+`fun process(data: Any) {
+    val map = data as? Map
+    val str = data as? String
+    val list = data as? List
+    val attrs = (variant["attributes"] as? Map)?.mapNotNull { attr ->
+        val key = attr.key as? String
+        val value = (attr.value as? String)
+        key to value
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for as? cast, got %d", (int)r.error_count);
+	};
+}
+
 fn void parse_nob_kt_string_template_patterns() @test {
 	@pool() {
 		String content =

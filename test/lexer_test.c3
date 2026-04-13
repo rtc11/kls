@@ -858,3 +858,19 @@ fn void multiline_string_template() @test {
 	assert(found_ref, "expected STRING_TEMPLATE_REF in multiline string");
 	assert(toks[toks.len - 1].kind == MULTILINE_STRING_CLOSE);
 }
+
+fn void as_safe_token() @test {
+	Token[] toks = all_tokens("x as? String");
+	assert(toks.len == 3, "expected 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == IDENTIFIER);
+	assert(toks[1].kind == AS_SAFE);
+	assert(toks[1].text == "as?");
+	assert(toks[2].kind == IDENTIFIER);
+}
+
+fn void as_not_safe_without_question() @test {
+	Token[] toks = all_tokens("x as String");
+	assert(toks.len == 3, "expected 3 tokens, got %d", (int)toks.len);
+	assert(toks[1].kind == KW_AS);
+	assert(toks[1].text == "as");
+}
