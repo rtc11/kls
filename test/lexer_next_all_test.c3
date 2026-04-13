@@ -142,8 +142,12 @@ fn void integer_still_works() @test {
 }
 
 fn void string_still_works() @test {
-	Token tok = first_all(`"hello"`);
-	assert(tok.kind == STRING_CONTENT);
+	Token[] toks = all_tokens(`"hello"`);
+	assert(toks.len == 3, "expected 3 tokens (open, content, close), got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[1].text == "hello");
+	assert(toks[2].kind == STRING_CLOSE);
 }
 
 fn void operator_still_works() @test {

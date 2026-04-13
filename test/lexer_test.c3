@@ -338,9 +338,12 @@ fn void scientific_with_f_suffix() @test {
 // ── String Literals ─────────────────────────────────────────────────
 
 fn void simple_string() @test {
-	Token tok = first(`"hello"`);
-	assert(tok.kind == STRING_CONTENT);
-	assert(tok.text == `"hello"`);
+	Token[] toks = all_tokens(`"hello"`);
+	assert(toks.len == 3, "expected 3 tokens (open, content, close), got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[1].text == "hello");
+	assert(toks[2].kind == STRING_CLOSE);
 }
 
 fn void empty_string() @test {
@@ -350,23 +353,29 @@ fn void empty_string() @test {
 }
 
 fn void string_with_escape() @test {
-	Token tok = first(`"hello\nworld"`);
-	assert(tok.kind == STRING_CONTENT);
-	assert(tok.text == `"hello\nworld"`);
+	Token[] toks = all_tokens(`"hello\nworld"`);
+	assert(toks.len == 3, "expected 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[2].kind == STRING_CLOSE);
 }
 
 fn void triple_quoted_string() @test {
-	Token tok = first(`"""hello"""`);
-	assert(tok.kind == STRING_CONTENT);
-	assert(tok.text == `"""hello"""`);
+	Token[] toks = all_tokens(`"""hello"""`);
+	assert(toks.len == 3, "expected 3 tokens (open, content, close), got %d", (int)toks.len);
+	assert(toks[0].kind == MULTILINE_STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[1].text == "hello");
+	assert(toks[2].kind == MULTILINE_STRING_CLOSE);
 }
 
 fn void triple_quoted_multiline() @test {
 	String src = `"""line1
 line2
 line3"""`;
-	Token tok = first(src);
-	assert(tok.kind == STRING_CONTENT);
+	Token[] toks = all_tokens(src);
+	assert(toks.len >= 2, "expected at least 2 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == MULTILINE_STRING_OPEN);
 }
 
 // ── Character Literals ──────────────────────────────────────────────
@@ -743,4 +752,109 @@ fn void range_expression() @test {
 	assert(toks[0].kind == INTEGER_LITERAL);
 	assert(toks[1].kind == RANGE);
 	assert(toks[2].kind == INTEGER_LITERAL);
+}
+
+// ── String Template Lexing ──────────────────────────────────────────
+
+fn void string_template_simple_ref() @test {
+	// "hello $name"
+	Token[] toks = all_tokens(`"hello $name"`);
+	assert(toks.len == 4, "expected 4 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[1].text == "hello ");
+	assert(toks[2].kind == STRING_TEMPLATE_REF);
+	assert(toks[2].text == "$name");
+	assert(toks[3].kind == STRING_CLOSE);
+}
+
+fn void string_template_expr() @test {
+	// "result: ${x + 1}"
+	Token[] toks = all_tokens(`"result: ${x + 1}"`);
+	assert(toks.len >= 7, "expected >= 7 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[1].text == "result: ");
+	assert(toks[2].kind == STRING_TEMPLATE_START);
+	assert(toks[2].text == "${");
+	// tokens 3..N-3 are the expression: x, +, 1
+	// Last two: RCURL, STRING_CLOSE
+	usz last = toks.len - 1;
+	assert(toks[last].kind == STRING_CLOSE);
+	assert(toks[last - 1].kind == RCURL);
+}
+
+fn void string_template_nested_string() @test {
+	// "hello ${foo("bar")}" -- nested string inside template expression
+	Token[] toks = all_tokens(`"hello ${foo("bar")}"`);
+	// STRING_OPEN, STRING_CONTENT("hello "), STRING_TEMPLATE_START("${"),
+	// IDENTIFIER(foo), LPAREN, STRING_CONTENT("bar" - empty string), RPAREN,
+	// RCURL, STRING_CLOSE
+	assert(toks.len >= 7, "expected >= 7 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[2].kind == STRING_TEMPLATE_START);
+	// Find the closing tokens
+	usz last = toks.len - 1;
+	assert(toks[last].kind == STRING_CLOSE, "expected STRING_CLOSE at end, got %d", (int)toks[last].kind);
+}
+
+fn void string_template_function_call() @test {
+	// "value: ${colorize("text", Color.yellow)}"
+	Token[] toks = all_tokens(`"value: ${colorize("text", Color.yellow)}"`);
+	assert(toks.len >= 8, "expected >= 8 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[1].text == "value: ");
+	assert(toks[2].kind == STRING_TEMPLATE_START);
+	// Last tokens: RCURL, STRING_CLOSE
+	usz last = toks.len - 1;
+	assert(toks[last].kind == STRING_CLOSE, "expected STRING_CLOSE at end, got %d", (int)toks[last].kind);
+	assert(toks[last - 1].kind == RCURL, "expected RCURL before close, got %d", (int)toks[last - 1].kind);
+}
+
+fn void string_template_ref_at_start() @test {
+	// "$x is great"
+	Token[] toks = all_tokens(`"$x is great"`);
+	assert(toks.len >= 3, "expected >= 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_TEMPLATE_REF);
+	assert(toks[1].text == "$x");
+	assert(toks[2].kind == STRING_CONTENT);
+	usz last = toks.len - 1;
+	assert(toks[last].kind == STRING_CLOSE);
+}
+
+fn void string_template_ref_at_end() @test {
+	// "value: $x"
+	Token[] toks = all_tokens(`"value: $x"`);
+	assert(toks.len == 4, "expected 4 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_CONTENT);
+	assert(toks[2].kind == STRING_TEMPLATE_REF);
+	assert(toks[3].kind == STRING_CLOSE);
+}
+
+fn void string_only_template_ref() @test {
+	// "$x"
+	Token[] toks = all_tokens(`"$x"`);
+	assert(toks.len == 3, "expected 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == STRING_OPEN);
+	assert(toks[1].kind == STRING_TEMPLATE_REF);
+	assert(toks[2].kind == STRING_CLOSE);
+}
+
+fn void multiline_string_template() @test {
+	// """hello $name"""
+	String src = `"""hello $name"""`;
+	Token[] toks = all_tokens(src);
+	assert(toks.len >= 3, "expected >= 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == MULTILINE_STRING_OPEN);
+	// Find template ref
+	bool found_ref = false;
+	for (usz i = 0; i < toks.len; i++) {
+		if (toks[i].kind == STRING_TEMPLATE_REF) found_ref = true;
+	}
+	assert(found_ref, "expected STRING_TEMPLATE_REF in multiline string");
+	assert(toks[toks.len - 1].kind == MULTILINE_STRING_CLOSE);
 }

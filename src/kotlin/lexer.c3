@@ -3,11 +3,21 @@ module kls::kotlin::lexer;
 import kls::kotlin::token;
 import std::io;
 
+const int MAX_STRING_DEPTH = 8;  // max nesting of string templates
+
 struct Lexer {
 	String source;
 	usz pos;
 	uint line;
 	uint col;
+	// String template state: a stack of contexts for nested strings.
+	// in_string[depth-1] == true means we're inside a string literal.
+	// brace_depth[depth-1] tracks `{` nesting inside `${ ... }`.
+	// is_multiline[depth-1] tracks triple-quoted vs regular string.
+	bool[MAX_STRING_DEPTH] in_string;
+	int[MAX_STRING_DEPTH] brace_depth;
+	bool[MAX_STRING_DEPTH] is_multiline;
+	int string_depth;            // current nesting level (0 = not in string)
 }
 
 fn Lexer init(String source) {
@@ -20,8 +30,59 @@ fn Lexer init(String source) {
 }
 
 fn Token Lexer.next(Lexer* self) {
-	self.skip_whitespace_and_comments();
+	// If we're inside a string template expression (${ ... }),
+	// lex normally but track brace nesting.
+	if (self.string_depth > 0 && self.brace_depth[self.string_depth - 1] > 0) {
+		self.skip_whitespace_and_comments();
+		if (self.pos >= self.source.len) {
+			return self.make_token(EOF, self.pos, 0);
+		}
+		char c = self.peek();
+		// Track braces inside template expressions
+		if (c == '{') {
+			self.brace_depth[self.string_depth - 1]++;
+			usz start = self.pos;
+			uint sl = self.line; uint sc = self.col;
+			self.advance();
+			return self.make_token_at(LCURL, start, sl, sc);
+		}
+		if (c == '}') {
+			self.brace_depth[self.string_depth - 1]--;
+			if (self.brace_depth[self.string_depth - 1] == 0) {
+				// Closing the template expression: emit RCURL and resume string
+				usz start = self.pos;
+				uint sl = self.line; uint sc = self.col;
+				self.advance();
+				return self.make_token_at(RCURL, start, sl, sc);
+			}
+			usz start = self.pos;
+			uint sl = self.line; uint sc = self.col;
+			self.advance();
+			return self.make_token_at(RCURL, start, sl, sc);
+		}
+		// Inside a template expression, lex the next normal token.
+		// Strings can be nested inside template expressions.
+		return self.lex_normal_token();
+	}
 
+	// If we're inside a string literal (not in a template expression),
+	// continue lexing string content.
+	if (self.string_depth > 0) {
+		return self.lex_string_content();
+	}
+
+	// Normal lexing
+	self.skip_whitespace_and_comments();
+	if (self.pos >= self.source.len) {
+		return self.make_token(EOF, self.pos, 0);
+	}
+	return self.lex_normal_token();
+}
+
+/**
+ * Lex the next normal (non-string-content) token.
+ */
+fn Token Lexer.lex_normal_token(Lexer* self) {
 	if (self.pos >= self.source.len) {
 		return self.make_token(EOF, self.pos, 0);
 	}
@@ -61,6 +122,95 @@ fn Token Lexer.next(Lexer* self) {
  * tokens where every visible token must be reported.
  */
 fn Token Lexer.next_all(Lexer* self) {
+	// If we're inside a string template expression (${ ... }),
+	// lex normally (with whitespace tokens) but track brace nesting.
+	if (self.string_depth > 0 && self.brace_depth[self.string_depth - 1] > 0) {
+		if (self.pos >= self.source.len) {
+			return self.make_token(EOF, self.pos, 0);
+		}
+		char c = self.peek();
+		usz start = self.pos;
+		uint start_line = self.line;
+		uint start_col = self.col;
+
+		// Whitespace
+		if (c == ' ' || c == '\t' || c == '\r') {
+			while (self.pos < self.source.len) {
+				char ch = self.peek();
+				if (ch == ' ' || ch == '\t' || ch == '\r') {
+					self.advance();
+				} else {
+					break;
+				}
+			}
+			return self.make_token_at(WHITESPACE, start, start_line, start_col);
+		}
+
+		// Newline
+		if (c == '\n') {
+			self.advance();
+			self.line++;
+			self.col = 0;
+			return self.make_token_at(NEWLINE, start, start_line, start_col);
+		}
+
+		// Line comment
+		if (c == '/' && self.peek_at(1) == '/') {
+			while (self.pos < self.source.len && self.peek() != '\n') {
+				self.advance();
+			}
+			return self.make_token_at(LINE_COMMENT, start, start_line, start_col);
+		}
+
+		// Block comment (nestable)
+		if (c == '/' && self.peek_at(1) == '*') {
+			self.advance(); // skip /
+			self.advance(); // skip *
+			int depth = 1;
+			while (self.pos < self.source.len && depth > 0) {
+				char bc = self.peek();
+				if (bc == '/' && self.peek_at(1) == '*') {
+					self.advance();
+					self.advance();
+					depth++;
+				} else if (bc == '*' && self.peek_at(1) == '/') {
+					self.advance();
+					self.advance();
+					depth--;
+				} else {
+					if (bc == '\n') {
+						self.line++;
+						self.col = 0;
+					}
+					self.advance();
+				}
+			}
+			return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
+		}
+
+		// Track braces inside template expressions
+		if (c == '{') {
+			self.brace_depth[self.string_depth - 1]++;
+			self.advance();
+			return self.make_token_at(LCURL, start, start_line, start_col);
+		}
+		if (c == '}') {
+			self.brace_depth[self.string_depth - 1]--;
+			self.advance();
+			return self.make_token_at(RCURL, start, start_line, start_col);
+		}
+
+		// Normal token inside template expression
+		return self.lex_normal_token_all();
+	}
+
+	// If we're inside a string literal (not in a template expression),
+	// continue lexing string content.
+	if (self.string_depth > 0) {
+		return self.lex_string_content();
+	}
+
+	// Normal lexing with all whitespace/comments
 	if (self.pos >= self.source.len) {
 		return self.make_token(EOF, self.pos, 0);
 	}
@@ -124,6 +274,22 @@ fn Token Lexer.next_all(Lexer* self) {
 		}
 		return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
 	}
+
+	return self.lex_normal_token_all();
+}
+
+/**
+ * Lex a normal (non-whitespace/comment) token for next_all mode.
+ */
+fn Token Lexer.lex_normal_token_all(Lexer* self) {
+	if (self.pos >= self.source.len) {
+		return self.make_token(EOF, self.pos, 0);
+	}
+
+	usz start = self.pos;
+	uint start_line = self.line;
+	uint start_col = self.col;
+	char c = self.peek();
 
 	// Identifiers and keywords
 	if (is_ident_start(c)) {
@@ -292,6 +458,10 @@ fn Token Lexer.lex_number(Lexer* self, usz start, uint start_line, uint start_co
 	return self.make_token_at(kind, start, start_line, start_col);
 }
 
+/**
+ * Start lexing a string literal.
+ * Emits STRING_OPEN or MULTILINE_STRING_OPEN and pushes string state.
+ */
 fn Token Lexer.lex_string(Lexer* self, usz start, uint start_line, uint start_col) {
 	self.advance(); // opening "
 
@@ -299,38 +469,172 @@ fn Token Lexer.lex_string(Lexer* self, usz start, uint start_line, uint start_co
 	if (self.pos + 1 < self.source.len && self.peek() == '"' && self.source[self.pos + 1] == '"') {
 		self.advance(); // second "
 		self.advance(); // third "
-		// Read until closing """
-		while (self.pos + 2 < self.source.len) {
-			if (self.peek() == '"' && self.source[self.pos + 1] == '"' && self.source[self.pos + 2] == '"') {
-				self.advance();
-				self.advance();
-				self.advance();
-				return self.make_token_at(STRING_CONTENT, start, start_line, start_col);
-			}
-			if (self.peek() == '\n') {
-				self.line++;
-				self.col = 0;
-			}
-			self.advance();
-		}
-		// Unterminated
-		return self.make_token_at(ERROR, start, start_line, start_col);
+		self.push_string_state(true);
+		return self.make_token_at(MULTILINE_STRING_OPEN, start, start_line, start_col);
 	}
 
-	// Regular string
-	while (self.pos < self.source.len && self.peek() != '"' && self.peek() != '\n') {
-		if (self.peek() == '\\') {
+	// Regular string: check for empty string ""
+	if (self.pos < self.source.len && self.peek() == '"') {
+		// Empty string: emit as STRING_OPEN immediately followed by STRING_CLOSE
+		// Don't push state; just emit STRING_CONTENT for the whole ""
+		self.advance(); // closing "
+		return self.make_token_at(STRING_CONTENT, start, start_line, start_col);
+	}
+
+	self.push_string_state(false);
+	return self.make_token_at(STRING_OPEN, start, start_line, start_col);
+}
+
+/**
+ * Push a new string context onto the stack.
+ */
+fn void Lexer.push_string_state(Lexer* self, bool multiline) {
+	if (self.string_depth < MAX_STRING_DEPTH) {
+		self.in_string[self.string_depth] = true;
+		self.brace_depth[self.string_depth] = 0;
+		self.is_multiline[self.string_depth] = multiline;
+		self.string_depth++;
+	}
+}
+
+/**
+ * Pop the current string context.
+ */
+fn void Lexer.pop_string_state(Lexer* self) {
+	if (self.string_depth > 0) {
+		self.string_depth--;
+	}
+}
+
+/**
+ * Continue lexing inside a string literal.
+ * Emits STRING_CONTENT, STRING_TEMPLATE_REF, STRING_TEMPLATE_START,
+ * STRING_CLOSE, or MULTILINE_STRING_CLOSE.
+ */
+fn Token Lexer.lex_string_content(Lexer* self) {
+	if (self.pos >= self.source.len) {
+		// Unterminated string
+		self.pop_string_state();
+		return self.make_token(EOF, self.pos, 0);
+	}
+
+	bool multiline = self.string_depth > 0 && self.is_multiline[self.string_depth - 1];
+
+	// Check for string close
+	if (self.peek() == '"') {
+		if (multiline) {
+			if (self.pos + 2 < self.source.len && self.source[self.pos + 1] == '"' && self.source[self.pos + 2] == '"') {
+				usz start = self.pos;
+				uint start_line = self.line;
+				uint start_col = self.col;
+				self.advance(); // "
+				self.advance(); // "
+				self.advance(); // "
+				self.pop_string_state();
+				return self.make_token_at(MULTILINE_STRING_CLOSE, start, start_line, start_col);
+			}
+			// Single/double quote inside triple-quoted string: fall through to content
+		} else {
+			usz start = self.pos;
+			uint start_line = self.line;
+			uint start_col = self.col;
+			self.advance(); // closing "
+			self.pop_string_state();
+			return self.make_token_at(STRING_CLOSE, start, start_line, start_col);
+		}
+	}
+
+	// Check for template reference: $identifier
+	if (self.peek() == '$' && self.pos + 1 < self.source.len) {
+		char next_ch = self.source[self.pos + 1];
+		if (next_ch == '{') {
+			// Template expression start: ${
+			usz start = self.pos;
+			uint start_line = self.line;
+			uint start_col = self.col;
+			self.advance(); // $
+			self.advance(); // {
+			// Record brace depth for this string level
+			if (self.string_depth > 0) {
+				self.brace_depth[self.string_depth - 1] = 1;
+			}
+			return self.make_token_at(STRING_TEMPLATE_START, start, start_line, start_col);
+		}
+		if (is_ident_start(next_ch)) {
+			// Template reference: $identifier
+			usz start = self.pos;
+			uint start_line = self.line;
+			uint start_col = self.col;
+			self.advance(); // $
+			while (self.pos < self.source.len && is_ident_part(self.peek())) {
+				self.advance();
+			}
+			return self.make_token_at(STRING_TEMPLATE_REF, start, start_line, start_col);
+		}
+	}
+
+	// Regular string content: consume until $, closing quote, or end
+	usz start = self.pos;
+	uint start_line = self.line;
+	uint start_col = self.col;
+
+	while (self.pos < self.source.len) {
+		char ch = self.peek();
+
+		// Closing quote check
+		if (ch == '"') {
+			if (multiline) {
+				if (self.pos + 2 < self.source.len && self.source[self.pos + 1] == '"' && self.source[self.pos + 2] == '"') {
+					break; // let next call handle the close
+				}
+				// Single/double " in multiline: include as content
+				self.advance();
+				continue;
+			} else {
+				break; // let next call handle the close
+			}
+		}
+
+		// Template marker
+		if (ch == '$' && self.pos + 1 < self.source.len) {
+			char nc = self.source[self.pos + 1];
+			if (nc == '{' || is_ident_start(nc)) {
+				break; // let next call handle the template
+			}
+		}
+
+		// Newline terminates regular strings
+		if (!multiline && ch == '\n') {
+			break;
+		}
+
+		// Escape sequences in regular strings
+		if (!multiline && ch == '\\') {
 			self.advance(); // backslash
 			if (self.pos < self.source.len) {
+				if (self.peek() == '\n') {
+					self.line++;
+					self.col = 0;
+				}
 				self.advance(); // escaped char
 			}
-		} else {
-			self.advance();
+			continue;
 		}
+
+		if (ch == '\n') {
+			self.advance();
+			self.line++;
+			self.col = 0;
+			continue;
+		}
+
+		self.advance();
 	}
 
-	if (self.pos < self.source.len && self.peek() == '"') {
-		self.advance(); // closing "
+	// If we consumed nothing (e.g., unterminated), pop and return error
+	if (self.pos == start) {
+		self.pop_string_state();
+		return self.make_token_at(ERROR, start, start_line, start_col);
 	}
 
 	return self.make_token_at(STRING_CONTENT, start, start_line, start_col);

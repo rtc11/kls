@@ -187,8 +187,11 @@ fn void string_token_type() @test {
 
 		assert(result != null);
 		int[] data = get_data(result);
-		assert(data.len == 5, "expected 5 ints, got %d", (int)data.len);
+		// String "hello" now produces 3 tokens: STRING_OPEN, STRING_CONTENT, STRING_CLOSE
+		assert(data.len == 15, "expected 15 ints (3 tokens * 5), got %d", (int)data.len);
 		assert(data[3] == semantic_tokens::TT_STRING, "expected string type, got %d", data[3]);
+		assert(data[8] == semantic_tokens::TT_STRING, "expected string type for content, got %d", data[8]);
+		assert(data[13] == semantic_tokens::TT_STRING, "expected string type for close, got %d", data[13]);
 	};
 }
 

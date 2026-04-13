@@ -1581,12 +1581,13 @@ const int PREC_EQUALITY     = 4;  // ==, !=, ===, !==
 const int PREC_COMPARISON   = 5;  // <, >, <=, >=
 const int PREC_NAMED_CHECK  = 6;  // in, !in, is, !is
 const int PREC_ELVIS        = 7;  // ?:
-const int PREC_RANGE        = 8;  // ..
-const int PREC_ADDITIVE     = 9;  // +, -
-const int PREC_MULTIPLICATIVE = 10; // *, /, %
-const int PREC_TYPE_CAST    = 11; // as, as?
-const int PREC_PREFIX       = 12; // -, !, ++, --
-const int PREC_POSTFIX      = 13; // ++, --, !!, ., ?., (), [], ::
+const int PREC_INFIX_CALL   = 8;  // infix function calls: a to b, a and b, etc.
+const int PREC_RANGE        = 9;  // ..
+const int PREC_ADDITIVE     = 10; // +, -
+const int PREC_MULTIPLICATIVE = 11; // *, /, %
+const int PREC_TYPE_CAST    = 12; // as, as?
+const int PREC_PREFIX       = 13; // -, !, ++, --
+const int PREC_POSTFIX      = 14; // ++, --, !!, ., ?., (), [], ::
 
 /**
  * Get the infix/binary precedence level for a token kind.
@@ -1698,6 +1699,15 @@ fn usz Parser.parse_expression(Parser* self, int min_prec) {
 	// Parse infix / binary operators via precedence climbing
 	while (!self.at_eof()) {
 		int prec = infix_precedence(self.current.kind);
+
+		// Infix function calls: `a to b`, `a until b`, `a downTo b`, etc.
+		// Only recognize a few well-known infix functions to avoid
+		// mistakenly treating statement-initial identifiers as infix calls.
+		if (prec == PREC_NONE && PREC_INFIX_CALL >= min_prec
+			&& is_known_infix_function(self.current.text)) {
+			prec = PREC_INFIX_CALL;
+		}
+
 		if (prec == PREC_NONE || prec < min_prec) break;
 
 		// Handle is/!is and as/as? specially (right side is a type, not expression)
@@ -2834,6 +2844,27 @@ fn bool is_declaration_start(TokenKind kind) {
 			return true;
 		default:
 			return false;
+	}
+}
+
+/**
+ * Check if an identifier is a well-known infix function in Kotlin stdlib.
+ * This avoids misinterpreting statement-initial identifiers as infix calls
+ * without full newline-sensitive parsing.
+ */
+fn bool is_known_infix_function(String text) {
+	switch (text) {
+		case "to":       return true;
+		case "and":      return true;
+		case "or":       return true;
+		case "xor":      return true;
+		case "shl":      return true;
+		case "shr":      return true;
+		case "ushr":     return true;
+		case "until":    return true;
+		case "downTo":   return true;
+		case "step":     return true;
+		default:         return false;
 	}
 }
 

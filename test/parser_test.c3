@@ -2625,3 +2625,143 @@ fn void parse_expr_real_world_coroutine() @test {
 		assert(r.error_count == 0, "expected no errors for coroutine function, got %d", (int)r.error_count);
 	};
 }
+
+// ── String template expression parsing ─────────────────────────────
+
+fn void parse_string_template_simple_ref() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    println("hello $name")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for string template with ref, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_string_template_with_expr() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    println("result: ${x + 1}")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for string template with expr, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_string_template_with_function_call() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    println("${colorize("text", Color.yellow)}")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for string template with function call, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_string_template_complex_interpolation() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val msg = "${colorize("Building", Color.yellow)} - not found ${e.message}"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for complex string template, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_string_template_multiple_interpolations() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val msg = "start ${a.b()} middle ${c.d("x")} end"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for multiple interpolations, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_infix_to_in_expression() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val pair = 1 to "one"
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		// 'to' is an infix function call - currently not fully supported,
+		// but it should not produce errors since 'to' is an identifier
+		assert(r.error_count == 0, "expected no errors for infix 'to', got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_infix_to_in_map_of() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    val map = mapOf(1 to "one", 2 to "two")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for mapOf with 'to', got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_fun_nullable_param() @test {
+	@pool() {
+		String content = `fun foo(x: String?, y: Int?) {}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for nullable params, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_fun_complex_nullable_types() @test {
+	@pool() {
+		String content = `fun foo(x: Map<String, Int>?, y: List<String>?) {}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for complex nullable types, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_fun_nullable_return_type() @test {
+	@pool() {
+		String content = `fun foo(): String? { return null }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for nullable return type, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_fun_function_type_nullable_param() @test {
+	@pool() {
+		String content = `fun foo(block: ((String?) -> Unit)?) {}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for function type with nullable, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_nob_kt_string_template_patterns() @test {
+	@pool() {
+		String content =
+`fun log(level: String, msg: String) {
+    println("${colorize(level, Color.yellow)} $msg")
+    println("${colorize(level, Color.green)} $msg")
+    println("${colorize(level, Color.red)} - not found ${e.message}")
+    println("${colorize(level, Color.red)} ${e.message}")
+    println("${colorize("Building", Color.cyan)}")
+}
+
+fun release(module: Module) {
+    val main_class_fq = module.main_src()?.main_class_fq()
+    val src_target = Paths.get(module.src)?.toFile()
+    val x = module.main_src()?.main_class_fq()
+    val y = module.target?.toFile()
+}
+
+fun foo() {
+    val pair = 1 to "one"
+    val map = mapOf(1 to "one", 2 to "two")
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for nob.kt patterns, got %d", (int)r.error_count);
+	};
+}
