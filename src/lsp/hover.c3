@@ -48,7 +48,7 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
 	if (tok.kind == IDENTIFIER) {
 		ParseResult* pr = store.get_ast(uri) ?? null;
 		if (pr != null) {
-			if (try desc = describe_identifier_from_ast(pr, tok)) {
+			if (try desc = describe_identifier_from_ast(pr, doc.content, tok)) {
 				description = desc;
 				found_description = true;
 			}
@@ -116,7 +116,7 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
  * Try to find a declaration matching the identifier token in the AST
  * and return a rich signature description.
  */
-fn String? describe_identifier_from_ast(ParseResult* pr, Token tok) {
+fn String? describe_identifier_from_ast(ParseResult* pr, String source, Token tok) {
 	if (pr.node_count == 0) return NO_DESCRIPTION~;
 
 	// Search all declarations for one matching this identifier name
@@ -136,13 +136,14 @@ fn String? describe_identifier_from_ast(ParseResult* pr, Token tok) {
 
 	if (best == null) return NO_DESCRIPTION~;
 
-	return build_signature(best, pr);
+	return build_signature(best, pr, source);
 }
 
 /**
  * Build a markdown signature string from an AST declaration node.
+ * If source is provided, also appends the KDoc/comment documentation.
  */
-fn String build_signature(AstNode* node, ParseResult* pr) {
+fn String build_signature(AstNode* node, ParseResult* pr, String source = "") {
 	DString ds;
 	ds.tinit();
 
@@ -236,6 +237,15 @@ fn String build_signature(AstNode* node, ParseResult* pr) {
 
 	ds.appendf("\n```");
 
+	// Append documentation from source comments if available
+	if (source.len > 0) {
+		if (try doc_text = extract_doc_comment(source, node.start_offset)) {
+			if (doc_text.len > 0) {
+				ds.appendf("\n\n%s", doc_text);
+			}
+		}
+	}
+
 	return ds.str_view();
 }
 
@@ -267,6 +277,369 @@ fn void append_modifiers(DString* ds, uint flags) {
 	if (flags & ast::MOD_EXTERNAL != 0)    ds.appendf("external ");
 	if (flags & ast::MOD_EXPECT != 0)      ds.appendf("expect ");
 	if (flags & ast::MOD_ACTUAL != 0)      ds.appendf("actual ");
+}
+
+// ── Doc comment extraction ─────────────────────────────────────────
+
+/**
+ * Extract the documentation comment (KDoc or consecutive line comments)
+ * immediately preceding a declaration at the given source offset.
+ *
+ * Scans backwards from `decl_start_offset`, skipping whitespace and
+ * annotations. Returns the cleaned comment text (delimiters stripped),
+ * or a fault if no documentation is found.
+ */
+fn String? extract_doc_comment(String source, uint decl_start_offset) {
+	if (decl_start_offset == 0 || source.len == 0) return NO_DESCRIPTION~;
+
+	// Scan backward from just before the declaration start
+	usz pos = (usz)decl_start_offset;
+
+	// Skip backwards over whitespace and annotations
+	pos = skip_back_whitespace(source, pos);
+
+	if (pos == 0) return NO_DESCRIPTION~;
+
+	// Check what's immediately before the declaration
+	// Case 1: Block comment ending with */
+	if (pos >= 2 && source[pos - 1] == '/' && source[pos - 2] == '*') {
+		return extract_block_comment(source, pos);
+	}
+
+	// Case 2: Line comment(s) ending with \n before whitespace
+	// We need to find if the line before the declaration is a // comment
+	if (try doc = extract_line_comments(source, pos)) {
+		return doc;
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Skip backward over whitespace characters (space, tab, newline, CR).
+ * Returns the new position (first non-whitespace from the right).
+ */
+fn usz skip_back_whitespace(String source, usz pos) {
+	while (pos > 0) {
+		char c = source[pos - 1];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+			pos--;
+		} else {
+			break;
+		}
+	}
+	return pos;
+}
+
+/**
+ * Extract a block comment that ends at position `pos` (where source[pos-1]
+ * is a forward slash and source[pos-2] is a star). Searches backward for
+ * the opening delimiter. Only returns the content if it is a KDoc block.
+ */
+fn String? extract_block_comment(String source, usz end_pos) {
+	// end_pos points just past the closing slash of the block end marker
+	// Walk backward to find the matching block start marker
+	if (end_pos < 4) return NO_DESCRIPTION~;
+
+	int depth = 1;
+	usz pos = end_pos - 2;  // skip past the */ we already found
+
+	while (pos > 0 && depth > 0) {
+		pos--;
+		if (pos > 0 && source[pos - 1] == '/' && source[pos] == '*') {
+			depth--;
+			if (depth == 0) {
+				// Found the opening /*
+				usz start = pos - 1;
+				String raw = source[start..end_pos - 1];
+				// Only treat as doc if it starts with /**
+				if (raw.len >= 3 && raw[2] == '*') {
+					return clean_block_comment(raw);
+				}
+				return NO_DESCRIPTION~;
+			}
+			if (pos > 0) pos--;  // skip the '/' char
+		} else if (pos > 0 && source[pos - 1] == '*' && source[pos] == '/') {
+			depth++;
+		}
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Clean a KDoc block comment: strip the opening and closing delimiters,
+ * remove leading whitespace and star on each line, trim the result.
+ */
+fn String clean_block_comment(String raw) {
+	DString ds;
+	ds.tinit();
+
+	// Strip /** prefix and */ suffix
+	usz start = 3;  // skip "/**"
+	usz end = raw.len;
+	if (end >= 2 && raw[end - 1] == '/' && raw[end - 2] == '*') {
+		end -= 2;
+	}
+
+	// If the entire content after stripping is empty/whitespace
+	if (start >= end) return ds.str_view();
+
+	String body = raw[start..end - 1];
+
+	// Process line by line
+	bool first_line = true;
+	usz line_start = 0;
+
+	for (usz i = 0; i <= body.len; i++) {
+		bool at_end = (i == body.len);
+		bool at_newline = (!at_end && body[i] == '\n');
+
+		if (at_end || at_newline) {
+			String line;
+			if (i > line_start) {
+				line = body[line_start..i - 1];
+			} else {
+				line = "";
+			}
+
+			// Strip leading whitespace and optional leading *
+			String trimmed = strip_comment_line(line);
+
+			if (first_line) {
+				// The first line might be on the same line as /**
+				if (trimmed.len > 0) {
+					ds.appendf("%s", trimmed);
+					first_line = false;
+				}
+			} else {
+				if (!first_line) {
+					ds.appendf("\n");
+				}
+				ds.appendf("%s", trimmed);
+				first_line = false;
+			}
+
+			line_start = i + 1;
+		}
+	}
+
+	String result = ds.str_view();
+	// Trim trailing whitespace/newlines
+	while (result.len > 0 && (result[result.len - 1] == '\n' ||
+	       result[result.len - 1] == '\r' ||
+	       result[result.len - 1] == ' ' ||
+	       result[result.len - 1] == '\t')) {
+		result = result[:result.len - 1];
+	}
+	// Trim leading whitespace/newlines
+	while (result.len > 0 && (result[0] == '\n' ||
+	       result[0] == '\r' ||
+	       result[0] == ' ' ||
+	       result[0] == '\t')) {
+		result = result[1..];
+	}
+
+	if (result.len == 0) return "";
+	return result;
+}
+
+/**
+ * Strip leading whitespace and an optional single leading '*' from a
+ * KDoc line. Returns the trimmed content.
+ */
+fn String strip_comment_line(String line) {
+	usz pos = 0;
+	// Skip leading whitespace
+	while (pos < line.len && (line[pos] == ' ' || line[pos] == '\t')) {
+		pos++;
+	}
+	// Skip optional leading *
+	if (pos < line.len && line[pos] == '*') {
+		pos++;
+		// Skip one space after * if present
+		if (pos < line.len && line[pos] == ' ') {
+			pos++;
+		}
+	}
+	if (pos >= line.len) return "";
+	return line[pos..];
+}
+
+/**
+ * Extract consecutive // line comments immediately before a declaration.
+ * Scans backwards line by line collecting comment lines.
+ */
+fn String? extract_line_comments(String source, usz pos) {
+	// We're at the end of whitespace before the declaration.
+	// Check if the line(s) before contain // comments.
+
+	// Collect comment lines in reverse order
+	String[32] lines;
+	int line_count = 0;
+
+	usz scan = pos;
+
+	while (scan > 0 && line_count < 32) {
+		// We should be just after the end of a line (or at start of file)
+		// Find the start of this line
+		usz line_end = scan;
+
+		// Skip back over the newline if we're right after one
+		if (scan > 0 && source[scan - 1] == '\n') {
+			scan--;
+			if (scan > 0 && source[scan - 1] == '\r') {
+				scan--;
+			}
+			line_end = scan;
+		} else if (line_count == 0) {
+			// First iteration: we're at end of a non-newline char
+			// This means the content before decl isn't newline-terminated line comments
+			// It could still be a line comment if it ends right at this position
+		} else {
+			break;
+		}
+
+		// Find the start of this line
+		usz line_start = scan;
+		while (line_start > 0 && source[line_start - 1] != '\n') {
+			line_start--;
+		}
+
+		// Get the line text
+		if (line_end <= line_start) {
+			break;
+		}
+		String line = source[line_start..line_end - 1];
+
+		// Trim leading whitespace and check if it starts with //
+		String trimmed = line;
+		usz trim_pos = 0;
+		while (trim_pos < trimmed.len && (trimmed[trim_pos] == ' ' || trimmed[trim_pos] == '\t')) {
+			trim_pos++;
+		}
+		if (trim_pos >= trimmed.len) {
+			// Blank line: stop collecting
+			break;
+		}
+
+		if (trim_pos + 1 < trimmed.len && trimmed[trim_pos] == '/' && trimmed[trim_pos + 1] == '/') {
+			// It's a line comment -- extract content after //
+			usz content_start = trim_pos + 2;
+			// Skip one space after // if present
+			if (content_start < trimmed.len && trimmed[content_start] == ' ') {
+				content_start++;
+			}
+			String content;
+			if (content_start < trimmed.len) {
+				content = trimmed[content_start..];
+			} else {
+				content = "";
+			}
+			lines[line_count] = content;
+			line_count++;
+			scan = line_start;
+		} else {
+			// Not a comment line: stop
+			break;
+		}
+	}
+
+	if (line_count == 0) return NO_DESCRIPTION~;
+
+	// Build the result in forward order (lines were collected in reverse)
+	DString ds;
+	ds.tinit();
+	for (int i = line_count - 1; i >= 0; i--) {
+		if (i < line_count - 1) {
+			ds.appendf("\n");
+		}
+		ds.appendf("%s", lines[i]);
+	}
+
+	String result = ds.str_view();
+	if (result.len == 0) return NO_DESCRIPTION~;
+	return result;
+}
+
+/**
+ * Extract the text for a specific @param tag from a doc comment.
+ * Returns the description text for the named parameter, or a fault.
+ */
+fn String? extract_param_doc(String doc_text, String param_name) {
+	if (doc_text.len == 0 || param_name.len == 0) return NO_DESCRIPTION~;
+
+	// Search for @param <name> pattern
+	usz pos = 0;
+	while (pos + 7 + param_name.len < doc_text.len) {
+		// Look for @param
+		if (doc_text[pos] == '@' && pos + 6 <= doc_text.len &&
+			doc_text[pos + 1] == 'p' && doc_text[pos + 2] == 'a' &&
+			doc_text[pos + 3] == 'r' && doc_text[pos + 4] == 'a' &&
+			doc_text[pos + 5] == 'm') {
+			usz tag_end = pos + 6;
+			// Skip whitespace after @param
+			while (tag_end < doc_text.len && (doc_text[tag_end] == ' ' || doc_text[tag_end] == '\t')) {
+				tag_end++;
+			}
+			// Check if the parameter name matches
+			if (tag_end + param_name.len <= doc_text.len) {
+				bool name_match = true;
+				for (usz j = 0; j < param_name.len; j++) {
+					if (doc_text[tag_end + j] != param_name[j]) {
+						name_match = false;
+						break;
+					}
+				}
+				if (name_match) {
+					// Check that the name is followed by whitespace or end
+					usz after_name = tag_end + param_name.len;
+					if (after_name >= doc_text.len ||
+						doc_text[after_name] == ' ' || doc_text[after_name] == '\t' ||
+						doc_text[after_name] == '\n') {
+						// Extract the description: from after the name to end of line
+						usz desc_start = after_name;
+						// Skip whitespace before description
+						while (desc_start < doc_text.len &&
+							(doc_text[desc_start] == ' ' || doc_text[desc_start] == '\t')) {
+							desc_start++;
+						}
+						// Find end of description (next @tag or end)
+						usz desc_end = desc_start;
+						while (desc_end < doc_text.len) {
+							if (doc_text[desc_end] == '\n') {
+								// Check if next non-whitespace line starts with @
+								usz next = desc_end + 1;
+								while (next < doc_text.len &&
+									(doc_text[next] == ' ' || doc_text[next] == '\t')) {
+									next++;
+								}
+								if (next < doc_text.len && doc_text[next] == '@') {
+									break;
+								}
+								// Continuation line: include it
+							}
+							desc_end++;
+						}
+						if (desc_end > desc_start) {
+							String desc = doc_text[desc_start..desc_end - 1];
+							// Trim trailing whitespace
+							while (desc.len > 0 && (desc[desc.len - 1] == ' ' ||
+								desc[desc.len - 1] == '\n' ||
+								desc[desc.len - 1] == '\r' ||
+								desc[desc.len - 1] == '\t')) {
+								desc = desc[:desc.len - 1];
+							}
+							if (desc.len > 0) return desc;
+						}
+					}
+				}
+			}
+		}
+		pos++;
+	}
+
+	return NO_DESCRIPTION~;
 }
 
 /**
@@ -591,7 +964,7 @@ fn String? describe_from_file(WorkspaceSymbol* sym, DocumentStore* store) {
 		if (!ast::is_declaration(n.kind)) continue;
 		if (n.name != sym.name) continue;
 		if (n.name_line == sym.line && n.name_col == sym.col) {
-			return build_signature(n, pr);
+			return build_signature(n, pr, content);
 		}
 	}
 
@@ -600,7 +973,7 @@ fn String? describe_from_file(WorkspaceSymbol* sym, DocumentStore* store) {
 		AstNode* n = &pr.nodes[i];
 		if (!ast::is_declaration(n.kind)) continue;
 		if (n.name != sym.name) continue;
-		return build_signature(n, pr);
+		return build_signature(n, pr, content);
 	}
 
 	return NO_DESCRIPTION~;

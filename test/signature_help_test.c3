@@ -349,3 +349,200 @@ fn void sig_help_active_param_clamped() @test {
 		assert(active_param == 0, "expected activeParameter clamped to 0, got %d", active_param);
 	};
 }
+
+// ── KDoc documentation appears in signature ────────────────────────
+
+fn void sig_help_kdoc_on_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`/**`
+			"\n"
+			` * Greets the given person by name.`
+			"\n"
+			` */`
+			"\n"
+			`fun greet(name: String) {}`
+			"\n"
+			`fun main() { greet("Alice") }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor inside greet() on last line
+		// Line 4: "fun main() { greet("Alice") }"
+		Object* params = make_params("file:///test.kt", 4, 21);
+		Object* result = signature_help::handle_signature_help(&store, params);
+
+		assert(result != null, "expected SignatureHelp result");
+
+		Object* sigs = result.get("signatures")!!;
+		Object* sig0 = sigs.get_at(0);
+
+		// Check documentation exists
+		Object* doc = sig0.get("documentation")!!;
+		String doc_value = doc.get_string("value")!!;
+		assert(doc_value.contains("Greets"), "doc should contain 'Greets', got '%s'", doc_value);
+
+		String doc_kind = doc.get_string("kind")!!;
+		assert(doc_kind == "markdown", "doc kind should be 'markdown', got '%s'", doc_kind);
+	};
+}
+
+// ── Line comments appear as documentation ──────────────────────────
+
+fn void sig_help_line_comment_doc() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`// Adds two numbers together.`
+			"\n"
+			`// Returns the sum.`
+			"\n"
+			`fun add(a: Int, b: Int): Int { return a + b }`
+			"\n"
+			`fun main() { add(1, 2) }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Line 3: "fun main() { add(1, 2) }"
+		Object* params = make_params("file:///test.kt", 3, 19);
+		Object* result = signature_help::handle_signature_help(&store, params);
+
+		assert(result != null, "expected SignatureHelp result");
+
+		Object* sigs = result.get("signatures")!!;
+		Object* sig0 = sigs.get_at(0);
+
+		Object* doc = sig0.get("documentation")!!;
+		String doc_value = doc.get_string("value")!!;
+		assert(doc_value.contains("Adds two numbers"), "doc should contain 'Adds two numbers', got '%s'", doc_value);
+		assert(doc_value.contains("Returns the sum"), "doc should contain 'Returns the sum', got '%s'", doc_value);
+	};
+}
+
+// ── No documentation when no comment precedes the function ─────────
+
+fn void sig_help_no_doc_without_comment() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun greet(name: String) {}\nfun main() { greet(\"\") }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 1, 20);
+		Object* result = signature_help::handle_signature_help(&store, params);
+
+		assert(result != null, "expected SignatureHelp result");
+
+		Object* sigs = result.get("signatures")!!;
+		Object* sig0 = sigs.get_at(0);
+
+		// documentation should not be present
+		if (try doc = sig0.get("documentation")) {
+			// If it exists, the value should be empty or missing
+			if (try val = doc.get_string("value")) {
+				assert(val.len == 0, "expected no doc value, got '%s'", val);
+			}
+		}
+	};
+}
+
+// ── Per-parameter documentation from @param tags ───────────────────
+
+fn void sig_help_param_doc_from_kdoc() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`/**`
+			"\n"
+			` * Sends a message to the user.`
+			"\n"
+			` * @param recipient the person to send to`
+			"\n"
+			` * @param message the content of the message`
+			"\n"
+			` */`
+			"\n"
+			`fun send(recipient: String, message: String) {}`
+			"\n"
+			`fun main() { send("Bob", "Hi") }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor inside send() on last line
+		// Line 6: `fun main() { send("Bob", "Hi") }`
+		Object* params = make_params("file:///test.kt", 6, 20);
+		Object* result = signature_help::handle_signature_help(&store, params);
+
+		assert(result != null, "expected SignatureHelp result");
+
+		// Check signature-level doc
+		Object* sigs = result.get("signatures")!!;
+		Object* sig0 = sigs.get_at(0);
+		Object* doc = sig0.get("documentation")!!;
+		String doc_value = doc.get_string("value")!!;
+		assert(doc_value.contains("Sends a message"), "sig doc should contain 'Sends a message', got '%s'", doc_value);
+
+		// Check per-parameter docs
+		Object* sig_params = sig0.get("parameters")!!;
+
+		// First param: recipient
+		Object* p0 = sig_params.get_at(0);
+		Object* p0_doc = p0.get("documentation")!!;
+		String p0_val = p0_doc.get_string("value")!!;
+		assert(p0_val.contains("person to send to"), "param 0 doc should describe recipient, got '%s'", p0_val);
+
+		// Second param: message
+		Object* p1 = sig_params.get_at(1);
+		Object* p1_doc = p1.get("documentation")!!;
+		String p1_val = p1_doc.get_string("value")!!;
+		assert(p1_val.contains("content of the message"), "param 1 doc should describe message, got '%s'", p1_val);
+	};
+}
+
+// ── KDoc with multiline description ────────────────────────────────
+
+fn void sig_help_kdoc_multiline() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`/**`
+			"\n"
+			` * Calculates the factorial of a number.`
+			"\n"
+			` * This uses an iterative approach`
+			"\n"
+			` * for better performance.`
+			"\n"
+			` */`
+			"\n"
+			`fun factorial(n: Int): Int { return 1 }`
+			"\n"
+			`fun main() { factorial(5) }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Line 6: "fun main() { factorial(5) }"
+		Object* params = make_params("file:///test.kt", 6, 23);
+		Object* result = signature_help::handle_signature_help(&store, params);
+
+		assert(result != null, "expected SignatureHelp result");
+
+		Object* sigs = result.get("signatures")!!;
+		Object* sig0 = sigs.get_at(0);
+		Object* doc = sig0.get("documentation")!!;
+		String doc_value = doc.get_string("value")!!;
+		assert(doc_value.contains("factorial"), "doc should mention factorial, got '%s'", doc_value);
+		assert(doc_value.contains("iterative"), "doc should mention iterative approach, got '%s'", doc_value);
+	};
+}

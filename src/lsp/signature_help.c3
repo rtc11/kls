@@ -68,7 +68,7 @@ fn Object* handle_signature_help(DocumentStore* store, Object* params) {
 	int active_param = count_active_param(doc.content, open_paren, cursor);
 
 	// Build the SignatureHelp response
-	return build_signature_help(decl, pr, active_param);
+	return build_signature_help(decl, pr, active_param, doc.content);
 }
 
 /**
@@ -197,8 +197,9 @@ fn int count_active_param(String content, uint open_paren, uint cursor) {
 
 /**
  * Build the SignatureHelp JSON response from a function/constructor declaration.
+ * Includes documentation from KDoc/comments when available.
  */
-fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param) {
+fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param, String source) {
 	// Build the signature label and collect parameter label offsets
 	DString label;
 	label.tinit();
@@ -207,20 +208,21 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 	hover::append_modifiers(&label, decl.mod_flags);
 
 	// Parameter info tracking
-	// Store up to 32 parameter offset pairs
+	// Store up to 32 parameter offset pairs and names
 	int[64] param_offsets; // pairs of [start, end]
+	String[32] param_names;
 	int param_count = 0;
 
 	if (decl.kind == FUN_DECL) {
 		label.appendf("fun %s(", decl.name);
-		param_count = append_params(&label, &param_offsets, decl, pr);
+		param_count = append_params(&label, &param_offsets, &param_names, decl, pr);
 		label.appendf(")");
 		if (decl.type_text.len > 0) {
 			label.appendf(": %s", decl.type_text);
 		}
 	} else if (decl.kind == CONSTRUCTOR_DECL) {
 		label.appendf("constructor(");
-		param_count = append_params(&label, &param_offsets, decl, pr);
+		param_count = append_params(&label, &param_offsets, &param_names, decl, pr);
 		label.appendf(")");
 	} else if (decl.kind == CLASS_DECL) {
 		// Class used as constructor call (e.g., MyClass(...))
@@ -228,7 +230,7 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 		label.appendf("%s(", decl.name);
 		uint decl_idx = ast::node_index(pr, decl);
 		// Check for PARAM children (primary constructor params)
-		param_count = append_params(&label, &param_offsets, decl, pr);
+		param_count = append_params(&label, &param_offsets, &param_names, decl, pr);
 		label.appendf(")");
 	} else {
 		// Other declaration types -- provide basic label
@@ -236,6 +238,18 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 	}
 
 	String label_str = label.str_view();
+
+	// Extract documentation from source
+	String doc_text = "";
+	bool has_doc = false;
+	if (source.len > 0) {
+		if (try dt = hover::extract_doc_comment(source, decl.start_offset)) {
+			if (dt.len > 0) {
+				doc_text = dt;
+				has_doc = true;
+			}
+		}
+	}
 
 	// Build ParameterInformation array
 	Object* params_array = object::new_obj(tmem);
@@ -245,6 +259,17 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 		label_range.push(object::new_int(param_offsets[i * 2], tmem));
 		label_range.push(object::new_int(param_offsets[i * 2 + 1], tmem));
 		param_info.set("label", label_range);
+
+		// Attach per-parameter documentation from @param tags
+		if (has_doc && i < 32) {
+			if (try pdoc = hover::extract_param_doc(doc_text, param_names[i])) {
+				Object* pdoc_obj = object::new_obj(tmem);
+				pdoc_obj.set("kind", "markdown");
+				pdoc_obj.set("value", pdoc);
+				param_info.set("documentation", pdoc_obj);
+			}
+		}
+
 		params_array.push(param_info);
 	}
 
@@ -252,6 +277,14 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 	Object* sig_info = object::new_obj(tmem);
 	sig_info.set("label", label_str);
 	sig_info.set("parameters", params_array);
+
+	// Attach documentation to the signature
+	if (has_doc) {
+		Object* doc_obj = object::new_obj(tmem);
+		doc_obj.set("kind", "markdown");
+		doc_obj.set("value", doc_text);
+		sig_info.set("documentation", doc_obj);
+	}
 
 	// Build SignatureHelp
 	Object* signatures = object::new_obj(tmem);
@@ -274,9 +307,10 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 /**
  * Append parameter list to the label DString and record the byte offset
  * of each parameter name+type within the label for ParameterInformation.
+ * Also records parameter names for @param doc extraction.
  * Returns the number of parameters appended.
  */
-fn int append_params(DString* label, int[64]* offsets, AstNode* decl, ParseResult* pr) {
+fn int append_params(DString* label, int[64]* offsets, String[32]* names, AstNode* decl, ParseResult* pr) {
 	uint decl_idx = ast::node_index(pr, decl);
 	int count = 0;
 	bool first = true;
@@ -305,6 +339,7 @@ fn int append_params(DString* label, int[64]* offsets, AstNode* decl, ParseResul
 		if (count < 32) {
 			(*offsets)[count * 2] = start;
 			(*offsets)[count * 2 + 1] = end;
+			(*names)[count] = child.name;
 		}
 		count++;
 	}

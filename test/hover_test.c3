@@ -369,3 +369,89 @@ fn void hover_val_property_shows_val() @test {
 		assert(!value.contains("var name"), "should not contain 'var name' for val property, got: '%s'", value);
 	};
 }
+
+// ── KDoc appears in hover for functions ────────────────────────────
+
+fn void hover_shows_kdoc_for_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`/**`
+			"\n"
+			` * Greets a person by name.`
+			"\n"
+			` */`
+			"\n"
+			`fun greet(name: String) {}`
+			"\n"
+			`fun main() { greet("x") }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Hover over "greet" in the call on line 4
+		// Line 4: "fun main() { greet("x") }"
+		//          01234567890123456
+		Object* params = make_hover_params("file:///test.kt", 4, 15);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("fun greet"), "expected signature in hover, got: '%s'", value);
+		assert(value.contains("Greets a person"), "expected KDoc in hover, got: '%s'", value);
+	};
+}
+
+// ── Line comments appear in hover ──────────────────────────────────
+
+fn void hover_shows_line_comments_for_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`// A simple data container.`
+			"\n"
+			`class Box(val value: Int)`
+			"\n"
+			`fun main() { Box(1) }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Hover over "Box" in the call on line 2
+		// Line 2: "fun main() { Box(1) }"
+		Object* params = make_hover_params("file:///test.kt", 2, 15);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("class Box"), "expected class signature in hover, got: '%s'", value);
+		assert(value.contains("simple data container"), "expected line comment in hover, got: '%s'", value);
+	};
+}
+
+// ── No doc when no comment is present ──────────────────────────────
+
+fn void hover_no_doc_without_comment() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet(name: String) {}\nfun main() { greet(\"\") }");
+
+		Object* params = make_hover_params("file:///test.kt", 1, 15);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("fun greet"), "expected signature, got: '%s'", value);
+		// Should not contain any doc text beyond the code block
+		// The value should just be the code block
+		assert(!value.contains("@param"), "should not have @param without KDoc, got: '%s'", value);
+	};
+}
