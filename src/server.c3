@@ -17,6 +17,7 @@ import kls::lsp::signature_help;
 import kls::lsp::semantic_tokens;
 import kls::lsp::workspace_symbols;
 import kls::lsp::rename;
+import kls::lsp::implementation;
 import kls::workspace;
 import kls::deps::classpath;
 import kls::deps::jar_index;
@@ -43,24 +44,51 @@ fn void Server.run(Server* self) {
 
 	while (self.is_running) {
 		@pool() {
-			String raw = json_rpc::read_message()!!;
-
-			Object* msg = json::tparse_string(raw)!!;
-
-			self.dispatch(msg);
+			// #1: Gracefully handle read/parse failures instead of panicking
+			if (catch excuse = self.run_one_message()) {
+				if (excuse == json_rpc::UNEXPECTED_EOF) {
+					io::eprintfn("[kls] stdin closed, shutting down");
+					self.is_running = false;
+				} else {
+					io::eprintfn("[kls] Error processing message: %s", excuse);
+				}
+			}
 		};
 	}
 }
 
-fn void Server.dispatch(Server* self, Object* msg) {
-	String method = msg.get_string("method")!!;
+fn void? Server.run_one_message(Server* self) {
+	String raw = json_rpc::read_message()!;
 
-	// Determine if this is a request (has id) or notification (no id)
-	int request_id = -1;
+	Object* msg;
+	if (try m = json::tparse_string(raw)) {
+		msg = m;
+	} else {
+		io::eprintfn("[kls] JSON parse error");
+		json_rpc::send_error_response(null, json_rpc::PARSE_ERROR, "Parse error");
+		return;
+	}
+
+	self.dispatch(msg);
+}
+
+fn void Server.dispatch(Server* self, Object* msg) {
+	// #2: Gracefully handle missing "method" field (e.g., JSON-RPC responses)
+	String method = msg.get_string("method") ?? "";
+	if (method.len == 0) {
+		io::eprintfn("[kls] Ignoring message without method field");
+		return;
+	}
+
+	// #4: Support both integer and string JSON-RPC IDs
+	Object* request_id = null;
 	bool is_request = false;
-	if (try id_val = msg.get_int("id")) {
-		request_id = id_val;
-		is_request = true;
+	if (try id_obj = msg.get("id")) {
+		// id can be int, string, or null per JSON-RPC 2.0
+		if (!id_obj.is_null()) {
+			request_id = id_obj;
+			is_request = true;
+		}
 	}
 
 	// Check initialization state
@@ -83,7 +111,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		params = p;
 	}
 
-	io::eprintfn("[kls] -> %s (id=%d)", method, request_id);
+	io::eprintfn("[kls] -> %s", method);
 
 	switch (method) {
 		case "initialize":
@@ -120,64 +148,93 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				sync::handle_did_close(&self.documents, params);
 			}
 
+		// #3: All request handlers send error response when params is null
 		case "textDocument/hover":
 			if (params != null) {
 				Object* result = hover::handle_hover(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/signatureHelp":
 			if (params != null) {
 				Object* result = signature_help::handle_signature_help(&self.documents, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/completion":
 			if (params != null) {
 				Object* result = completion::handle_completion(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/definition":
 			if (params != null) {
 				Object* result = definition::handle_definition(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/implementation":
+			if (params != null) {
+				Object* result = implementation::handle_implementation(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/references":
 			if (params != null) {
 				Object* result = references::handle_references(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/documentHighlight":
 			if (params != null) {
 				Object* result = document_highlight::handle_document_highlight(&self.documents, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/documentSymbol":
 			if (params != null) {
 				Object* result = document_symbols::handle_document_symbol(&self.documents, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/semanticTokens/full":
 			if (params != null) {
 				Object* result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/prepareRename":
 			if (params != null) {
 				Object* result = rename::handle_prepare_rename(&self.documents, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "textDocument/rename":
 			if (params != null) {
 				Object* result = rename::handle_rename(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		case "workspace/didChangeWatchedFiles":
@@ -189,6 +246,8 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			if (params != null) {
 				Object* result = workspace_symbols::handle_workspace_symbol(&self.workspace, params);
 				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
 		default:

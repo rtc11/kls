@@ -69,11 +69,14 @@ fn String? read_message() {
 
 /**
  * Send a JSON-RPC response with a result.
+ * Accepts Object* for id to support both integer and string JSON-RPC IDs.
  */
-fn void send_response(int id, Object* result) {
+fn void send_response(Object* id, Object* result) {
 	Object* response = object::new_obj(tmem);
 	response.set("jsonrpc", "2.0");
-	response.set("id", id);
+	if (id != null) {
+		response.set("id", id);
+	}
 	if (result != null) {
 		response.set("result", result);
 	} else {
@@ -87,15 +90,18 @@ fn void send_response(int id, Object* result) {
 
 /**
  * Send a JSON-RPC error response.
+ * Accepts Object* for id to support both integer and string JSON-RPC IDs.
  */
-fn void send_error_response(int id, int code, String message) {
+fn void send_error_response(Object* id, int code, String message) {
 	Object* error_obj = object::new_obj(tmem);
 	error_obj.set("code", code);
 	error_obj.set("message", message);
 
 	Object* response = object::new_obj(tmem);
 	response.set("jsonrpc", "2.0");
-	response.set("id", id);
+	if (id != null) {
+		response.set("id", id);
+	}
 	response.set("error", error_obj);
 
 	write_message(response);
