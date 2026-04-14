@@ -20,6 +20,8 @@ enum DepSymbolKind : int {
 
 // ── Dependency symbol ──────────────────────────────────────────────
 
+const usz MAX_DEP_SUPERTYPES = 8;
+
 struct DepSymbol {
 	String name;           // heap-copied simple name (e.g., "listOf", "String")
 	String signature;      // heap-copied Kotlin-style signature
@@ -27,6 +29,8 @@ struct DepSymbol {
 	String class_name;     // heap-copied declaring class simple name
 	String jar_path;       // heap-copied path to the JAR containing this symbol
 	DepSymbolKind kind;
+	String[MAX_DEP_SUPERTYPES] supertypes;  // heap-copied simple supertype names
+	usz supertype_count;
 }
 
 // ── Dependency index ───────────────────────────────────────────────
@@ -35,13 +39,16 @@ const usz MAX_DEP_SYMBOLS = 16384;
 
 struct DependencyIndex {
 	List{DepSymbol} symbols;
-	HashMap{String, List{usz}} name_index;  // name -> symbol indices
+	HashMap{String, List{usz}} name_index;   // name -> symbol indices
+	HashMap{String, List{usz}} super_index;  // supertype name -> symbol indices that extend/implement it
 	bool initialized;
+	bool limit_warned;                        // #15: only warn once about symbol limit
 }
 
 fn void DependencyIndex.init(DependencyIndex* self) {
 	self.symbols.init(mem);
 	self.name_index.init(mem);
+	self.super_index.init(mem);
 	self.initialized = true;
 }
 
@@ -53,6 +60,9 @@ fn void DependencyIndex.free(DependencyIndex* self) {
 		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
 		if (sym.class_name.len > 0) mem::free(sym.class_name.ptr);
 		if (sym.jar_path.len > 0) mem::free(sym.jar_path.ptr);
+		for (usz j = 0; j < sym.supertype_count; j++) {
+			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
+		}
 	}
 	self.symbols.free();
 
@@ -63,6 +73,15 @@ fn void DependencyIndex.free(DependencyIndex* self) {
 		}
 	};
 	self.name_index.free();
+
+	// Free super_index lists
+	@pool() {
+		foreach (&list : self.super_index.tvalues()) {
+			list.free();
+		}
+	};
+	self.super_index.free();
+
 	self.initialized = false;
 }
 
@@ -197,7 +216,30 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			sig.appendf(" : %s", super_str.str_view());
 		}
 
-		add_dep_symbol(idx, simple_name, sig.str_view(), pkg, simple_name, jar_path, class_kind);
+		// Collect structured supertypes for the class symbol
+		String[MAX_DEP_SUPERTYPES] class_supertypes;
+		usz class_supertype_count = 0;
+
+		// Add superclass (if not Object/Enum)
+		if (info.super_name.len > 0 && info.super_name != "java/lang/Object" && info.super_name != "java/lang/Enum") {
+			String super_simple = classfile::jvm_name_to_simple(info.super_name);
+			if (super_simple.len > 0 && class_supertype_count < MAX_DEP_SUPERTYPES) {
+				class_supertypes[class_supertype_count] = super_simple;
+				class_supertype_count++;
+			}
+		}
+
+		// Add interfaces
+		for (usz ii = 0; ii < info.interface_count && class_supertype_count < MAX_DEP_SUPERTYPES; ii++) {
+			String iface_simple = classfile::jvm_name_to_simple(info.interfaces[ii]);
+			if (iface_simple.len > 0) {
+				class_supertypes[class_supertype_count] = iface_simple;
+				class_supertype_count++;
+			}
+		}
+
+		add_dep_symbol(idx, simple_name, sig.str_view(), pkg, simple_name, jar_path, class_kind,
+			&class_supertypes, class_supertype_count);
 	}
 
 	// Add public methods as symbols
@@ -221,7 +263,8 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		sig.appendf("%s", m.name);
 		classfile::method_descriptor_to_kotlin(m.descriptor, &sig);
 
-		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD);
+		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD,
+			null, 0);
 	}
 
 	// Add public fields as symbols
@@ -235,13 +278,22 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		sig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
 		classfile::descriptor_to_kotlin_type(f.descriptor, &sig);
 
-		add_dep_symbol(idx, f.name, sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD);
+		add_dep_symbol(idx, f.name, sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD,
+			null, 0);
 	}
 }
 
 fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
-		String package_name, String class_name, String jar_path, DepSymbolKind kind) {
-	if (idx.symbols.len() >= MAX_DEP_SYMBOLS) return;
+		String package_name, String class_name, String jar_path, DepSymbolKind kind,
+		String[MAX_DEP_SUPERTYPES]* supertypes, usz supertype_count) {
+	if (idx.symbols.len() >= MAX_DEP_SYMBOLS) {
+		// #15: Warn once when the dependency symbol limit is reached
+		if (!idx.limit_warned) {
+			io::eprintfn("[kls] Warning: dependency symbol limit reached (%d), some symbols may be missing", MAX_DEP_SYMBOLS);
+			idx.limit_warned = true;
+		}
+		return;
+	}
 
 	DepSymbol sym = {
 		.name = name.copy(mem),
@@ -250,7 +302,15 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		.class_name = class_name.copy(mem),
 		.jar_path = jar_path.copy(mem),
 		.kind = kind,
+		.supertype_count = supertype_count,
 	};
+
+	// Copy supertypes
+	for (usz i = 0; i < supertype_count; i++) {
+		if (supertypes != null) {
+			sym.supertypes[i] = (*supertypes)[i].copy(mem);
+		}
+	}
 
 	usz sym_idx = idx.symbols.len();
 	idx.symbols.push(sym);
@@ -263,6 +323,25 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		new_list.init(mem);
 		new_list.push(sym_idx);
 		idx.name_index.set(name, new_list);
+	}
+
+	// Update super_index: map each supertype name -> this symbol
+	for (usz i = 0; i < supertype_count; i++) {
+		String st_name;
+		if (supertypes != null) {
+			st_name = (*supertypes)[i];
+		} else {
+			continue;
+		}
+		if (st_name.len == 0) continue;
+		if (try list_ref = idx.super_index.get_ref(st_name)) {
+			list_ref.push(sym_idx);
+		} else {
+			List{usz} new_list;
+			new_list.init(mem);
+			new_list.push(sym_idx);
+			idx.super_index.set(st_name, new_list);
+		}
 	}
 }
 
@@ -326,6 +405,28 @@ fn usz DependencyIndex.lookup_by_prefix(DependencyIndex* self, String prefix, De
 	}
 
 	return count;
+}
+
+/**
+ * Look up dependency symbols that extend/implement a given supertype.
+ * Writes matching pointers into out_buf and returns the count.
+ * Only returns class/interface/enum/object symbols (not methods/fields).
+ */
+fn usz DependencyIndex.lookup_by_supertype(DependencyIndex* self, String supertype_name, DepSymbol*[] out_buf) {
+	if (out_buf.len == 0 || supertype_name.len == 0) return 0;
+
+	if (try indices = self.super_index.get_ref(supertype_name)) {
+		usz count = 0;
+		for (usz i = 0; i < indices.len() && count < out_buf.len; i++) {
+			usz idx = indices.get(i);
+			if (idx < self.symbols.len()) {
+				out_buf[count] = &self.symbols[idx];
+				count++;
+			}
+		}
+		return count;
+	}
+	return 0;
 }
 
 // ── Kind mapping helpers ───────────────────────────────────────────

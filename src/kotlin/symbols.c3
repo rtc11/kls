@@ -12,6 +12,8 @@ enum SymbolKind : int {
 	TYPEALIAS,
 }
 
+const usz MAX_SUPERTYPES = 8;
+
 struct Symbol {
 	SymbolKind kind;
 	String name;
@@ -19,6 +21,8 @@ struct Symbol {
 	uint col;
 	uint offset;
 	uint len;
+	String[MAX_SUPERTYPES] supertypes;  // supertype names (slices into source)
+	usz supertype_count;
 }
 
 /**
@@ -50,23 +54,26 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 					count++;
 				}
 
-			case KW_CLASS:
-				if (try sym = scan_simple_name(&lex, SymbolKind.CLASS)) {
-					out_buf[count] = sym;
-					count++;
-				}
+		case KW_CLASS:
+			if (try sym = scan_simple_name(&lex, SymbolKind.CLASS)) {
+				scan_supertypes(&lex, &sym);
+				out_buf[count] = sym;
+				count++;
+			}
 
-			case KW_INTERFACE:
-				if (try sym = scan_simple_name(&lex, SymbolKind.INTERFACE)) {
-					out_buf[count] = sym;
-					count++;
-				}
+		case KW_INTERFACE:
+			if (try sym = scan_simple_name(&lex, SymbolKind.INTERFACE)) {
+				scan_supertypes(&lex, &sym);
+				out_buf[count] = sym;
+				count++;
+			}
 
-			case KW_OBJECT:
-				if (try sym = scan_simple_name(&lex, SymbolKind.OBJECT)) {
-					out_buf[count] = sym;
-					count++;
-				}
+		case KW_OBJECT:
+			if (try sym = scan_simple_name(&lex, SymbolKind.OBJECT)) {
+				scan_supertypes(&lex, &sym);
+				out_buf[count] = sym;
+				count++;
+			}
 
 			case KW_VAL:
 				nextcase;
@@ -278,5 +285,146 @@ fn Symbol make_symbol(SymbolKind kind, Token tok) @inline {
 		.col = tok.col,
 		.offset = tok.offset,
 		.len = tok.len,
+		.supertype_count = 0,
 	};
+}
+
+/**
+ * After scanning a class/interface/object name, use a SEPARATE lexer
+ * to look ahead in the source for the supertype list.
+ * This avoids advancing the main scanner's lexer position.
+ *
+ * Scans from the symbol's offset+len forward, looking for ': Type, Type'.
+ * Skips type parameters <T> and primary constructor (...).
+ */
+fn void scan_supertypes(Lexer* main_lex, Symbol* sym) {
+	// Create a separate lexer starting right after the symbol name
+	// We need to get the source from the main lexer
+	String source = main_lex.source;
+	usz start_pos = (usz)sym.offset + (usz)sym.len;
+	if (start_pos >= source.len) return;
+
+	Lexer lookahead = lexer::init(source[start_pos..]);
+
+	// Limit how far ahead we look (avoid scanning the entire file)
+	int budget = 50;
+
+	while (budget > 0) {
+		Token tok = lookahead.next();
+		budget--;
+		if (tok.kind == EOF) return;
+
+		// Skip type parameters
+		if (tok.kind == LANGLE) {
+			int depth = 1;
+			while (depth > 0 && budget > 0) {
+				Token inner = lookahead.next();
+				budget--;
+				if (inner.kind == EOF) return;
+				if (inner.kind == LANGLE) depth++;
+				if (inner.kind == RANGLE) depth--;
+			}
+			continue;
+		}
+
+		// Skip primary constructor parameters
+		if (tok.kind == LPAREN) {
+			int depth = 1;
+			while (depth > 0 && budget > 0) {
+				Token inner = lookahead.next();
+				budget--;
+				if (inner.kind == EOF) return;
+				if (inner.kind == LPAREN) depth++;
+				if (inner.kind == RPAREN) depth--;
+			}
+			continue;
+		}
+
+		// Found colon -- scan supertype names
+		if (tok.kind == COLON) {
+			scan_supertype_list(&lookahead, sym, source, start_pos);
+			return;
+		}
+
+		// Hit class body or end of declaration -- no supertypes
+		if (tok.kind == LCURL || tok.kind == SEMICOLON || tok.kind == KW_WHERE) {
+			return;
+		}
+
+		// Unexpected token for this context -- stop looking
+		if (tok.kind != IDENTIFIER && tok.kind != COMMA && tok.kind != DOT
+			&& tok.kind != KW_CONSTRUCTOR && tok.kind != KW_INTERNAL
+			&& tok.kind != KW_PUBLIC && tok.kind != KW_PRIVATE
+			&& tok.kind != KW_PROTECTED) {
+			return;
+		}
+	}
+}
+
+/**
+ * After consuming ':', scan the comma-separated supertype names.
+ * Records each simple name (ignoring generic args and constructor calls).
+ * Uses the original source and offset for correct string slicing.
+ */
+fn void scan_supertype_list(Lexer* lex, Symbol* sym, String source, usz base_offset) {
+	while (sym.supertype_count < MAX_SUPERTYPES) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) return;
+
+		if (tok.kind == IDENTIFIER) {
+			// Compute the actual offset in the original source
+			usz real_offset = base_offset + (usz)tok.offset;
+			if (real_offset + (usz)tok.len <= source.len) {
+				sym.supertypes[sym.supertype_count] = source[real_offset..real_offset + (usz)tok.len - 1];
+			} else {
+				sym.supertypes[sym.supertype_count] = tok.text;
+			}
+			sym.supertype_count++;
+
+			// Skip generic arguments: <T, R>
+			Token after = lex.next();
+			if (after.kind == LANGLE) {
+				int depth = 1;
+				while (depth > 0) {
+					Token inner = lex.next();
+					if (inner.kind == EOF) return;
+					if (inner.kind == LANGLE) depth++;
+					if (inner.kind == RANGLE) depth--;
+				}
+				after = lex.next();
+			}
+
+			// Skip constructor call: ()
+			if (after.kind == LPAREN) {
+				int depth = 1;
+				while (depth > 0) {
+					Token inner = lex.next();
+					if (inner.kind == EOF) return;
+					if (inner.kind == LPAREN) depth++;
+					if (inner.kind == RPAREN) depth--;
+				}
+				after = lex.next();
+			}
+
+			// Skip delegation: by expr (consume until comma, {, or where)
+			if (after.kind == KW_BY) {
+				while (true) {
+					Token skip_tok = lex.next();
+					if (skip_tok.kind == EOF) return;
+					if (skip_tok.kind == COMMA) break;
+					if (skip_tok.kind == LCURL || skip_tok.kind == KW_WHERE) return;
+				}
+				continue; // comma consumed, next supertype
+			}
+
+			// Comma means more supertypes
+			if (after.kind == COMMA) continue;
+
+			// Anything else means end of supertype list
+			return;
+		}
+
+		// Non-identifier at start -- end of list
+		return;
+	}
 }
