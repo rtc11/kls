@@ -7,7 +7,7 @@ import kls::lsp::semantic_tokens;
  * Build the server capabilities object for the initialize response.
  * Start minimal and add capabilities as features are implemented.
  */
-fn Object* build_capabilities() {
+fn Object* build_capabilities(bool client_supports_utf8) {
 	Object* caps = object::new_obj(tmem);
 
 	// Text document sync: full sync mode
@@ -16,8 +16,10 @@ fn Object* build_capabilities() {
 	text_doc_sync.set("change", 1); // TextDocumentSyncKind.Full
 	caps.set("textDocumentSync", text_doc_sync);
 
-	// Position encoding
-	caps.set("positionEncoding", "utf-8");
+	// #6: Only claim UTF-8 position encoding if client supports it
+	if (client_supports_utf8) {
+		caps.set("positionEncoding", "utf-8");
+	}
 
 	// Hover support
 	caps.set("hoverProvider", true);
@@ -39,6 +41,9 @@ fn Object* build_capabilities() {
 
 	// Go to definition support
 	caps.set("definitionProvider", true);
+
+	// Go to implementation support
+	caps.set("implementationProvider", true);
 
 	// Find references support
 	caps.set("referencesProvider", true);

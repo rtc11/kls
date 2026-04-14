@@ -13,11 +13,28 @@ import kls::workspace;
 fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 	io::eprintfn("[kls] Handling initialize");
 
+	// #6: Check if the client supports UTF-8 position encoding
+	bool client_supports_utf8 = false;
+
 	// Extract client info if available
 	if (params != null) {
 		if (try client_info = params.get("clientInfo")) {
 			if (try name = client_info.get_string("name")) {
 				io::eprintfn("[kls] Client: %s", name);
+			}
+		}
+
+		// Check client capabilities for position encoding support
+		if (try caps = params.get("capabilities")) {
+			if (try general = caps.get("general")) {
+				if (try encodings = general.get("positionEncodings")) {
+					for (sz i = 0; i < encodings.get_len(); i++) {
+						Object* enc = encodings.get_at(i);
+						if (enc.is_string() && enc.s == "utf-8") {
+							client_supports_utf8 = true;
+						}
+					}
+				}
 			}
 		}
 
@@ -37,7 +54,7 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 
 	// Build result
 	Object* result = object::new_obj(tmem);
-	result.set("capabilities", capabilities::build_capabilities());
+	result.set("capabilities", capabilities::build_capabilities(client_supports_utf8));
 
 	Object* server_info = object::new_obj(tmem);
 	server_info.set("name", "kls");

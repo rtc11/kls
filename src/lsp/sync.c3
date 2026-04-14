@@ -38,6 +38,8 @@ fn void handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Objec
 
 	// Full sync: take the first content change
 	Object* changes = params.get("contentChanges")!!;
+	// #12: Guard against empty contentChanges array
+	if (changes.get_len() == 0) return;
 	Object* change = changes.get_at(0);
 	String text = change.get_string("text")!!;
 
