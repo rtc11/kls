@@ -60,13 +60,27 @@ fn Object* handle_references(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// Get cached AST for declaration filtering
 	ParseResult* pr = store.get_ast(uri) ?? null;
 
-	// Collect all IDENTIFIER tokens matching target_name
+	// Collect all IDENTIFIER tokens matching target_name,
+	// skipping identifiers inside package/import paths.
 	Object* locations = object::new_obj(tmem);  // JSON array
 
 	Lexer lex = lexer::init(doc.content);
+	bool in_package_or_import = false;
 	while (true) {
 		Token t = lex.next();
 		if (t.kind == EOF) break;
+
+		// Enter skip mode when we see a package or import keyword
+		if (t.kind == KW_PACKAGE || t.kind == KW_IMPORT) {
+			in_package_or_import = true;
+			continue;
+		}
+
+		// While inside a package/import path, skip path segments
+		if (in_package_or_import) {
+			if (t.kind == IDENTIFIER || t.kind == DOT || t.kind == MULT) continue;
+			in_package_or_import = false;
+		}
 
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
@@ -199,13 +213,25 @@ fn void add_cross_file_references(Object* locations, WorkspaceIndex* workspace, 
 
 /**
  * Lex a file's content and add Location objects for every IDENTIFIER
- * token matching the target name.
+ * token matching the target name. Skips identifiers inside package/import paths.
  */
 fn void scan_file_for_references(Object* locations, String uri, String content, String target_name) {
 	Lexer lex = lexer::init(content);
+	bool in_package_or_import = false;
 	while (true) {
 		Token t = lex.next();
 		if (t.kind == EOF) break;
+
+		if (t.kind == KW_PACKAGE || t.kind == KW_IMPORT) {
+			in_package_or_import = true;
+			continue;
+		}
+
+		if (in_package_or_import) {
+			if (t.kind == IDENTIFIER || t.kind == DOT || t.kind == MULT) continue;
+			in_package_or_import = false;
+		}
+
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
 

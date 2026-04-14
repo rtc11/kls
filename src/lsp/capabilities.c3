@@ -52,6 +52,11 @@ fn Object* build_capabilities() {
 	// Workspace symbol support (Ctrl+T search)
 	caps.set("workspaceSymbolProvider", true);
 
+	// Rename support (with prepare)
+	Object* rename_opts = object::new_obj(tmem);
+	rename_opts.set("prepareProvider", true);
+	caps.set("renameProvider", rename_opts);
+
 	// Semantic tokens support (full document)
 	caps.set("semanticTokensProvider", semantic_tokens::build_semantic_tokens_options());
 

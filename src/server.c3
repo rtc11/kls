@@ -16,6 +16,7 @@ import kls::lsp::document_symbols;
 import kls::lsp::signature_help;
 import kls::lsp::semantic_tokens;
 import kls::lsp::workspace_symbols;
+import kls::lsp::rename;
 import kls::workspace;
 import kls::deps::classpath;
 import kls::deps::jar_index;
@@ -164,6 +165,18 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/semanticTokens/full":
 			if (params != null) {
 				Object* result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/prepareRename":
+			if (params != null) {
+				Object* result = rename::handle_prepare_rename(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			}
+
+		case "textDocument/rename":
+			if (params != null) {
+				Object* result = rename::handle_rename(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			}
 

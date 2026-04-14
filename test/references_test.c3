@@ -360,3 +360,57 @@ fn void references_exclude_variable_declaration() @test {
 		assert(get_line(result, 1) == 2, "expected usage at line 2");
 	};
 }
+
+// ── References skip package path identifiers ──────────────────────
+
+fn void references_skip_package_path() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "package com.example.model\nval model = 42\nval x = model + 1";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "model" at line 1, col 4 (the variable)
+		Object* params = make_params("file:///test.kt", 1, 4);
+		Object* result = references::handle_references(&store, null, params);
+
+		assert(result != null, "expected references array");
+		// "model" in package path should be skipped, only val decl + usage
+		assert(result.get_len() == 2, "expected 2 references (skip package), got %d", (int)result.get_len());
+
+		assert(get_line(result, 0) == 1);
+		assert(get_col(result, 0) == 4);
+
+		assert(get_line(result, 1) == 2);
+		assert(get_col(result, 1) == 8);
+	};
+}
+
+// ── References skip import path identifiers ───────────────────────
+
+fn void references_skip_import_path() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "import com.example.Foo\nclass Foo {}\nfun make(): Foo = Foo()";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "Foo" at line 1, col 6 (class declaration)
+		Object* params = make_params("file:///test.kt", 1, 6);
+		Object* result = references::handle_references(&store, null, params);
+
+		assert(result != null, "expected references array");
+		// "Foo" in import path should be skipped: class Foo, : Foo, Foo()
+		assert(result.get_len() == 3, "expected 3 references (skip import), got %d", (int)result.get_len());
+
+		assert(get_line(result, 0) == 1);
+		assert(get_col(result, 0) == 6);
+
+		assert(get_line(result, 1) == 2);
+		assert(get_line(result, 2) == 2);
+	};
+}
