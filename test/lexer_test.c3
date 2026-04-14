@@ -874,3 +874,41 @@ fn void as_not_safe_without_question() @test {
 	assert(toks[1].kind == KW_AS);
 	assert(toks[1].text == "as");
 }
+
+// ── #5: !is and !in compound tokens ───────────────────────────────
+
+fn void not_is_token() @test {
+	Token[] toks = all_tokens("x !is String");
+	assert(toks.len == 3, "expected 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == IDENTIFIER);
+	assert(toks[1].kind == NOT_IS, "expected NOT_IS, got %d", (int)toks[1].kind);
+	assert(toks[1].text == "!is");
+	assert(toks[2].kind == IDENTIFIER);
+}
+
+fn void not_in_token() @test {
+	Token[] toks = all_tokens("x !in list");
+	assert(toks.len == 3, "expected 3 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == IDENTIFIER);
+	assert(toks[1].kind == NOT_IN, "expected NOT_IN, got %d", (int)toks[1].kind);
+	assert(toks[1].text == "!in");
+	assert(toks[2].kind == IDENTIFIER);
+}
+
+fn void not_is_not_prefix_of_identifier() @test {
+	// "!island" should NOT be tokenized as NOT_IS + "land"
+	Token[] toks = all_tokens("!island");
+	assert(toks.len == 2, "expected 2 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == EXCL, "expected EXCL, got %d", (int)toks[0].kind);
+	assert(toks[1].kind == IDENTIFIER);
+	assert(toks[1].text == "island");
+}
+
+fn void not_in_not_prefix_of_identifier() @test {
+	// "!index" should NOT be tokenized as NOT_IN + "dex"
+	Token[] toks = all_tokens("!index");
+	assert(toks.len == 2, "expected 2 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == EXCL, "expected EXCL, got %d", (int)toks[0].kind);
+	assert(toks[1].kind == IDENTIFIER);
+	assert(toks[1].text == "index");
+}

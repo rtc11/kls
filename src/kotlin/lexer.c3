@@ -716,6 +716,19 @@ fn Token Lexer.lex_operator(Lexer* self, usz start, uint start_line, uint start_
 				return self.make_token_at(EXCL_EQ, start, start_line, start_col);
 			}
 			if (self.peek() == '!') { self.advance(); return self.make_token_at(NOT_NULL, start, start_line, start_col); }
+			// #5: Handle !is and !in as compound tokens
+			if (self.peek() == 'i') {
+				if (self.peek_at(1) == 's' && !is_ident_part(self.peek_at(2))) {
+					self.advance(); // consume 'i'
+					self.advance(); // consume 's'
+					return self.make_token_at(NOT_IS, start, start_line, start_col);
+				}
+				if (self.peek_at(1) == 'n' && !is_ident_part(self.peek_at(2))) {
+					self.advance(); // consume 'i'
+					self.advance(); // consume 'n'
+					return self.make_token_at(NOT_IN, start, start_line, start_col);
+				}
+			}
 			return self.make_token_at(EXCL, start, start_line, start_col);
 		case ':':
 			if (self.peek() == ':') { self.advance(); return self.make_token_at(COLONCOLON, start, start_line, start_col); }
