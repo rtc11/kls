@@ -68,6 +68,14 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Folding range support
 	caps.set("foldingRangeProvider", true);
 
+	// Code action support (quick fixes + organize imports)
+	Object* code_action_opts = object::new_obj(tmem);
+	Object* code_action_kinds = object::new_obj(tmem);
+	code_action_kinds.push(object::new_string("quickfix", tmem));
+	code_action_kinds.push(object::new_string("source.organizeImports", tmem));
+	code_action_opts.set("codeActionKinds", code_action_kinds);
+	caps.set("codeActionProvider", code_action_opts);
+
 	// Workspace capabilities
 	Object* workspace_caps = object::new_obj(tmem);
 	Object* file_operations = object::new_obj(tmem);
@@ -90,6 +98,18 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	gradle_watcher.set("globPattern", "**/build.gradle");
 	gradle_watcher.set("kind", 7);
 	watchers.push(gradle_watcher);
+
+	// Watch settings.gradle.kts (multi-module Gradle projects)
+	Object* settings_kts_watcher = object::new_obj(tmem);
+	settings_kts_watcher.set("globPattern", "**/settings.gradle.kts");
+	settings_kts_watcher.set("kind", 7);
+	watchers.push(settings_kts_watcher);
+
+	// Watch settings.gradle
+	Object* settings_watcher = object::new_obj(tmem);
+	settings_watcher.set("globPattern", "**/settings.gradle");
+	settings_watcher.set("kind", 7);
+	watchers.push(settings_watcher);
 
 	// Watch pom.xml
 	Object* pom_watcher = object::new_obj(tmem);

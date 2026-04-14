@@ -19,9 +19,12 @@ import kls::lsp::workspace_symbols;
 import kls::lsp::rename;
 import kls::lsp::implementation;
 import kls::lsp::folding_range;
+import kls::lsp::code_actions;
 import kls::workspace;
 import kls::deps::classpath;
 import kls::deps::jar_index;
+import kls::deps::jdk_index;
+import kls::deps::kotlin_fallback;
 
 struct Server {
 	bool is_running;
@@ -125,6 +128,11 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			self.workspace.scan_workspace();
 			classpath::resolve_classpath(&self.workspace.classpath, self.workspace.root_path);
 			self.workspace.dep_index.index_classpath(&self.workspace.classpath);
+			jdk_index::index_jdk(&self.workspace.dep_index);
+			// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
+			if (self.workspace.classpath.jar_count == 0) {
+				kotlin_fallback::index_system_kotlin(&self.workspace.dep_index);
+			}
 
 		case "shutdown":
 			Object* result = lifecycle::handle_shutdown();
@@ -217,6 +225,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/foldingRange":
 			if (params != null) {
 				Object* result = folding_range::handle_folding_range(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/codeAction":
+			if (params != null) {
+				Object* result = code_actions::handle_code_action(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
@@ -322,6 +338,11 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 		workspace.dep_index.free();
 		workspace.dep_index.init();
 		workspace.dep_index.index_classpath(&workspace.classpath);
+		jdk_index::index_jdk(&workspace.dep_index);
+		// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
+		if (workspace.classpath.jar_count == 0) {
+			kotlin_fallback::index_system_kotlin(&workspace.dep_index);
+		}
 	}
 }
 
@@ -331,5 +352,7 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 fn bool is_build_file(String uri) {
 	return uri.ends_with("/build.gradle.kts")
 		|| uri.ends_with("/build.gradle")
+		|| uri.ends_with("/settings.gradle.kts")
+		|| uri.ends_with("/settings.gradle")
 		|| uri.ends_with("/pom.xml");
 }

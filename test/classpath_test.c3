@@ -263,8 +263,16 @@ fn void test_is_build_file_kt() {
 	assert(!server::is_build_file("file:///project/Main.kt"));
 }
 
+fn void test_is_build_file_settings_gradle_kts() {
+	assert(server::is_build_file("file:///project/settings.gradle.kts"));
+}
+
+fn void test_is_build_file_settings_gradle() {
+	assert(server::is_build_file("file:///project/settings.gradle"));
+}
+
 fn void test_is_build_file_other() {
-	assert(!server::is_build_file("file:///project/settings.gradle"));
+	assert(!server::is_build_file("file:///project/README.md"));
 }
 
 // ── build_system_name tests ────────────────────────────────────────

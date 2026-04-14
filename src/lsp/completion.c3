@@ -9,6 +9,7 @@ import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::symbols;
 import kls::kotlin::stdlib;
+import kls::kotlin::jdk_symbols;
 import kls::workspace;
 import kls::deps::jar_index;
 
@@ -86,6 +87,9 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	// Add stdlib completions (bundled kotlin-stdlib symbols)
 	add_stdlib_completions(items, prefix);
+
+	// Add JDK completions (bundled Java platform class symbols)
+	add_jdk_completions(items, prefix);
 
 	// Build CompletionList
 	Object* result = object::new_obj(tmem);
@@ -305,6 +309,71 @@ fn void add_stdlib_completions(Object* items, String prefix) {
 
 	StdlibSymbol*[128] matches;
 	usz match_count = stdlib::lookup_by_prefix(prefix, &matches);
+
+	for (usz i = 0; i < match_count; i++) {
+		StdlibSymbol* sym = matches[i];
+
+		// Skip exact matches
+		if (sym.name == prefix) continue;
+
+		// Dedup check
+		bool already_seen = false;
+		for (usz j = 0; j < seen_count; j++) {
+			if (seen_buf[j] == sym.name) {
+				already_seen = true;
+				break;
+			}
+		}
+		if (already_seen) continue;
+
+		if (seen_count < 256) {
+			seen_buf[seen_count] = sym.name;
+			seen_count++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", sym.name);
+		item.set("kind", stdlib_kind_to_completion_kind(sym.kind));
+		item.set("detail", sym.package_name);
+
+		// Add documentation with signature
+		Object* doc_obj = object::new_obj(tmem);
+		doc_obj.set("kind", "markdown");
+		DString doc_val;
+		doc_val.tinit();
+		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+		if (sym.doc.len > 0) {
+			doc_val.appendf("\n\n%s", sym.doc);
+		}
+		doc_obj.set("value", doc_val.str_view());
+		item.set("documentation", doc_obj);
+
+		items.push(item);
+	}
+}
+
+/**
+ * Add completion items from the bundled JDK symbols table.
+ * These cover commonly used Java platform classes (java.util.UUID,
+ * java.io.File, java.time.LocalDate, etc.) that are available on
+ * Kotlin/JVM without declaring an explicit dependency.
+ */
+fn void add_jdk_completions(Object* items, String prefix) {
+	if (prefix.len == 0) return;
+
+	// Collect names already in items to avoid duplicates
+	String[256] seen_buf;
+	usz seen_count = 0;
+	for (usz i = 0; i < items.get_len() && seen_count < 256; i++) {
+		Object* item = items.get_at(i);
+		if (try label = item.get_string("label")) {
+			seen_buf[seen_count] = label;
+			seen_count++;
+		}
+	}
+
+	StdlibSymbol*[128] matches;
+	usz match_count = jdk_symbols::lookup_by_prefix(prefix, &matches);
 
 	for (usz i = 0; i < match_count; i++) {
 		StdlibSymbol* sym = matches[i];

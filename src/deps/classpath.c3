@@ -73,6 +73,16 @@ fn BuildSystem detect_build_system(String workspace_path) {
 		ds.appendf("%s/build.gradle", workspace_path);
 		if (file::is_file(ds.str_view())) return GRADLE;
 
+		// Check for Gradle settings files (multi-module projects may only
+		// have settings.gradle.kts at the root, not build.gradle.kts)
+		ds.clear();
+		ds.appendf("%s/settings.gradle.kts", workspace_path);
+		if (file::is_file(ds.str_view())) return GRADLE;
+
+		ds.clear();
+		ds.appendf("%s/settings.gradle", workspace_path);
+		if (file::is_file(ds.str_view())) return GRADLE;
+
 		// Check for Maven
 		ds.clear();
 		ds.appendf("%s/pom.xml", workspace_path);

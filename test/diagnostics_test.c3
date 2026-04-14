@@ -4,6 +4,7 @@ import std::collections::object;
 import kls::lsp::diagnostics;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
+import kls::workspace;
 
 /**
  * Helper: build diagnostics for content, automatically parsing for AST errors.
@@ -313,5 +314,295 @@ fun main() { val x = 42 }`
 		assert(diag.get_int("severity")!! == 4);
 		String message = diag.get_string("message")!!;
 		assert(message.contains("Unused import"));
+	};
+}
+
+// ── Unresolved reference diagnostic tests ─────────────────────────
+
+/**
+ * Helper: build diagnostics with workspace context for unresolved reference tests.
+ * Uses a real WorkspaceIndex to enable stdlib/dep lookups.
+ */
+fn Object* build_diagnostics_with_workspace(String content) {
+	ParseResult* pr = mem::new(ParseResult);
+	defer { pr.free_errors(); mem::free(pr); }
+	parser::parse(content, pr);
+
+	WorkspaceIndex workspace;
+	workspace.init();
+	defer workspace.free();
+
+	return diagnostics::build_diagnostics_array(content, pr, &workspace);
+}
+
+fn void auto_imported_name_no_unresolved_diagnostic() @test {
+	@pool() {
+		// "println" is auto-imported from kotlin.io -- should not be flagged
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { println("hello") }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.starts_with("Unresolved reference"),
+				"auto-imported name should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void local_var_no_unresolved_diagnostic() @test {
+	@pool() {
+		// "x" is declared locally -- should not be flagged
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val x = 42; println(x) }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.starts_with("Unresolved reference: 'x'"),
+				"locally declared variable should not be flagged");
+		}
+	};
+}
+
+fn void stdlib_non_auto_import_gets_unresolved_diagnostic() @test {
+	@pool() {
+		// "KClass" is from kotlin.reflect, which is NOT auto-imported.
+		// It IS in the stdlib index, so it should get an "Unresolved reference" hint.
+		// Note: must be used as a value expression (NAME_EXPR), not type annotation.
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val c = KClass }`
+		);
+		assert(result.is_indexable());
+		bool found_unresolved = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg == "Unresolved reference: 'KClass'") {
+				found_unresolved = true;
+				assert(diag.get_int("severity")!! == 4, "expected Hint severity");
+			}
+		}
+		assert(found_unresolved, "expected unresolved reference diagnostic for KClass");
+	};
+}
+
+fn void imported_name_no_unresolved_diagnostic() @test {
+	@pool() {
+		// "KClass" is explicitly imported -- should NOT be flagged
+		Object* result = build_diagnostics_with_workspace(
+			`import kotlin.reflect.KClass
+fun main() { val c = KClass }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'KClass'"),
+				"explicitly imported name should not be flagged");
+		}
+	};
+}
+
+fn void wildcard_import_prevents_unresolved_diagnostic() @test {
+	@pool() {
+		// Wildcard import covers the package -- should NOT be flagged
+		Object* result = build_diagnostics_with_workspace(
+			`import kotlin.reflect.*
+fun main() { val c = KClass }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'KClass'"),
+				"wildcard import should prevent unresolved reference diagnostic");
+		}
+	};
+}
+
+fn void function_param_no_unresolved_diagnostic() @test {
+	@pool() {
+		// Function parameter "x" should be in scope and not flagged
+		Object* result = build_diagnostics_with_workspace(
+			`fun process(x: Int) { println(x) }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'x'"),
+				"function parameter should not be flagged");
+		}
+	};
+}
+
+fn void unknown_name_not_in_any_index_no_diagnostic() @test {
+	@pool() {
+		// "xyzFooBarNonExistent" is not in any index -- should NOT be flagged
+		// (we only flag names that we can actually suggest an import for)
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val x = xyzFooBarNonExistent() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("xyzFooBarNonExistent"),
+				"unknown name not in any index should not be flagged");
+		}
+	};
+}
+
+fn void dot_member_not_flagged_as_unresolved() @test {
+	@pool() {
+		// In "x.foo()", "foo" is a member call -- should not be flagged
+		// even if "foo" isn't in any index (requires type info to resolve)
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val x = "hello"; x.uppercase() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'uppercase'"),
+				"dot member should not be flagged as unresolved");
+		}
+	};
+}
+
+fn void class_decl_name_in_scope_no_diagnostic() @test {
+	@pool() {
+		// A class declared in the same file should be resolvable
+		Object* result = build_diagnostics_with_workspace(
+			`class Foo
+fun main() { val x = Foo() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'Foo'"),
+				"locally declared class should not be flagged");
+		}
+	};
+}
+
+fn void unresolved_diagnostic_has_correct_position() @test {
+	@pool() {
+		// KClass starts at a known position -- verify the diagnostic range
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val c = KClass }` // KClass at col 21
+		);
+		assert(result.is_indexable());
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg == "Unresolved reference: 'KClass'") {
+				found = true;
+				Object* range = diag.get("range")!!;
+				Object* start = range.get("start")!!;
+				assert(start.get_int("line")!! == 0, "expected line 0");
+				assert(start.get_int("character")!! == 21, "expected col 21, got %d",
+					start.get_int("character")!!);
+				Object* end_pos = range.get("end")!!;
+				assert(end_pos.get_int("character")!! == 27, "expected end col 27, got %d",
+					end_pos.get_int("character")!!);
+			}
+		}
+		assert(found, "expected unresolved reference diagnostic for KClass");
+	};
+}
+
+// ── JDK symbol tests ──────────────────────────────────────────────
+
+fn void jdk_uuid_gets_unresolved_diagnostic() @test {
+	@pool() {
+		// UUID is from java.util (not auto-imported) -- should get diagnostic
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val id = UUID.randomUUID() }`
+		);
+		assert(result.is_indexable());
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg == "Unresolved reference: 'UUID'") {
+				found = true;
+			}
+		}
+		assert(found, "expected unresolved reference diagnostic for UUID");
+	};
+}
+
+fn void jdk_java_lang_thread_no_unresolved_diagnostic() @test {
+	@pool() {
+		// Thread is from java.lang (auto-imported on Kotlin/JVM)
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val t = Thread.currentThread() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(msg != "Unresolved reference: 'Thread'",
+				"java.lang.Thread should not be flagged (auto-imported)");
+		}
+	};
+}
+
+fn void jdk_file_gets_unresolved_diagnostic() @test {
+	@pool() {
+		// File is from java.io (not auto-imported)
+		Object* result = build_diagnostics_with_workspace(
+			`fun main() { val f = File("/tmp") }`
+		);
+		assert(result.is_indexable());
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg == "Unresolved reference: 'File'") {
+				found = true;
+			}
+		}
+		assert(found, "expected unresolved reference diagnostic for File");
+	};
+}
+
+fn void jdk_imported_uuid_no_unresolved_diagnostic() @test {
+	@pool() {
+		// UUID is explicitly imported -- no diagnostic
+		Object* result = build_diagnostics_with_workspace(
+			`import java.util.UUID
+fun main() { val id = UUID.randomUUID() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(msg != "Unresolved reference: 'UUID'",
+				"imported UUID should not be flagged as unresolved");
+		}
+	};
+}
+
+fn void jdk_wildcard_import_prevents_uuid_diagnostic() @test {
+	@pool() {
+		// java.util.* covers UUID
+		Object* result = build_diagnostics_with_workspace(
+			`import java.util.*
+fun main() { val id = UUID.randomUUID() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(msg != "Unresolved reference: 'UUID'",
+				"wildcard import should prevent UUID diagnostic");
+		}
 	};
 }

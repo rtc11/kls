@@ -39,6 +39,7 @@ kls/
       references.c3           # kls::lsp::references - textDocument/references (lexer-based with AST filtering)
       document_symbols.c3     # kls::lsp::document_symbols - textDocument/documentSymbol (hierarchical)
       semantic_tokens.c3      # kls::lsp::semantic_tokens - textDocument/semanticTokens/full
+      code_actions.c3         # kls::lsp::code_actions - textDocument/codeAction (quickfixes, organize imports)
     kotlin/
       token.c3                # kls::kotlin::token - Token enum, Token/TokenSpan structs
       lexer.c3                # kls::kotlin::lexer - Kotlin source tokenizer (next + next_all modes)
@@ -57,6 +58,7 @@ kls/
     references_test.c3        # Find references tests
     document_symbols_test.c3  # Document symbols tests
     semantic_tokens_test.c3   # Semantic tokens tests
+    code_actions_test.c3      # Code actions tests
     symbols_test.c3           # Symbol scanner tests
   lib/                        # C3 library dependencies (.c3l)
   docs/                       # Documentation
@@ -228,6 +230,7 @@ Content-Length: <byte-count>\r\n
 7. **Find references**: textDocument/references (lexer-based with AST declaration filtering)
 8. **Document symbols**: textDocument/documentSymbol (hierarchical)
 9. **Semantic tokens**: textDocument/semanticTokens/full (AST-enhanced)
+10. **Code actions**: textDocument/codeAction (quickfixes, organize imports)
 
 ## Kotlin Grammar Reference
 

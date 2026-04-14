@@ -22,7 +22,7 @@ fn void handle_did_open(DocumentStore* store, WorkspaceIndex* workspace, Object*
 	io::eprintfn("[kls] Document opened: %s (lang=%s, v=%d)", uri, language_id, version);
 	store.open(uri, language_id, version, text);
 	workspace.index_file(uri, text);
-	diagnostics::publish_diagnostics(store, uri);
+	diagnostics::publish_diagnostics(store, uri, workspace);
 }
 
 /**
@@ -46,7 +46,7 @@ fn void handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Objec
 	io::eprintfn("[kls] Document changed: %s (v=%d, len=%d)", uri, version, text.len);
 	store.update(uri, version, text);
 	workspace.index_file(uri, text);
-	diagnostics::publish_diagnostics(store, uri);
+	diagnostics::publish_diagnostics(store, uri, workspace);
 }
 
 /**
