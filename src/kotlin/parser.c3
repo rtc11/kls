@@ -96,11 +96,25 @@ fn Token Parser.expect_identifier(Parser* self) {
 	return self.current;
 }
 
-fn usz Parser.add_node(Parser* self, NodeKind kind) {
-	if (self.result.node_count >= ast::MAX_NODES) {
-		return ast::MAX_NODES - 1; // saturate
+fn uint Parser.add_node(Parser* self, NodeKind kind) {
+	if (self.result.node_count >= ast::OVERFLOW_NODE) {
+		// Emit a diagnostic once when we first overflow
+		if (self.result.node_count == ast::OVERFLOW_NODE) {
+			self.add_error("AST node limit reached; remaining declarations may be incomplete");
+		}
+		// Return the reserved overflow sink slot -- writes are safe but discarded
+		uint idx = ast::OVERFLOW_NODE;
+		self.result.nodes[idx].kind = kind;
+		self.result.nodes[idx].name = "";
+		self.result.nodes[idx].type_text = "";
+		self.result.nodes[idx].extra_text = "";
+		self.result.nodes[idx].mod_flags = ast::MOD_NONE;
+		self.result.nodes[idx].parent = ast::NO_PARENT;
+		self.result.nodes[idx].child_count = 0;
+		self.result.nodes[idx].children_start = 0;
+		return idx;
 	}
-	usz idx = self.result.node_count;
+	uint idx = self.result.node_count;
 	self.result.nodes[idx].kind = kind;
 	self.result.nodes[idx].name = "";
 	self.result.nodes[idx].type_text = "";
@@ -108,6 +122,7 @@ fn usz Parser.add_node(Parser* self, NodeKind kind) {
 	self.result.nodes[idx].mod_flags = ast::MOD_NONE;
 	self.result.nodes[idx].parent = ast::NO_PARENT;
 	self.result.nodes[idx].child_count = 0;
+	self.result.nodes[idx].children_start = 0;
 	self.result.nodes[idx].start_offset = 0;
 	self.result.nodes[idx].end_offset = 0;
 	self.result.nodes[idx].start_line = 0;
@@ -127,8 +142,9 @@ fn usz Parser.add_node(Parser* self, NodeKind kind) {
  * Only nodes with parent == NO_PARENT become children (nested nodes already
  * have their parent set by inner parse calls).
  */
-fn void Parser.adopt_children(Parser* self, usz parent_idx, usz start) {
-	usz count = 0;
+fn void Parser.adopt_children(Parser* self, uint parent_idx, uint start) {
+	if (parent_idx == ast::OVERFLOW_NODE) return;
+	uint count = 0;
 	for (usz i = start; i < self.result.node_count; i++) {
 		if (self.result.nodes[i].parent == ast::NO_PARENT) {
 			self.result.nodes[i].parent = parent_idx;
@@ -136,12 +152,15 @@ fn void Parser.adopt_children(Parser* self, usz parent_idx, usz start) {
 		}
 	}
 	self.result.nodes[parent_idx].child_count = count;
+	self.result.nodes[parent_idx].children_start = start;
 }
 
 fn void Parser.add_error(Parser* self, String message) {
 	if (self.result.error_count >= ast::MAX_ERRORS) return;
 	usz idx = self.result.error_count;
-	self.result.errors[idx].message = message;
+	// Heap-copy the message so it outlives the temp allocator pool.
+	// ParseResult is cached on the heap, so error messages must also be heap-owned.
+	self.result.errors[idx].message = message.copy(mem);
 	self.result.errors[idx].line = self.current.line;
 	self.result.errors[idx].col = self.current.col;
 	self.result.errors[idx].offset = self.current.offset;
@@ -159,12 +178,36 @@ fn void Parser.node_start(Parser* self, usz idx, Token tok) {
 }
 
 /**
+ * Compute the end line and column for a token, accounting for multi-line
+ * tokens (block comments, multiline strings). Returns {end_line, end_col}.
+ */
+fn uint[2] Parser.token_end_pos(Parser* self, Token tok) {
+	uint end_offset = tok.offset + tok.len;
+	// Scan the token text for newlines to find the true end line/col
+	uint line = tok.line;
+	uint col = tok.col;
+	usz start = tok.offset;
+	usz end = start + tok.len;
+	if (end > self.source.len) end = self.source.len;
+	for (usz i = start; i < end; i++) {
+		if (self.source[i] == '\n') {
+			line++;
+			col = 0;
+		} else {
+			col++;
+		}
+	}
+	return { line, col };
+}
+
+/**
  * Set the end span of a node from the previous token (last consumed).
  */
 fn void Parser.node_end(Parser* self, usz idx) {
 	self.result.nodes[idx].end_offset = self.previous.offset + self.previous.len;
-	self.result.nodes[idx].end_line = self.previous.line;
-	self.result.nodes[idx].end_col = self.previous.col + self.previous.len;
+	uint[2] end_pos = self.token_end_pos(self.previous);
+	self.result.nodes[idx].end_line = end_pos[0];
+	self.result.nodes[idx].end_col = end_pos[1];
 }
 
 /**
@@ -172,8 +215,9 @@ fn void Parser.node_end(Parser* self, usz idx) {
  */
 fn void Parser.node_end_at_current(Parser* self, usz idx) {
 	self.result.nodes[idx].end_offset = self.current.offset + self.current.len;
-	self.result.nodes[idx].end_line = self.current.line;
-	self.result.nodes[idx].end_col = self.current.col + self.current.len;
+	uint[2] end_pos = self.token_end_pos(self.current);
+	self.result.nodes[idx].end_line = end_pos[0];
+	self.result.nodes[idx].end_col = end_pos[1];
 }
 
 /**
@@ -190,9 +234,9 @@ fn void Parser.node_set_name(Parser* self, usz idx, Token tok) {
 // ── File-level parsing ─────────────────────────────────────────────
 
 fn void Parser.parse_file(Parser* self) {
-	usz file_idx = self.add_node(FILE);
+	uint file_idx = self.add_node(FILE);
 	self.node_start(file_idx, self.current);
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Optional package declaration
 	if (self.at(KW_PACKAGE)) {
@@ -232,7 +276,7 @@ fn void Parser.parse_file(Parser* self) {
 // ── Package declaration ────────────────────────────────────────────
 
 fn void Parser.parse_package_decl(Parser* self) {
-	usz idx = self.add_node(PACKAGE_DECL);
+	uint idx = self.add_node(PACKAGE_DECL);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'package'
 
@@ -258,7 +302,7 @@ fn void Parser.parse_package_decl(Parser* self) {
 // ── Import declaration ─────────────────────────────────────────────
 
 fn void Parser.parse_import_decl(Parser* self) {
-	usz idx = self.add_node(IMPORT_DECL);
+	uint idx = self.add_node(IMPORT_DECL);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'import'
 
@@ -436,7 +480,7 @@ fn bool Parser.parse_declaration(Parser* self, uint mods) {
  * object Name : Iface { body }
  */
 fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
-	usz idx = self.add_node(kind);
+	uint idx = self.add_node(kind);
 	self.result.nodes[idx].mod_flags = mods;
 
 	// Start span from the keyword (or earlier if modifiers present, but
@@ -451,7 +495,7 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 		self.node_set_name(idx, name);
 	}
 
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Type parameters: <T, R>
 	if (self.at(LANGLE)) {
@@ -493,12 +537,12 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
  * fun <T> Receiver<T>.name(params): ReturnType { body }
  */
 fn void Parser.parse_fun_decl(Parser* self, uint mods) {
-	usz idx = self.add_node(FUN_DECL);
+	uint idx = self.add_node(FUN_DECL);
 	self.result.nodes[idx].mod_flags = mods;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'fun'
 
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Type parameters: <T>
 	if (self.at(LANGLE)) {
@@ -583,7 +627,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
  * val (a, b) = pair  -- destructuring (skip internals)
  */
 fn void Parser.parse_property_decl(Parser* self, uint mods) {
-	usz idx = self.add_node(PROPERTY_DECL);
+	uint idx = self.add_node(PROPERTY_DECL);
 	// #13: Track val vs var distinction
 	if (self.at(KW_VAR)) {
 		mods |= ast::MOD_VAR;
@@ -592,7 +636,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'val' or 'var'
 
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Type parameters: val <T> List<T>.first: T
 	if (self.at(LANGLE)) {
@@ -660,7 +704,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 // ── Typealias declaration ──────────────────────────────────────────
 
 fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
-	usz idx = self.add_node(TYPEALIAS_DECL);
+	uint idx = self.add_node(TYPEALIAS_DECL);
 	self.result.nodes[idx].mod_flags = mods;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'typealias'
@@ -691,14 +735,14 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 // ── Constructor declaration ────────────────────────────────────────
 
 fn void Parser.parse_constructor_decl(Parser* self, uint mods) {
-	usz idx = self.add_node(CONSTRUCTOR_DECL);
+	uint idx = self.add_node(CONSTRUCTOR_DECL);
 	self.result.nodes[idx].mod_flags = mods;
 	self.node_start(idx, self.current);
 	self.result.nodes[idx].name = "constructor";
 	self.node_set_name(idx, self.current);
 	self.advance(); // consume 'constructor'
 
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Parameters
 	if (self.at(LPAREN)) {
@@ -732,14 +776,14 @@ fn void Parser.parse_constructor_decl(Parser* self, uint mods) {
 // ── Init block ─────────────────────────────────────────────────────
 
 fn void Parser.parse_init_block(Parser* self) {
-	usz idx = self.add_node(INIT_BLOCK);
+	uint idx = self.add_node(INIT_BLOCK);
 	self.node_start(idx, self.current);
 	self.result.nodes[idx].name = "init";
 	self.node_set_name(idx, self.current);
 	self.advance(); // consume 'init'
 
 	if (self.at(LCURL)) {
-		usz children_start = self.result.node_count;
+		uint children_start = self.result.node_count;
 		self.parse_block();
 		self.adopt_children(idx, children_start);
 	}
@@ -750,7 +794,7 @@ fn void Parser.parse_init_block(Parser* self) {
 // ── Companion object ───────────────────────────────────────────────
 
 fn void Parser.parse_companion_object(Parser* self, uint mods) {
-	usz idx = self.add_node(COMPANION_OBJECT_DECL);
+	uint idx = self.add_node(COMPANION_OBJECT_DECL);
 	self.result.nodes[idx].mod_flags = mods | ast::MOD_COMPANION;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'companion'
@@ -769,7 +813,7 @@ fn void Parser.parse_companion_object(Parser* self, uint mods) {
 		self.result.nodes[idx].name = "Companion";
 	}
 
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Super types
 	if (self.at(COLON)) {
@@ -837,7 +881,7 @@ fn void Parser.parse_param(Parser* self) {
 }
 
 fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
-	usz idx = self.add_node(PARAM);
+	uint idx = self.add_node(PARAM);
 	self.result.nodes[idx].mod_flags = mods;
 	self.node_start(idx, self.current);
 
@@ -875,7 +919,7 @@ fn void Parser.parse_type_params(Parser* self) {
 	self.advance(); // consume '<'
 
 	while (!self.at(RANGLE) && !self.at_eof()) {
-		usz idx = self.add_node(TYPE_PARAM);
+		uint idx = self.add_node(TYPE_PARAM);
 		self.node_start(idx, self.current);
 
 		// Variance: in/out
@@ -934,7 +978,7 @@ fn void Parser.parse_super_types(Parser* self) {
 		// Type name
 		if (self.at_identifier()) {
 			// Create a TYPE_REF node for this supertype
-			usz ref_idx = self.add_node(TYPE_REF);
+			uint ref_idx = self.add_node(TYPE_REF);
 			self.node_start(ref_idx, self.current);
 
 			Token name_tok = self.current;
@@ -1027,7 +1071,7 @@ fn void Parser.parse_enum_entries(Parser* self) {
 			break;
 		}
 
-		usz idx = self.add_node(ENUM_ENTRY);
+		uint idx = self.add_node(ENUM_ENTRY);
 		self.node_start(idx, self.current);
 		Token name = self.expect_identifier();
 		self.node_set_name(idx, name);
@@ -1059,10 +1103,10 @@ fn void Parser.parse_enum_entries(Parser* self) {
  * local declarations, control flow, etc.
  */
 fn void Parser.parse_block(Parser* self) {
-	usz idx = self.add_node(BLOCK);
+	uint idx = self.add_node(BLOCK);
 	self.node_start(idx, self.current);
 	self.advance(); // consume '{'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	while (!self.at(RCURL) && !self.at_eof()) {
 		self.eat(SEMICOLON); // skip optional semicolons between statements
@@ -1181,10 +1225,10 @@ fn bool Parser.parse_statement(Parser* self) {
  *   if (condition) block/statement else if (condition) ...
  */
 fn void Parser.parse_if_expr(Parser* self) {
-	usz idx = self.add_node(IF_EXPR);
+	uint idx = self.add_node(IF_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'if'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Condition: (expr)
 	if (self.at(LPAREN)) {
@@ -1223,10 +1267,10 @@ fn void Parser.parse_if_expr(Parser* self) {
  *   when (subject) { conditions -> body, ... }
  */
 fn void Parser.parse_when_expr(Parser* self) {
-	usz idx = self.add_node(WHEN_EXPR);
+	uint idx = self.add_node(WHEN_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'when'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Optional subject: (expr)
 	if (self.at(LPAREN)) {
@@ -1327,10 +1371,10 @@ fn void Parser.skip_when_condition(Parser* self) {
  *   for ((a, b) in collection) block
  */
 fn void Parser.parse_for_stmt(Parser* self) {
-	usz idx = self.add_node(FOR_STMT);
+	uint idx = self.add_node(FOR_STMT);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'for'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	if (self.eat(LPAREN)) {
 		// Loop variable -- may be destructuring: (a, b)
@@ -1339,7 +1383,7 @@ fn void Parser.parse_for_stmt(Parser* self) {
 			self.skip_balanced_parens();
 		} else if (self.at_identifier()) {
 			// Simple loop variable -- create a PARAM node for it
-			usz param_idx = self.add_node(PARAM);
+			uint param_idx = self.add_node(PARAM);
 			self.node_start(param_idx, self.current);
 			Token name = self.expect_identifier();
 			self.node_set_name(param_idx, name);
@@ -1414,10 +1458,10 @@ fn void Parser.skip_until_closing_paren(Parser* self) {
  * Parse while statement: while (condition) block
  */
 fn void Parser.parse_while_stmt(Parser* self) {
-	usz idx = self.add_node(WHILE_STMT);
+	uint idx = self.add_node(WHILE_STMT);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'while'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Condition: (expr)
 	if (self.at(LPAREN)) {
@@ -1441,10 +1485,10 @@ fn void Parser.parse_while_stmt(Parser* self) {
  * Parse do-while statement: do block while (condition)
  */
 fn void Parser.parse_do_while_stmt(Parser* self) {
-	usz idx = self.add_node(DO_WHILE_STMT);
+	uint idx = self.add_node(DO_WHILE_STMT);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'do'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Body
 	if (self.at(LCURL)) {
@@ -1471,10 +1515,10 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
  *   try { ... } catch (e: Type) { ... } finally { ... }
  */
 fn void Parser.parse_try_expr(Parser* self) {
-	usz idx = self.add_node(TRY_EXPR);
+	uint idx = self.add_node(TRY_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'try'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Try block
 	if (self.at(LCURL)) {
@@ -1502,15 +1546,15 @@ fn void Parser.parse_try_expr(Parser* self) {
  * The CATCH_CLAUSE node acts as a scope for the exception parameter.
  */
 fn void Parser.parse_catch_clause(Parser* self) {
-	usz idx = self.add_node(CATCH_CLAUSE);
+	uint idx = self.add_node(CATCH_CLAUSE);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'catch'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Parameter: (e: Type)
 	if (self.eat(LPAREN)) {
 		if (self.at_identifier()) {
-			usz param_idx = self.add_node(PARAM);
+			uint param_idx = self.add_node(PARAM);
 			self.node_start(param_idx, self.current);
 			Token name = self.expect_identifier();
 			self.node_set_name(param_idx, name);
@@ -1544,10 +1588,10 @@ fn void Parser.parse_catch_clause(Parser* self) {
  * May have a label: return@label expr
  */
 fn void Parser.parse_return_expr(Parser* self) {
-	usz idx = self.add_node(RETURN_EXPR);
+	uint idx = self.add_node(RETURN_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'return'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Optional label: @label
 	if (self.eat(AT)) {
@@ -1571,10 +1615,10 @@ fn void Parser.parse_return_expr(Parser* self) {
  * Parse throw expression: throw expr
  */
 fn void Parser.parse_throw_expr(Parser* self) {
-	usz idx = self.add_node(THROW_EXPR);
+	uint idx = self.add_node(THROW_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'throw'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Skip the thrown expression
 	if (!self.at(RCURL) && !self.at(SEMICOLON) && !self.at_eof()) {
@@ -1591,7 +1635,7 @@ fn void Parser.parse_throw_expr(Parser* self) {
  * Parse break or continue: break@label? / continue@label?
  */
 fn void Parser.parse_break_continue(Parser* self, NodeKind kind) {
-	usz idx = self.add_node(kind);
+	uint idx = self.add_node(kind);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'break' or 'continue'
 
@@ -1706,7 +1750,7 @@ fn bool is_assignment_op(TokenKind kind) {
 fn bool Parser.parse_expression_statement(Parser* self) {
 	if (self.at(RCURL) || self.at_eof()) return false;
 
-	usz before = self.result.node_count;
+	uint before = self.result.node_count;
 	self.parse_expression(PREC_NONE);
 
 	if (self.result.node_count == before) {
@@ -1726,9 +1770,9 @@ fn bool Parser.parse_expression_statement(Parser* self) {
  * min_prec is the minimum precedence that this call will consume.
  * Returns the index of the expression node, or the current node_count if nothing parsed.
  */
-fn usz Parser.parse_expression(Parser* self, int min_prec) {
+fn uint Parser.parse_expression(Parser* self, int min_prec) {
 	// Parse prefix / primary
-	usz left = self.parse_prefix_or_primary();
+	uint left = self.parse_prefix_or_primary();
 	if (left >= self.result.node_count) return left; // nothing parsed
 
 	// Parse postfix suffixes: .name, ?.name, (), [], !!, ++, --
@@ -1766,7 +1810,7 @@ fn usz Parser.parse_expression(Parser* self, int min_prec) {
 
 		// Create the binary/assignment node
 		NodeKind node_kind = is_assignment_op(op_kind) ? ASSIGNMENT_EXPR : BINARY_EXPR;
-		usz bin_idx = self.add_node(node_kind);
+		uint bin_idx = self.add_node(node_kind);
 		self.result.nodes[bin_idx].start_offset = self.result.nodes[left].start_offset;
 		self.result.nodes[bin_idx].start_line = self.result.nodes[left].start_line;
 		self.result.nodes[bin_idx].start_col = self.result.nodes[left].start_col;
@@ -1778,7 +1822,7 @@ fn usz Parser.parse_expression(Parser* self, int min_prec) {
 		self.result.nodes[left].parent = bin_idx;
 
 		// Parse right operand
-		usz right = self.parse_expression(next_prec);
+		uint right = self.parse_expression(next_prec);
 
 		// Adopt right operand (if parsed)
 		if (right < self.result.node_count) {
@@ -1797,7 +1841,7 @@ fn usz Parser.parse_expression(Parser* self, int min_prec) {
 /**
  * Parse a prefix unary expression or a primary expression.
  */
-fn usz Parser.parse_prefix_or_primary(Parser* self) {
+fn uint Parser.parse_prefix_or_primary(Parser* self) {
 	switch (self.current.kind) {
 		case SUB:
 			nextcase;
@@ -1818,14 +1862,14 @@ fn usz Parser.parse_prefix_or_primary(Parser* self) {
 /**
  * Parse a prefix unary expression: -expr, !expr, ++expr, --expr
  */
-fn usz Parser.parse_prefix_expr(Parser* self) {
-	usz idx = self.add_node(PREFIX_EXPR);
+fn uint Parser.parse_prefix_expr(Parser* self) {
+	uint idx = self.add_node(PREFIX_EXPR);
 	self.node_start(idx, self.current);
 	self.result.nodes[idx].extra_text = self.current.text;
 	self.advance(); // consume operator
 
-	usz children_start = self.result.node_count;
-	usz operand = self.parse_prefix_or_primary();
+	uint children_start = self.result.node_count;
+	uint operand = self.parse_prefix_or_primary();
 	if (operand < self.result.node_count) {
 		operand = self.parse_postfix_chain(operand);
 	}
@@ -1837,13 +1881,13 @@ fn usz Parser.parse_prefix_expr(Parser* self) {
 /**
  * Parse spread expression: *array
  */
-fn usz Parser.parse_spread_expr(Parser* self) {
-	usz idx = self.add_node(SPREAD_EXPR);
+fn uint Parser.parse_spread_expr(Parser* self) {
+	uint idx = self.add_node(SPREAD_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume '*'
 
-	usz children_start = self.result.node_count;
-	usz operand = self.parse_prefix_or_primary();
+	uint children_start = self.result.node_count;
+	uint operand = self.parse_prefix_or_primary();
 	if (operand < self.result.node_count) {
 		operand = self.parse_postfix_chain(operand);
 	}
@@ -1855,7 +1899,7 @@ fn usz Parser.parse_spread_expr(Parser* self) {
 /**
  * Parse a primary expression.
  */
-fn usz Parser.parse_primary(Parser* self) {
+fn uint Parser.parse_primary(Parser* self) {
 	switch (self.current.kind) {
 		case IDENTIFIER:
 			return self.parse_name_expr();
@@ -1926,8 +1970,8 @@ fn usz Parser.parse_primary(Parser* self) {
 /**
  * Parse a simple identifier reference: NAME_EXPR.
  */
-fn usz Parser.parse_name_expr(Parser* self) {
-	usz idx = self.add_node(NAME_EXPR);
+fn uint Parser.parse_name_expr(Parser* self) {
+	uint idx = self.add_node(NAME_EXPR);
 	self.node_start(idx, self.current);
 	self.node_set_name(idx, self.current);
 	self.advance(); // consume identifier/soft keyword
@@ -1938,8 +1982,8 @@ fn usz Parser.parse_name_expr(Parser* self) {
 /**
  * Parse a literal expression: integer, float, char, boolean, null.
  */
-fn usz Parser.parse_literal_expr(Parser* self) {
-	usz idx = self.add_node(LITERAL_EXPR);
+fn uint Parser.parse_literal_expr(Parser* self) {
+	uint idx = self.add_node(LITERAL_EXPR);
 	self.node_start(idx, self.current);
 	self.result.nodes[idx].extra_text = self.current.text;
 	self.advance();
@@ -1951,10 +1995,10 @@ fn usz Parser.parse_literal_expr(Parser* self) {
  * Parse a string template expression: "...", """..."""
  * Skips string content tokens until close.
  */
-fn usz Parser.parse_string_template_expr(Parser* self) {
-	usz idx = self.add_node(STRING_TEMPLATE_EXPR);
+fn uint Parser.parse_string_template_expr(Parser* self) {
+	uint idx = self.add_node(STRING_TEMPLATE_EXPR);
 	self.node_start(idx, self.current);
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	TokenKind close_kind = (self.current.kind == STRING_OPEN) ? STRING_CLOSE : MULTILINE_STRING_CLOSE;
 	self.advance(); // consume open
@@ -1966,7 +2010,7 @@ fn usz Parser.parse_string_template_expr(Parser* self) {
 		}
 		if (self.current.kind == STRING_TEMPLATE_REF) {
 			// $identifier -- create a NAME_EXPR child
-			usz ref_idx = self.add_node(NAME_EXPR);
+			uint ref_idx = self.add_node(NAME_EXPR);
 			self.node_start(ref_idx, self.current);
 			// The text includes $ prefix, so strip it for the name
 			String ref_text = self.current.text;
@@ -2003,8 +2047,8 @@ fn usz Parser.parse_string_template_expr(Parser* self) {
 /**
  * Parse 'this' expression, optionally with label: this@label
  */
-fn usz Parser.parse_this_expr(Parser* self) {
-	usz idx = self.add_node(THIS_EXPR);
+fn uint Parser.parse_this_expr(Parser* self) {
+	uint idx = self.add_node(THIS_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'this'
 
@@ -2023,8 +2067,8 @@ fn usz Parser.parse_this_expr(Parser* self) {
 /**
  * Parse 'super' expression: super, super@label, super<Type>
  */
-fn usz Parser.parse_super_expr(Parser* self) {
-	usz idx = self.add_node(SUPER_EXPR);
+fn uint Parser.parse_super_expr(Parser* self) {
+	uint idx = self.add_node(SUPER_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'super'
 
@@ -2048,11 +2092,11 @@ fn usz Parser.parse_super_expr(Parser* self) {
 /**
  * Parse parenthesized expression: (expr)
  */
-fn usz Parser.parse_paren_expr(Parser* self) {
-	usz idx = self.add_node(PAREN_EXPR);
+fn uint Parser.parse_paren_expr(Parser* self) {
+	uint idx = self.add_node(PAREN_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume '('
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	if (!self.at(RPAREN) && !self.at_eof()) {
 		self.parse_expression(PREC_NONE);
@@ -2068,11 +2112,11 @@ fn usz Parser.parse_paren_expr(Parser* self) {
  * Parse lambda expression: { body } or { params -> body }
  * Lambda parameters create PARAM child nodes.
  */
-fn usz Parser.parse_lambda_expr(Parser* self) {
-	usz idx = self.add_node(LAMBDA_EXPR);
+fn uint Parser.parse_lambda_expr(Parser* self) {
+	uint idx = self.add_node(LAMBDA_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume '{'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Try to detect lambda parameters by looking for '->'
 	// Heuristic: if we see `identifier ->` or `identifier, identifier ->` or
@@ -2155,7 +2199,7 @@ fn bool Parser.looks_like_lambda_params(Parser* self) {
 fn void Parser.parse_lambda_params(Parser* self) {
 	while (!self.at(ARROW) && !self.at(RCURL) && !self.at_eof()) {
 		if (self.at_identifier()) {
-			usz param_idx = self.add_node(PARAM);
+			uint param_idx = self.add_node(PARAM);
 			self.node_start(param_idx, self.current);
 			Token name = self.expect_identifier();
 			self.node_set_name(param_idx, name);
@@ -2184,8 +2228,8 @@ fn void Parser.parse_lambda_params(Parser* self) {
  * Parse callable reference: ::name
  * (Type::name is handled as postfix on a name expression)
  */
-fn usz Parser.parse_callable_ref_expr(Parser* self) {
-	usz idx = self.add_node(CALLABLE_REF_EXPR);
+fn uint Parser.parse_callable_ref_expr(Parser* self) {
+	uint idx = self.add_node(CALLABLE_REF_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume '::'
 
@@ -2201,11 +2245,11 @@ fn usz Parser.parse_callable_ref_expr(Parser* self) {
 /**
  * Parse object expression: object : SuperType { body }
  */
-fn usz Parser.parse_object_expr(Parser* self) {
-	usz idx = self.add_node(OBJECT_EXPR);
+fn uint Parser.parse_object_expr(Parser* self) {
+	uint idx = self.add_node(OBJECT_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'object'
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Super types: : Type
 	if (self.at(COLON)) {
@@ -2226,8 +2270,8 @@ fn usz Parser.parse_object_expr(Parser* self) {
  * Parse if as an expression (reuses parse_if_expr).
  * Returns the index of the IF_EXPR node.
  */
-fn usz Parser.parse_if_as_expr(Parser* self) {
-	usz idx = self.result.node_count;
+fn uint Parser.parse_if_as_expr(Parser* self) {
+	uint idx = self.result.node_count;
 	self.parse_if_expr();
 	return idx;
 }
@@ -2236,8 +2280,8 @@ fn usz Parser.parse_if_as_expr(Parser* self) {
  * Parse when as an expression (reuses parse_when_expr).
  * Returns the index of the WHEN_EXPR node.
  */
-fn usz Parser.parse_when_as_expr(Parser* self) {
-	usz idx = self.result.node_count;
+fn uint Parser.parse_when_as_expr(Parser* self) {
+	uint idx = self.result.node_count;
 	self.parse_when_expr();
 	return idx;
 }
@@ -2246,8 +2290,8 @@ fn usz Parser.parse_when_as_expr(Parser* self) {
  * Parse try as an expression (reuses parse_try_expr).
  * Returns the index of the TRY_EXPR node.
  */
-fn usz Parser.parse_try_as_expr(Parser* self) {
-	usz idx = self.result.node_count;
+fn uint Parser.parse_try_as_expr(Parser* self) {
+	uint idx = self.result.node_count;
 	self.parse_try_expr();
 	return idx;
 }
@@ -2256,7 +2300,7 @@ fn usz Parser.parse_try_as_expr(Parser* self) {
  * Parse a chain of postfix operators on an expression.
  * Handles: .name, ?.name, (args), [index], !!, ++, --, ::name
  */
-fn usz Parser.parse_postfix_chain(Parser* self, usz left) {
+fn uint Parser.parse_postfix_chain(Parser* self, uint left) {
 	while (!self.at_eof()) {
 		switch (self.current.kind) {
 			case DOT:
@@ -2303,7 +2347,7 @@ fn usz Parser.parse_postfix_chain(Parser* self, usz left) {
 /**
  * Check if a trailing lambda makes sense after the given expression.
  */
-fn bool Parser.is_trailing_lambda_context(Parser* self, usz left) {
+fn bool Parser.is_trailing_lambda_context(Parser* self, uint left) {
 	if (left >= self.result.node_count) return false;
 	NodeKind kind = self.result.nodes[left].kind;
 	switch (kind) {
@@ -2320,7 +2364,7 @@ fn bool Parser.is_trailing_lambda_context(Parser* self, usz left) {
  * Check if generic type arguments (<...>) make sense after the given expression.
  * Only valid after name-like expressions.
  */
-fn bool Parser.is_generic_context(Parser* self, usz left) {
+fn bool Parser.is_generic_context(Parser* self, uint left) {
 	if (left >= self.result.node_count) return false;
 	NodeKind kind = self.result.nodes[left].kind;
 	switch (kind) {
@@ -2335,8 +2379,8 @@ fn bool Parser.is_generic_context(Parser* self, usz left) {
 /**
  * Parse dot access: expr.name or expr?.name
  */
-fn usz Parser.parse_dot_access(Parser* self, usz left, bool safe) {
-	usz idx = self.add_node(DOT_EXPR);
+fn uint Parser.parse_dot_access(Parser* self, uint left, bool safe) {
+	uint idx = self.add_node(DOT_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2364,8 +2408,8 @@ fn usz Parser.parse_dot_access(Parser* self, usz left, bool safe) {
  * Parse call expression: expr(args)
  * Also supports trailing lambda: expr(args) { lambda }
  */
-fn usz Parser.parse_call_expr(Parser* self, usz left) {
-	usz idx = self.add_node(CALL_EXPR);
+fn uint Parser.parse_call_expr(Parser* self, uint left) {
+	uint idx = self.add_node(CALL_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2390,7 +2434,7 @@ fn usz Parser.parse_call_expr(Parser* self, usz left) {
 	self.result.nodes[left].parent = idx;
 
 	self.advance(); // consume '('
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	// Parse arguments
 	while (!self.at(RPAREN) && !self.at_eof()) {
@@ -2410,8 +2454,8 @@ fn usz Parser.parse_call_expr(Parser* self, usz left) {
 /**
  * Parse index expression: expr[index]
  */
-fn usz Parser.parse_index_expr(Parser* self, usz left) {
-	usz idx = self.add_node(INDEX_EXPR);
+fn uint Parser.parse_index_expr(Parser* self, uint left) {
+	uint idx = self.add_node(INDEX_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2419,7 +2463,7 @@ fn usz Parser.parse_index_expr(Parser* self, usz left) {
 	self.result.nodes[left].parent = idx;
 
 	self.advance(); // consume '['
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 
 	while (!self.at(RSQUARE) && !self.at_eof()) {
 		self.parse_expression(PREC_NONE);
@@ -2436,8 +2480,8 @@ fn usz Parser.parse_index_expr(Parser* self, usz left) {
 /**
  * Parse not-null assertion: expr!!
  */
-fn usz Parser.parse_not_null_postfix(Parser* self, usz left) {
-	usz idx = self.add_node(POSTFIX_EXPR);
+fn uint Parser.parse_not_null_postfix(Parser* self, uint left) {
+	uint idx = self.add_node(POSTFIX_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2454,8 +2498,8 @@ fn usz Parser.parse_not_null_postfix(Parser* self, usz left) {
 /**
  * Parse postfix ++/-- on an expression.
  */
-fn usz Parser.parse_postfix_incr_decr(Parser* self, usz left) {
-	usz idx = self.add_node(POSTFIX_EXPR);
+fn uint Parser.parse_postfix_incr_decr(Parser* self, uint left) {
+	uint idx = self.add_node(POSTFIX_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2472,8 +2516,8 @@ fn usz Parser.parse_postfix_incr_decr(Parser* self, usz left) {
 /**
  * Parse member reference: expr::name
  */
-fn usz Parser.parse_member_ref(Parser* self, usz left) {
-	usz idx = self.add_node(CALLABLE_REF_EXPR);
+fn uint Parser.parse_member_ref(Parser* self, uint left) {
+	uint idx = self.add_node(CALLABLE_REF_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2496,8 +2540,8 @@ fn usz Parser.parse_member_ref(Parser* self, usz left) {
  * Parse a trailing lambda: expr { ... }
  * Wraps expr + lambda into a CALL_EXPR.
  */
-fn usz Parser.parse_trailing_lambda(Parser* self, usz left) {
-	usz idx = self.add_node(CALL_EXPR);
+fn uint Parser.parse_trailing_lambda(Parser* self, uint left) {
+	uint idx = self.add_node(CALL_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2513,7 +2557,7 @@ fn usz Parser.parse_trailing_lambda(Parser* self, usz left) {
 
 	self.result.nodes[left].parent = idx;
 
-	usz children_start = self.result.node_count;
+	uint children_start = self.result.node_count;
 	self.parse_lambda_expr();
 	self.adopt_children(idx, children_start);
 	self.result.nodes[idx].child_count += 1; // +1 for left already adopted
@@ -2524,8 +2568,8 @@ fn usz Parser.parse_trailing_lambda(Parser* self, usz left) {
 /**
  * Parse a type check: expr is Type / expr !is Type
  */
-fn usz Parser.parse_type_check(Parser* self, usz left) {
-	usz idx = self.add_node(TYPE_CHECK_EXPR);
+fn uint Parser.parse_type_check(Parser* self, uint left) {
+	uint idx = self.add_node(TYPE_CHECK_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;
@@ -2551,8 +2595,8 @@ fn usz Parser.parse_type_check(Parser* self, usz left) {
 /**
  * Parse a type cast: expr as Type / expr as? Type
  */
-fn usz Parser.parse_type_cast(Parser* self, usz left) {
-	usz idx = self.add_node(TYPE_CAST_EXPR);
+fn uint Parser.parse_type_cast(Parser* self, uint left) {
+	uint idx = self.add_node(TYPE_CAST_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
 	self.result.nodes[idx].start_col = self.result.nodes[left].start_col;

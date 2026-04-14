@@ -28,7 +28,7 @@ fn Object* handle_document_symbol(DocumentStore* store, Object* params) {
 
 	// FILE is always node 0; walk its direct children
 	AstNode* file = &pr.nodes[0];
-	for (usz i = 0; i < file.child_count; i++) {
+	for (uint i = 0; i < file.child_count; i++) {
 		AstNode* child = ast::get_child(pr, file, i)!!;
 		// Only emit declaration nodes as symbols
 		if (ast::is_declaration(child.kind)) {
@@ -101,7 +101,7 @@ fn Object* build_document_symbol_from_node(ParseResult* pr, AstNode* node) {
 	// Recursively add children for container declarations
 	if (node.child_count > 0 && is_container(node.kind)) {
 		Object* children = object::new_obj(tmem);
-		for (usz i = 0; i < node.child_count; i++) {
+		for (uint i = 0; i < node.child_count; i++) {
 			AstNode* child = ast::get_child(pr, node, i)!!;
 			if (ast::is_declaration(child.kind)) {
 				Object* child_sym = build_document_symbol_from_node(pr, child);

@@ -81,7 +81,7 @@ fn Object* handle_signature_help(DocumentStore* store, Object* params) {
 fn AstNode*? find_enclosing_call(ParseResult* pr, String content, uint cursor) {
 	AstNode* best = null;
 
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.kind != CALL_EXPR) continue;
 
@@ -226,7 +226,7 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 		// Class used as constructor call (e.g., MyClass(...))
 		// Look for a CONSTRUCTOR_DECL child or primary constructor params
 		label.appendf("%s(", decl.name);
-		usz decl_idx = ast::node_index(pr, decl);
+		uint decl_idx = ast::node_index(pr, decl);
 		// Check for PARAM children (primary constructor params)
 		param_count = append_params(&label, &param_offsets, decl, pr);
 		label.appendf(")");
@@ -277,11 +277,11 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
  * Returns the number of parameters appended.
  */
 fn int append_params(DString* label, int[64]* offsets, AstNode* decl, ParseResult* pr) {
-	usz decl_idx = ast::node_index(pr, decl);
+	uint decl_idx = ast::node_index(pr, decl);
 	int count = 0;
 	bool first = true;
 
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* child = &pr.nodes[i];
 		if (child.parent != decl_idx) continue;
 		if (child.kind != PARAM) continue;

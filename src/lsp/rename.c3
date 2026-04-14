@@ -127,7 +127,7 @@ fn Object* handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Object
 	// ── Resolve the declaration this identifier refers to ────────
 	// This uses the scope-aware lookup from definition.c3:
 	// finds the innermost scope, walks outward to find the declaration.
-	usz decl_idx = 0;
+	uint decl_idx = 0;
 	bool has_decl = false;
 	bool is_top_level = true;
 
@@ -191,7 +191,7 @@ fn Object* collect_scoped_edits(String content, ParseResult* pr, usz decl_idx, S
 	Object* edits = object::new_obj(tmem);  // JSON array
 
 	AstNode* decl = &pr.nodes[decl_idx];
-	usz scope_idx = decl.parent;
+	uint scope_idx = decl.parent;
 
 	// For non-top-level declarations, restrict scanning to the scope range
 	// to avoid unnecessary definition lookups on unrelated tokens.
@@ -235,7 +235,7 @@ fn Object* collect_scoped_edits(String content, ParseResult* pr, usz decl_idx, S
 		// name, find_definition_in_ast will resolve to the inner one
 		// instead, and the index won't match.
 		if (try found = definition::find_definition_in_ast(pr, target_name, t.offset, is_call)) {
-			usz found_idx = ast::node_index(pr, found);
+			uint found_idx = ast::node_index(pr, found);
 			if (found_idx != decl_idx) continue;  // different declaration (shadowed)
 		}
 

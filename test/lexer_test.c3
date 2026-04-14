@@ -514,9 +514,14 @@ fn void mult() @test {
 	assert(tok.kind == MULT);
 }
 
-fn void div() @test {
+fn void mod_op() @test {
 	Token tok = first("% ");
 	assert(tok.kind == MOD);
+}
+
+fn void div() @test {
+	Token tok = first("/ ");
+	assert(tok.kind == DIV);
 }
 
 fn void incr() @test {

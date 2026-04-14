@@ -56,7 +56,7 @@ fn Object* handle_folding_range(DocumentStore* store, Object* params) {
  * that spans more than one line.
  */
 fn void add_ast_folding_ranges(Object* result, ParseResult* pr) {
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* node = &pr.nodes[i];
 		if (!is_foldable_node(node.kind)) continue;
 
@@ -115,7 +115,7 @@ fn void add_import_folding_range(Object* result, ParseResult* pr) {
 	uint last_col = 0;
 	usz import_count = 0;
 
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* node = &pr.nodes[i];
 		if (node.kind != IMPORT_DECL) continue;
 		if (node.parent != 0) continue; // only file-level imports

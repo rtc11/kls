@@ -164,27 +164,7 @@ fn Token Lexer.next_all(Lexer* self) {
 
 		// Block comment (nestable)
 		if (c == '/' && self.peek_at(1) == '*') {
-			self.advance(); // skip /
-			self.advance(); // skip *
-			int depth = 1;
-			while (self.pos < self.source.len && depth > 0) {
-				char bc = self.peek();
-				if (bc == '/' && self.peek_at(1) == '*') {
-					self.advance();
-					self.advance();
-					depth++;
-				} else if (bc == '*' && self.peek_at(1) == '/') {
-					self.advance();
-					self.advance();
-					depth--;
-				} else {
-					if (bc == '\n') {
-						self.line++;
-						self.col = 0;
-					}
-					self.advance();
-				}
-			}
+			self.skip_block_comment();
 			return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
 		}
 
@@ -201,7 +181,7 @@ fn Token Lexer.next_all(Lexer* self) {
 		}
 
 		// Normal token inside template expression
-		return self.lex_normal_token_all();
+		return self.lex_normal_token();
 	}
 
 	// If we're inside a string literal (not in a template expression),
@@ -251,68 +231,11 @@ fn Token Lexer.next_all(Lexer* self) {
 
 	// Block comment (nestable)
 	if (c == '/' && self.peek_at(1) == '*') {
-		self.advance(); // skip /
-		self.advance(); // skip *
-		int depth = 1;
-		while (self.pos < self.source.len && depth > 0) {
-			char bc = self.peek();
-			if (bc == '/' && self.peek_at(1) == '*') {
-				self.advance();
-				self.advance();
-				depth++;
-			} else if (bc == '*' && self.peek_at(1) == '/') {
-				self.advance();
-				self.advance();
-				depth--;
-			} else {
-				if (bc == '\n') {
-					self.line++;
-					self.col = 0;
-				}
-				self.advance();
-			}
-		}
+		self.skip_block_comment();
 		return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
 	}
 
-	return self.lex_normal_token_all();
-}
-
-/**
- * Lex a normal (non-whitespace/comment) token for next_all mode.
- */
-fn Token Lexer.lex_normal_token_all(Lexer* self) {
-	if (self.pos >= self.source.len) {
-		return self.make_token(EOF, self.pos, 0);
-	}
-
-	usz start = self.pos;
-	uint start_line = self.line;
-	uint start_col = self.col;
-	char c = self.peek();
-
-	// Identifiers and keywords
-	if (is_ident_start(c)) {
-		return self.lex_identifier(start, start_line, start_col);
-	}
-
-	// Numeric literals
-	if (is_digit(c)) {
-		return self.lex_number(start, start_line, start_col);
-	}
-
-	// String literals
-	if (c == '"') {
-		return self.lex_string(start, start_line, start_col);
-	}
-
-	// Character literals
-	if (c == '\'') {
-		return self.lex_char(start, start_line, start_col);
-	}
-
-	// Operators and punctuation
-	return self.lex_operator(start, start_line, start_col);
+	return self.lex_normal_token();
 }
 
 // --- Private helpers ---
@@ -365,11 +288,11 @@ fn void Lexer.skip_block_comment(Lexer* self) {
 			self.advance();
 			self.advance();
 			depth--;
+		} else if (c == '\n') {
+			self.advance();
+			self.line++;
+			self.col = 0;
 		} else {
-			if (c == '\n') {
-				self.line++;
-				self.col = 0;
-			}
 			self.advance();
 		}
 	}
@@ -659,7 +582,20 @@ fn Token Lexer.lex_char(Lexer* self, usz start, uint start_line, uint start_col)
 	if (self.pos < self.source.len && self.peek() == '\\') {
 		self.advance(); // backslash
 		if (self.pos < self.source.len) {
-			self.advance(); // escaped char
+			if (self.peek() == 'u') {
+				self.advance(); // 'u'
+				// Consume up to 4 hex digits for \uXXXX
+				for (int i = 0; i < 4 && self.pos < self.source.len; i++) {
+					char hc = self.peek();
+					if (is_hex_digit(hc) && hc != '_') {
+						self.advance();
+					} else {
+						break;
+					}
+				}
+			} else {
+				self.advance(); // single escaped char (\n, \t, \\, etc.)
+			}
 		}
 	} else if (self.pos < self.source.len) {
 		self.advance(); // regular char

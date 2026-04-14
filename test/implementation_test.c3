@@ -29,14 +29,14 @@ fn Object* make_params(String uri, int line, int character) {
 fn void parser_creates_type_ref_for_supertype() @test {
 	@pool() {
 		ParseResult* r = mem::new(ParseResult);
-		defer mem::free(r);
+		defer { r.free_errors(); mem::free(r); }
 		parser::parse("class Foo : Bar {}", r);
 
 		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
 
 		// Find the CLASS_DECL node
 		AstNode* cls = null;
-		for (usz i = 0; i < r.node_count; i++) {
+		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == CLASS_DECL) {
 				cls = &r.nodes[i];
 				break;
@@ -46,9 +46,9 @@ fn void parser_creates_type_ref_for_supertype() @test {
 		assert(cls.name == "Foo");
 
 		// Find TYPE_REF child
-		usz cls_idx = ast::node_index(r, cls);
+		uint cls_idx = ast::node_index(r, cls);
 		bool found_type_ref = false;
-		for (usz i = 0; i < r.node_count; i++) {
+		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].parent == cls_idx && r.nodes[i].kind == TYPE_REF) {
 				assert(r.nodes[i].name == "Bar", "expected TYPE_REF name 'Bar', got '%s'", r.nodes[i].name);
 				found_type_ref = true;
@@ -61,13 +61,13 @@ fn void parser_creates_type_ref_for_supertype() @test {
 fn void parser_creates_multiple_type_refs() @test {
 	@pool() {
 		ParseResult* r = mem::new(ParseResult);
-		defer mem::free(r);
+		defer { r.free_errors(); mem::free(r); }
 		parser::parse("class Foo : Base(), Serializable, Comparable<Foo> {}", r);
 
 		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
 
-		usz cls_idx = 0;
-		for (usz i = 0; i < r.node_count; i++) {
+		uint cls_idx = 0;
+		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == CLASS_DECL) {
 				cls_idx = i;
 				break;
@@ -77,7 +77,7 @@ fn void parser_creates_multiple_type_refs() @test {
 		// Count TYPE_REF children
 		usz type_ref_count = 0;
 		String[3] names;
-		for (usz i = 0; i < r.node_count; i++) {
+		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].parent == cls_idx && r.nodes[i].kind == TYPE_REF) {
 				if (type_ref_count < 3) {
 					names[type_ref_count] = r.nodes[i].name;
@@ -95,13 +95,13 @@ fn void parser_creates_multiple_type_refs() @test {
 fn void parser_interface_supertypes() @test {
 	@pool() {
 		ParseResult* r = mem::new(ParseResult);
-		defer mem::free(r);
+		defer { r.free_errors(); mem::free(r); }
 		parser::parse("interface Foo : Bar, Baz {}", r);
 
 		assert(r.error_count == 0, "expected no errors");
 
-		usz iface_idx = 0;
-		for (usz i = 0; i < r.node_count; i++) {
+		uint iface_idx = 0;
+		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == INTERFACE_DECL) {
 				iface_idx = i;
 				break;
@@ -109,7 +109,7 @@ fn void parser_interface_supertypes() @test {
 		}
 
 		usz type_ref_count = 0;
-		for (usz i = 0; i < r.node_count; i++) {
+		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].parent == iface_idx && r.nodes[i].kind == TYPE_REF) {
 				type_ref_count++;
 			}

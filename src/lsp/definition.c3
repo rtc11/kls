@@ -91,8 +91,8 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 
 	// Find the innermost scope containing the cursor.
 	// Walk all nodes, tracking the deepest container that contains the cursor.
-	usz scope_idx = 0; // FILE node
-	for (usz i = 1; i < pr.node_count; i++) {
+	uint scope_idx = 0; // FILE node
+	for (uint i = 1; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (!is_scope_node(n.kind)) continue;
 		if (cursor_offset >= n.start_offset && cursor_offset < n.end_offset) {
@@ -103,7 +103,7 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 	}
 
 	// Search from innermost scope outward to FILE
-	usz current = scope_idx;
+	uint current = scope_idx;
 	while (true) {
 		AstNode* scope = &pr.nodes[current];
 
@@ -111,7 +111,7 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 		AstNode* first_match = null;
 		AstNode* func_match = null;
 
-		for (usz i = 0; i < pr.node_count; i++) {
+		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
 			if (n.parent != current) continue;
 			if (!is_definition_target(n.kind)) continue;
@@ -148,7 +148,7 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 		AstNode* first_match = null;
 		AstNode* func_match = null;
 
-		for (usz i = 0; i < pr.node_count; i++) {
+		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
 			if (!is_definition_target(n.kind)) continue;
 			if (n.name != target_name) continue;
@@ -248,7 +248,7 @@ fn bool is_call_context(String content, Token tok) {
  * than the lexer-based heuristic for multi-line calls and trailing lambdas.
  */
 fn bool is_call_context_ast(ParseResult* pr, uint offset) {
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.kind == CALL_EXPR && n.name_offset == offset && n.name_len > 0) {
 			return true;

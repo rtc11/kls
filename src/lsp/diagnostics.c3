@@ -169,7 +169,7 @@ fn bool is_import_name_used(String content, String simple_name) {
  */
 fn void add_unused_import_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
 	// The FILE node is always at index 0; iterate its IMPORT_DECL children.
-	for (usz i = 0; i < ast.node_count; i++) {
+	for (uint i = 0; i < ast.node_count; i++) {
 		AstNode* node = &ast.nodes[i];
 		if (node.kind != IMPORT_DECL) continue;
 		// IMPORT_DECL nodes are direct children of FILE (parent == 0)

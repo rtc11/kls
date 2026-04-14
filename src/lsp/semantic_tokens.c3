@@ -73,7 +73,7 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 	usz count = 0;
 
 	// Pass 1: declaration names (highest priority)
-	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
+	for (uint i = 0; i < pr.node_count && count < table.len; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.name.len == 0 || n.name_len == 0) continue;
 
@@ -99,7 +99,7 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 	}
 
 	// Pass 2: call expressions (function calls override variable/property)
-	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
+	for (uint i = 0; i < pr.node_count && count < table.len; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.name.len == 0 || n.name_len == 0) continue;
 
@@ -119,7 +119,7 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 	}
 
 	// Pass 3: dot access expressions (property access, lower priority than calls)
-	for (usz i = 0; i < pr.node_count && count < table.len; i++) {
+	for (uint i = 0; i < pr.node_count && count < table.len; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.name.len == 0 || n.name_len == 0) continue;
 		if (n.kind != DOT_EXPR) continue;

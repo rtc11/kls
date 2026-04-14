@@ -152,7 +152,7 @@ fn void get_ast_invalidated_on_update() @test {
 	ParseResult* before = store.get_ast("file:///test.kt")!!;
 	assert(before.node_count >= 2, "expected at least 2 nodes");
 	bool found_foo = false;
-	for (usz i = 0; i < before.node_count; i++) {
+	for (uint i = 0; i < before.node_count; i++) {
 		if (before.nodes[i].kind == FUN_DECL && before.nodes[i].name == "foo") {
 			found_foo = true;
 		}
@@ -165,7 +165,7 @@ fn void get_ast_invalidated_on_update() @test {
 
 	// After update, should find "bar" instead of "foo"
 	bool found_bar = false;
-	for (usz i = 0; i < after.node_count; i++) {
+	for (uint i = 0; i < after.node_count; i++) {
 		if (after.nodes[i].kind == FUN_DECL && after.nodes[i].name == "bar") {
 			found_bar = true;
 		}
@@ -197,7 +197,7 @@ fn void get_ast_after_reopen_is_fresh() @test {
 
 	// The new AST should reflect the new content (class Bar, not val x)
 	bool found_bar = false;
-	for (usz i = 0; i < second.node_count; i++) {
+	for (uint i = 0; i < second.node_count; i++) {
 		if (second.nodes[i].kind == CLASS_DECL && second.nodes[i].name == "Bar") {
 			found_bar = true;
 		}

@@ -26,6 +26,7 @@ fn void DocumentStore.free(DocumentStore* self) {
 	@pool() {
 		foreach (&doc : self.docs.tvalues()) {
 			if (doc.cached_ast != null) {
+				doc.cached_ast.free_errors();
 				mem::free(doc.cached_ast);
 			}
 			mem::free(doc.uri.ptr);
@@ -40,6 +41,7 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 	// Free old document strings and cached AST if re-opening the same URI
 	if (try old = self.docs.get_ref(uri)) {
 		if (old.cached_ast != null) {
+			old.cached_ast.free_errors();
 			mem::free(old.cached_ast);
 		}
 		mem::free(old.uri.ptr);
@@ -61,6 +63,7 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 	if (try doc = self.docs.get_ref(uri)) {
 		// Invalidate cached AST before replacing content
 		if (doc.cached_ast != null) {
+			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);
 			doc.cached_ast = null;
 		}
@@ -75,6 +78,7 @@ fn void DocumentStore.close(DocumentStore* self, String uri) {
 	// Free document strings and cached AST before HashMap.remove() frees the entry
 	if (try doc = self.docs.get_ref(uri)) {
 		if (doc.cached_ast != null) {
+			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);
 		}
 		mem::free(doc.uri.ptr);

@@ -116,7 +116,7 @@ fn Object* handle_references(DocumentStore* store, WorkspaceIndex* workspace, Ob
  * is false.
  */
 fn bool is_declaration_name(ParseResult* pr, uint offset) {
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (!ast::is_declaration(n.kind)) continue;
 		if (n.name_offset == offset && n.name_len > 0) {

@@ -121,8 +121,9 @@ struct AstNode {
 	uint name_len;
 
 	// Children: linked via parent index
-	usz parent;       // index of parent node (NO_PARENT for root FILE node)
-	usz child_count;  // number of direct children
+	uint parent;          // index of parent node (NO_PARENT for root FILE node)
+	uint child_count;     // number of direct children
+	uint children_start;  // first index where children may appear (set by adopt_children)
 
 	// Modifier flags (bitfield)
 	uint mod_flags;
@@ -148,13 +149,16 @@ struct ParseError {
 
 // ── Parse result ───────────────────────────────────────────────────
 
-const usz NO_PARENT = usz.max;
+const uint NO_PARENT = uint.max;
 const usz MAX_NODES = 16384;
 const usz MAX_ERRORS = 256;
+// Last slot is reserved as overflow sink -- writes go there when the array is full,
+// preventing out-of-bounds access. Real nodes use indices 0..MAX_NODES-2.
+const uint OVERFLOW_NODE = (uint)(MAX_NODES - 1);
 
 struct ParseResult {
 	AstNode[MAX_NODES] nodes;
-	usz node_count;
+	uint node_count;
 	ParseError[MAX_ERRORS] errors;
 	usz error_count;
 }
@@ -164,19 +168,19 @@ struct ParseResult {
 /**
  * Get the index of a parent node within the nodes array.
  */
-fn usz node_index(ParseResult* result, AstNode* node) {
-	return (usz)(node - &result.nodes[0]);
+fn uint node_index(ParseResult* result, AstNode* node) {
+	return (uint)(node - &result.nodes[0]);
 }
 
 /**
  * Get the Nth direct child of a node (0-indexed).
  * Returns null if n >= child_count.
  */
-fn AstNode*? get_child(ParseResult* result, AstNode* parent, usz n) {
+fn AstNode*? get_child(ParseResult* result, AstNode* parent, uint n) {
 	if (n >= parent.child_count) return NOT_FOUND~;
-	usz parent_idx = node_index(result, parent);
-	usz count = 0;
-	for (usz i = 0; i < result.node_count; i++) {
+	uint parent_idx = node_index(result, parent);
+	uint count = 0;
+	for (uint i = parent.children_start; i < result.node_count; i++) {
 		if (result.nodes[i].parent == parent_idx) {
 			if (count == n) {
 				return &result.nodes[i];
@@ -192,8 +196,8 @@ fn AstNode*? get_child(ParseResult* result, AstNode* parent, usz n) {
  */
 fn AstNode*? find_child(ParseResult* result, AstNode* parent, NodeKind kind) {
 	if (parent.child_count == 0) return NOT_FOUND~;
-	usz parent_idx = node_index(result, parent);
-	for (usz i = 0; i < result.node_count; i++) {
+	uint parent_idx = node_index(result, parent);
+	for (uint i = parent.children_start; i < result.node_count; i++) {
 		if (result.nodes[i].parent == parent_idx && result.nodes[i].kind == kind) {
 			return &result.nodes[i];
 		}
@@ -205,10 +209,10 @@ fn AstNode*? find_child(ParseResult* result, AstNode* parent, NodeKind kind) {
  * Iterate over direct children of a node, calling a callback.
  * count_of_kind returns the number of direct children matching a given kind.
  */
-fn usz count_children_of_kind(ParseResult* result, AstNode* parent, NodeKind kind) {
-	usz parent_idx = node_index(result, parent);
-	usz count = 0;
-	for (usz i = 0; i < result.node_count; i++) {
+fn uint count_children_of_kind(ParseResult* result, AstNode* parent, NodeKind kind) {
+	uint parent_idx = node_index(result, parent);
+	uint count = 0;
+	for (uint i = parent.children_start; i < result.node_count; i++) {
 		if (result.nodes[i].parent == parent_idx && result.nodes[i].kind == kind) {
 			count++;
 		}
@@ -257,3 +261,16 @@ fn int to_lsp_symbol_kind(NodeKind kind) {
 }
 
 faultdef NOT_FOUND;
+
+/**
+ * Free heap-allocated error messages inside a ParseResult.
+ * Must be called before freeing the ParseResult itself.
+ */
+fn void ParseResult.free_errors(ParseResult* self) {
+	for (usz i = 0; i < self.error_count; i++) {
+		if (self.errors[i].message.len > 0) {
+			mem::free(self.errors[i].message.ptr);
+		}
+	}
+	self.error_count = 0;
+}

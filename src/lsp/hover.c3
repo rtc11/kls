@@ -123,7 +123,7 @@ fn String? describe_identifier_from_ast(ParseResult* pr, Token tok) {
 	String target = tok.text;
 	AstNode* best = null;
 
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (!ast::is_declaration(n.kind)) continue;
 		if (n.name != target) continue;
@@ -158,9 +158,9 @@ fn String build_signature(AstNode* node, ParseResult* pr) {
 			// Append parameters
 			ds.appendf("(");
 			bool first = true;
-			for (usz i = 0; i < pr.node_count; i++) {
+			for (uint i = 0; i < pr.node_count; i++) {
 				AstNode* child = &pr.nodes[i];
-				usz node_idx = ast::node_index(pr, node);
+				uint node_idx = ast::node_index(pr, node);
 				if (child.parent != node_idx) continue;
 				if (child.kind != PARAM) continue;
 
@@ -207,9 +207,9 @@ fn String build_signature(AstNode* node, ParseResult* pr) {
 		case CONSTRUCTOR_DECL:
 			ds.appendf("constructor(");
 			bool first = true;
-			for (usz i = 0; i < pr.node_count; i++) {
+			for (uint i = 0; i < pr.node_count; i++) {
 				AstNode* child = &pr.nodes[i];
-				usz node_idx = ast::node_index(pr, node);
+				uint node_idx = ast::node_index(pr, node);
 				if (child.parent != node_idx) continue;
 				if (child.kind != PARAM) continue;
 
@@ -586,7 +586,7 @@ fn String? describe_from_file(WorkspaceSymbol* sym, DocumentStore* store) {
 	if (pr.node_count == 0) return NO_DESCRIPTION~;
 
 	// Find the declaration node matching the symbol
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (!ast::is_declaration(n.kind)) continue;
 		if (n.name != sym.name) continue;
@@ -596,7 +596,7 @@ fn String? describe_from_file(WorkspaceSymbol* sym, DocumentStore* store) {
 	}
 
 	// If exact position match failed, try first name match
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (!ast::is_declaration(n.kind)) continue;
 		if (n.name != sym.name) continue;

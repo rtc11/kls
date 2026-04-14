@@ -13,6 +13,7 @@ fn ParseResult* do_parse(String src) {
 }
 
 fn void free_result(ParseResult* r) {
+	r.free_errors();
 	mem::free(r);
 }
 
@@ -22,7 +23,7 @@ fn AstNode* file_node(ParseResult* r) {
 }
 
 // Get Nth child of a node (uses parent-pointer traversal)
-fn AstNode* child(ParseResult* r, AstNode* parent, usz n) {
+fn AstNode* child(ParseResult* r, AstNode* parent, uint n) {
 	return ast::get_child(r, parent, n)!!;
 }
 
@@ -255,7 +256,7 @@ fn void parse_fun_with_params() @test {
 		assert(fun.type_text == "Int", "expected return type 'Int', got '%s'", fun.type_text);
 		// Should have PARAM children
 		usz param_count = 0;
-		for (usz i = 0; i < fun.child_count; i++) {
+		for (uint i = 0; i < fun.child_count; i++) {
 			AstNode* ch = ast::get_child(r, fun, i)!!;
 			if (ch.kind == PARAM) param_count++;
 		}
@@ -435,7 +436,7 @@ fn void parse_class_with_members() @test {
 		assert(cls.name == "Foo");
 		// Count declaration children
 		usz decl_count = 0;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ast::is_declaration(ch.kind)) decl_count++;
 		}
@@ -459,13 +460,13 @@ fn void parse_nested_class() @test {
 
 		// Find Inner class
 		bool found_inner = false;
-		for (usz i = 0; i < outer.child_count; i++) {
+		for (uint i = 0; i < outer.child_count; i++) {
 			AstNode* ch = ast::get_child(r, outer, i)!!;
 			if (ch.kind == CLASS_DECL && ch.name == "Inner") {
 				found_inner = true;
 				// Inner should have a method
 				bool found_method = false;
-				for (usz j = 0; j < ch.child_count; j++) {
+				for (uint j = 0; j < ch.child_count; j++) {
 					AstNode* ic = ast::get_child(r, ch, j)!!;
 					if (ic.kind == FUN_DECL && ic.name == "method") {
 						found_method = true;
@@ -494,7 +495,7 @@ fn void parse_named_companion() @test {
 		assert(cls.kind == CLASS_DECL);
 
 		bool found_companion = false;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == COMPANION_OBJECT_DECL) {
 				found_companion = true;
@@ -518,7 +519,7 @@ fn void parse_anonymous_companion() @test {
 		AstNode* cls = child(r, f, 0);
 
 		bool found_companion = false;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == COMPANION_OBJECT_DECL) {
 				found_companion = true;
@@ -542,7 +543,7 @@ fn void parse_secondary_constructor() @test {
 		AstNode* cls = child(r, f, 0);
 
 		bool found = false;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == CONSTRUCTOR_DECL) found = true;
 		}
@@ -563,7 +564,7 @@ fn void parse_init_block() @test {
 		AstNode* cls = child(r, f, 0);
 
 		bool found = false;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == INIT_BLOCK) found = true;
 		}
@@ -582,7 +583,7 @@ fn void parse_enum_entries() @test {
 		assert(cls.name == "Color");
 
 		usz entry_count = 0;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == ENUM_ENTRY) entry_count++;
 		}
@@ -608,7 +609,7 @@ fn void parse_enum_entries_with_members() @test {
 
 		usz entry_count = 0;
 		usz fun_count = 0;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == ENUM_ENTRY) entry_count++;
 			if (ch.kind == FUN_DECL) fun_count++;
@@ -629,7 +630,7 @@ fn void parse_primary_constructor_params() @test {
 		assert(cls.name == "Point");
 
 		usz param_count = 0;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == PARAM) {
 				param_count++;
@@ -1227,7 +1228,7 @@ fun path(str: String): Path = Paths.get(System.getProperty("user.dir"), str).als
 
 // Get the BLOCK child of a FUN_DECL node
 fn AstNode* fun_block(ParseResult* r, AstNode* fun_node) {
-	for (usz i = 0; i < fun_node.child_count; i++) {
+	for (uint i = 0; i < fun_node.child_count; i++) {
 		AstNode* ch = ast::get_child(r, fun_node, i)!!;
 		if (ch.kind == BLOCK) return ch;
 	}
@@ -1236,7 +1237,7 @@ fn AstNode* fun_block(ParseResult* r, AstNode* fun_node) {
 
 // Find the first child of a given kind
 fn AstNode* find_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
-	for (usz i = 0; i < parent.child_count; i++) {
+	for (uint i = 0; i < parent.child_count; i++) {
 		AstNode* ch = ast::get_child(r, parent, i)!!;
 		if (ch.kind == kind) return ch;
 	}
@@ -1246,7 +1247,7 @@ fn AstNode* find_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
 // Count children of a given kind
 fn usz count_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
 	usz count = 0;
-	for (usz i = 0; i < parent.child_count; i++) {
+	for (uint i = 0; i < parent.child_count; i++) {
 		AstNode* ch = ast::get_child(r, parent, i)!!;
 		if (ch.kind == kind) count++;
 	}
@@ -1860,7 +1861,7 @@ fn void parse_real_world_try_catch_function() @test {
 
 // Helper: get the first expression statement (direct child of block) of a given kind
 fn AstNode* first_expr(ParseResult* r, AstNode* block, NodeKind kind) {
-	for (usz i = 0; i < block.child_count; i++) {
+	for (uint i = 0; i < block.child_count; i++) {
 		AstNode* ch = ast::get_child(r, block, i)!!;
 		if (ch.kind == kind) return ch;
 	}
@@ -2821,7 +2822,7 @@ fun get(path: String = "", handler: suspend Exchange.() -> Any?) {}`;
 
 		// Check the handler param has correct type text
 		bool found_handler = false;
-		for (usz i = 0; i < cls.child_count; i++) {
+		for (uint i = 0; i < cls.child_count; i++) {
 			AstNode* ch = ast::get_child(r, cls, i)!!;
 			if (ch.kind == PARAM && ch.name == "handler") {
 				found_handler = true;
@@ -2926,7 +2927,7 @@ fn void parse_type_params_mixed_variance() @test {
 
 		// Second param: out R (find by iterating)
 		bool found_r = false;
-		for (usz i = 0; i < iface.child_count; i++) {
+		for (uint i = 0; i < iface.child_count; i++) {
 			AstNode* ch = ast::get_child(r, iface, i)!!;
 			if (ch.kind == TYPE_PARAM && ch.name == "R") {
 				found_r = true;

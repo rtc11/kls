@@ -89,7 +89,7 @@ fn Object* handle_implementation(DocumentStore* store, WorkspaceIndex* workspace
  * Adds matching locations to the result array.
  */
 fn void find_implementations_in_ast(ParseResult* pr, String target_name, String uri, Object* locations) {
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* node = &pr.nodes[i];
 
 		// Only consider class-like declarations
@@ -110,7 +110,7 @@ fn void find_implementations_in_ast(ParseResult* pr, String target_name, String 
  * whose name matches the target.
  */
 fn bool has_supertype(ParseResult* pr, usz parent_idx, String target_name) {
-	for (usz i = 0; i < pr.node_count; i++) {
+	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* child = &pr.nodes[i];
 		if (child.parent != parent_idx) continue;
 		if (child.kind != TYPE_REF) continue;

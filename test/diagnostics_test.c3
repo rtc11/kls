@@ -10,7 +10,7 @@ import kls::kotlin::parser;
  */
 fn Object* build_test_diagnostics(String content) {
 	ParseResult* pr = mem::new(ParseResult);
-	defer mem::free(pr);
+	defer { pr.free_errors(); mem::free(pr); }
 	parser::parse(content, pr);
 	return diagnostics::build_diagnostics_array(content, pr);
 }
