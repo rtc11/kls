@@ -191,9 +191,9 @@ fn String build_signature(AstNode* node, ParseResult* pr) {
 			ds.appendf("companion object %s", node.name);
 
 		case PROPERTY_DECL:
-			// Determine val vs var from modifiers (we don't track this explicitly,
-			// but if MOD_FINAL is set it was a val primary constructor param)
-			ds.appendf("val %s", node.name);
+			// #13: Show val vs var based on MOD_VAR flag
+			String prop_keyword = (node.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
+			ds.appendf("%s %s", prop_keyword, node.name);
 			if (node.type_text.len > 0) {
 				ds.appendf(": %s", node.type_text);
 			}

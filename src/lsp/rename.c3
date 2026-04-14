@@ -85,6 +85,17 @@ fn Object* handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Object
 
 	String new_name = params.get_string("newName")!!;
 
+	// #17: Validate that the new name is a legal Kotlin identifier
+	if (new_name.len == 0) return null;
+	if (!lexer::is_ident_start(new_name[0])) return null;
+	for (usz i = 1; i < new_name.len; i++) {
+		if (!lexer::is_ident_part(new_name[i])) return null;
+	}
+	// Reject hard keywords as new names
+	Lexer name_lex = lexer::init(new_name);
+	Token name_tok = name_lex.next();
+	if (name_tok.kind != IDENTIFIER && !name_tok.kind.is_identifier_or_soft_keyword()) return null;
+
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
 

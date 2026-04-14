@@ -810,3 +810,111 @@ fn void prepare_rename_rejects_import_path() @test {
 		assert(result == null, "expected null for identifier in import path");
 	};
 }
+
+// ── #17: Rename rejects invalid new names ───────────────────────────
+
+fn void rename_rejects_empty_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result == null, "expected null for empty new name");
+	};
+}
+
+fn void rename_rejects_name_starting_with_digit() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "123abc");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result == null, "expected null for name starting with digit");
+	};
+}
+
+fn void rename_rejects_hard_keyword() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "class");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result == null, "expected null for hard keyword 'class'");
+	};
+}
+
+fn void rename_rejects_name_with_special_chars() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "foo-bar");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result == null, "expected null for name with special chars");
+	};
+}
+
+fn void rename_accepts_soft_keyword() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		// Soft keywords like "data" are valid identifiers
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "data");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result != null, "expected rename to succeed with soft keyword 'data'");
+	};
+}
+
+fn void rename_accepts_valid_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "hello_world");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result != null, "expected rename to succeed with valid name");
+	};
+}
+
+fn void rename_accepts_underscore_start() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+
+		Object* params = make_rename_params("file:///test.kt", 0, 4, "_private");
+		Object* result = rename::handle_rename(&store, null, params);
+
+		assert(result != null, "expected rename to succeed with underscore-prefixed name");
+	};
+}

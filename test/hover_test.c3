@@ -328,3 +328,44 @@ fn void hover_property_shows_type() @test {
 		assert(value.contains(": Int"), "expected ': Int' in hover");
 	};
 }
+
+// ── #13: var property shows 'var' not 'val' ────────────────────────
+
+fn void hover_var_property_shows_var() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "var count: Int = 0");
+		// Hover over "count" at col 4
+		Object* params = make_hover_params("file:///test.kt", 0, 4);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result for var");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("var count"), "expected 'var count' in hover, got: '%s'", value);
+		assert(!value.contains("val count"), "should not contain 'val count' for var property, got: '%s'", value);
+		assert(value.contains(": Int"), "expected ': Int' in hover");
+	};
+}
+
+fn void hover_val_property_shows_val() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val name: String = \"hello\"");
+		// Hover over "name" at col 4
+		Object* params = make_hover_params("file:///test.kt", 0, 4);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result for val");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("val name"), "expected 'val name' in hover, got: '%s'", value);
+		assert(!value.contains("var name"), "should not contain 'var name' for val property, got: '%s'", value);
+	};
+}

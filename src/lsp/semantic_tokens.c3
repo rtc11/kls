@@ -271,7 +271,7 @@ fn int map_token_type(TokenKind kind) {
 		// Number literals
 		case INTEGER_LITERAL: return TT_NUMBER;
 		case FLOAT_LITERAL:   return TT_NUMBER;
-		case BOOLEAN_LITERAL: return TT_NUMBER;
+		case BOOLEAN_LITERAL: return TT_KEYWORD;  // true/false are keyword-like
 		case NULL_LITERAL:    return TT_KEYWORD;
 
 		// Identifiers
