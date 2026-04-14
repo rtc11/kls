@@ -278,6 +278,8 @@ fn void ensure_parent_dirs(String file_path) {
 		}
 	}
 	if (!found) return;
+	// #10: Guard against usz underflow when last_slash == 0
+	if (last_slash == 0) return;
 
 	String dir_path = file_path[..last_slash - 1];
 	if (dir_path.len == 0) return;
@@ -326,7 +328,8 @@ fn bool find_symbol_position(String content, String symbol_name, DepSymbolKind k
 		Token tok = lex.next();
 		if (tok.kind == EOF) break;
 
-		if (tok.kind == IDENTIFIER && tok.text == symbol_name) {
+		// #18: Also match soft keywords used as symbol names (e.g., class named "data")
+		if ((tok.kind == IDENTIFIER || tok.kind.is_identifier_or_soft_keyword()) && tok.text == symbol_name) {
 			// Check if preceded by the expected keyword
 			bool is_match = false;
 
@@ -361,7 +364,7 @@ fn bool find_symbol_position(String content, String symbol_name, DepSymbolKind k
 	while (true) {
 		Token tok = lex2.next();
 		if (tok.kind == EOF) break;
-		if (tok.kind == IDENTIFIER && tok.text == symbol_name) {
+		if ((tok.kind == IDENTIFIER || tok.kind.is_identifier_or_soft_keyword()) && tok.text == symbol_name) {
 			*out_line = tok.line;
 			*out_col = tok.col;
 			return true;

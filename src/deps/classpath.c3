@@ -241,7 +241,8 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 			line_end++;
 		}
 
-		String line = output[pos..line_end - 1];
+		// #9: Guard against empty lines (line_end == pos) to prevent usz underflow
+		String line = line_end > pos ? output[pos..line_end - 1] : "";
 		if (line.len > 0 && line[line.len - 1] == '\r') {
 			line = line[..line.len - 2];
 		}
@@ -316,7 +317,8 @@ fn void parse_maven_output(Classpath* cp, String output) {
 		while (line_end < output.len && output[line_end] != '\n') {
 			line_end++;
 		}
-		String line = output[pos..line_end - 1];
+		// #9: Guard against empty lines (line_end == pos) to prevent usz underflow
+		String line = line_end > pos ? output[pos..line_end - 1] : "";
 		if (line.len > 0 && line[line.len - 1] == '\r') {
 			line = line[..line.len - 2];
 		}
@@ -337,7 +339,7 @@ fn void parse_maven_output(Classpath* cp, String output) {
 			sep++;
 		}
 
-		String jar_path = classpath_line[pos..sep - 1];
+		String jar_path = sep > pos ? classpath_line[pos..sep - 1] : "";
 		if (jar_path.len > 0 && jar_path.ends_with(".jar")) {
 			add_jar(cp, jar_path);
 		}
