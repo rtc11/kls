@@ -8,7 +8,9 @@ import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::symbols;
+import kls::kotlin::stdlib;
 import kls::workspace;
+import kls::deps::jar_index;
 
 // LSP CompletionItemKind constants
 const int COMPLETION_KIND_METHOD = 2;
@@ -75,7 +77,15 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// Add workspace completions from other files
 	if (workspace != null) {
 		add_workspace_completions(items, workspace, prefix, uri);
+
+		// Add dependency completions from indexed JARs
+		if (workspace.dep_index.initialized) {
+			add_dependency_completions(items, &workspace.dep_index, prefix);
+		}
 	}
+
+	// Add stdlib completions (bundled kotlin-stdlib symbols)
+	add_stdlib_completions(items, prefix);
 
 	// Build CompletionList
 	Object* result = object::new_obj(tmem);
@@ -270,5 +280,150 @@ fn int symbol_kind_to_completion_kind(SymbolKind kind) {
 		case OBJECT:    return COMPLETION_KIND_MODULE;
 		case PROPERTY:  return COMPLETION_KIND_PROPERTY;
 		case TYPEALIAS: return COMPLETION_KIND_CLASS;
+	}
+}
+
+// ── Stdlib completions ────────────────────────────────────────────
+
+/**
+ * Add completion items from the bundled kotlin-stdlib index.
+ * Filters by prefix and deduplicates against items already present.
+ */
+fn void add_stdlib_completions(Object* items, String prefix) {
+	if (prefix.len == 0) return;
+
+	// Collect names already in items to avoid duplicates
+	String[256] seen_buf;
+	usz seen_count = 0;
+	for (usz i = 0; i < items.get_len() && seen_count < 256; i++) {
+		Object* item = items.get_at(i);
+		if (try label = item.get_string("label")) {
+			seen_buf[seen_count] = label;
+			seen_count++;
+		}
+	}
+
+	StdlibSymbol*[128] matches;
+	usz match_count = stdlib::lookup_by_prefix(prefix, &matches);
+
+	for (usz i = 0; i < match_count; i++) {
+		StdlibSymbol* sym = matches[i];
+
+		// Skip exact matches
+		if (sym.name == prefix) continue;
+
+		// Dedup check
+		bool already_seen = false;
+		for (usz j = 0; j < seen_count; j++) {
+			if (seen_buf[j] == sym.name) {
+				already_seen = true;
+				break;
+			}
+		}
+		if (already_seen) continue;
+
+		if (seen_count < 256) {
+			seen_buf[seen_count] = sym.name;
+			seen_count++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", sym.name);
+		item.set("kind", stdlib_kind_to_completion_kind(sym.kind));
+		item.set("detail", sym.package_name);
+
+		// Add documentation with signature
+		Object* doc_obj = object::new_obj(tmem);
+		doc_obj.set("kind", "markdown");
+		DString doc_val;
+		doc_val.tinit();
+		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+		if (sym.doc.len > 0) {
+			doc_val.appendf("\n\n%s", sym.doc);
+		}
+		doc_obj.set("value", doc_val.str_view());
+		item.set("documentation", doc_obj);
+
+		items.push(item);
+	}
+}
+
+/**
+ * Map a StdlibKind to an LSP CompletionItemKind.
+ */
+fn int stdlib_kind_to_completion_kind(StdlibKind kind) {
+	switch (kind) {
+		case FUNCTION:  return COMPLETION_KIND_FUNCTION;
+		case CLASS:     return COMPLETION_KIND_CLASS;
+		case INTERFACE: return COMPLETION_KIND_INTERFACE;
+		case PROPERTY:  return COMPLETION_KIND_PROPERTY;
+		case METHOD:    return COMPLETION_KIND_METHOD;
+		case OBJECT:    return COMPLETION_KIND_MODULE;
+		case TYPEALIAS: return COMPLETION_KIND_CLASS;
+	}
+}
+
+// ── Dependency completions ────────────────────────────────────────
+
+/**
+ * Add completion items from the dependency index (JARs on the classpath).
+ * Filters by prefix and deduplicates against items already present.
+ */
+fn void add_dependency_completions(Object* items, DependencyIndex* dep_index, String prefix) {
+	if (prefix.len == 0) return;
+
+	// Collect names already in items to avoid duplicates
+	String[256] seen_buf;
+	usz seen_count = 0;
+	for (usz i = 0; i < items.get_len() && seen_count < 256; i++) {
+		Object* item = items.get_at(i);
+		if (try label = item.get_string("label")) {
+			seen_buf[seen_count] = label;
+			seen_count++;
+		}
+	}
+
+	DepSymbol*[128] matches;
+	usz match_count = dep_index.lookup_by_prefix(prefix, &matches);
+
+	for (usz i = 0; i < match_count; i++) {
+		DepSymbol* sym = matches[i];
+
+		// Skip exact matches
+		if (sym.name == prefix) continue;
+
+		// Dedup check
+		bool already_seen = false;
+		for (usz j = 0; j < seen_count; j++) {
+			if (seen_buf[j] == sym.name) {
+				already_seen = true;
+				break;
+			}
+		}
+		if (already_seen) continue;
+
+		if (seen_count < 256) {
+			seen_buf[seen_count] = sym.name;
+			seen_count++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", sym.name);
+		item.set("kind", jar_index::dep_kind_to_completion_kind(sym.kind));
+		item.set("detail", sym.package_name);
+
+		// Add documentation with signature
+		Object* doc_obj = object::new_obj(tmem);
+		doc_obj.set("kind", "markdown");
+		DString doc_val;
+		doc_val.tinit();
+		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+		if (sym.class_name.len > 0) {
+			doc_val.appendf("\n\n*%s* (%s)", sym.package_name, sym.class_name);
+		}
+		doc_obj.set("value", doc_val.str_view());
+		item.set("documentation", doc_obj);
+
+		items.push(item);
 	}
 }

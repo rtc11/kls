@@ -9,6 +9,8 @@ import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
 import kls::workspace;
+import kls::deps::jar_index;
+import kls::deps::source_nav;
 
 /**
  * Handle textDocument/definition request.
@@ -65,6 +67,14 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	if (workspace != null) {
 		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri)) {
 			return result;
+		}
+	}
+
+	// ── Dependency fallback via source JARs ───────────────────────
+	if (workspace != null) {
+		Object* dep_result = source_nav::find_definition_in_deps(&workspace.dep_index, target_name, is_call);
+		if (dep_result != null) {
+			return dep_result;
 		}
 	}
 

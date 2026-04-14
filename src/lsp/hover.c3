@@ -10,7 +10,9 @@ import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
+import kls::kotlin::stdlib;
 import kls::workspace;
+import kls::deps::jar_index;
 
 faultdef NO_TOKEN, NO_DESCRIPTION;
 
@@ -54,6 +56,20 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
 		// Cross-file fallback: look up in workspace index
 		if (!found_description && workspace != null) {
 			if (try desc = describe_identifier_from_workspace(workspace, store, tok, uri)) {
+				description = desc;
+				found_description = true;
+			}
+		}
+		// Dependency fallback: look up in indexed JARs
+		if (!found_description && workspace != null && workspace.dep_index.initialized) {
+			if (try desc = describe_identifier_from_deps(&workspace.dep_index, tok)) {
+				description = desc;
+				found_description = true;
+			}
+		}
+		// Stdlib fallback: look up in bundled kotlin-stdlib index
+		if (!found_description) {
+			if (try desc = describe_identifier_from_stdlib(tok)) {
 				description = desc;
 				found_description = true;
 			}
@@ -470,6 +486,44 @@ fn String? describe_token(Token tok) {
 // ── Cross-file hover ──────────────────────────────────────────────
 
 /**
+ * Look up an identifier in the bundled kotlin-stdlib index and produce
+ * a hover description with signature, package, and documentation.
+ * Returns all matching overloads separated by horizontal rules.
+ */
+fn String? describe_identifier_from_stdlib(Token tok) {
+	String target = tok.text;
+
+	StdlibSymbol*[16] matches;
+	usz count = stdlib::lookup_all_by_name(target, &matches);
+	if (count == 0) return NO_DESCRIPTION~;
+
+	DString ds;
+	ds.tinit();
+
+	for (usz i = 0; i < count; i++) {
+		StdlibSymbol* sym = matches[i];
+
+		if (i > 0) {
+			ds.appendf("\n\n---\n\n");
+		}
+
+		ds.appendf("```kotlin\n%s\n```", sym.signature);
+
+		if (sym.package_name.len > 0) {
+			ds.appendf("\n\n*%s*", sym.package_name);
+		}
+
+		if (sym.doc.len > 0) {
+			ds.appendf("\n\n%s", sym.doc);
+		}
+	}
+
+	return ds.str_view();
+}
+
+// ── Cross-file hover (workspace) ──────────────────────────────────
+
+/**
  * Look up an identifier in the workspace index and try to produce a
  * rich signature. First tries parsing the target file for an AST-based
  * signature; falls back to a basic description from the workspace symbol.
@@ -572,6 +626,44 @@ fn String describe_workspace_symbol(WorkspaceSymbol* sym) {
 
 	if (sym.package_name.len > 0) {
 		ds.appendf("\n\n*%s*", sym.package_name);
+	}
+
+	return ds.str_view();
+}
+
+// ── Dependency hover ──────────────────────────────────────────────
+
+/**
+ * Look up an identifier in the dependency index (indexed JARs) and produce
+ * a hover description with signature, package, and declaring class.
+ * Returns all matching overloads separated by horizontal rules.
+ */
+fn String? describe_identifier_from_deps(DependencyIndex* dep_index, Token tok) {
+	String target = tok.text;
+
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(target, &matches);
+	if (count == 0) return NO_DESCRIPTION~;
+
+	DString ds;
+	ds.tinit();
+
+	for (usz i = 0; i < count; i++) {
+		DepSymbol* sym = matches[i];
+
+		if (i > 0) {
+			ds.appendf("\n\n---\n\n");
+		}
+
+		ds.appendf("```kotlin\n%s\n```", sym.signature);
+
+		if (sym.package_name.len > 0) {
+			ds.appendf("\n\n*%s*", sym.package_name);
+		}
+
+		if (sym.class_name.len > 0 && sym.class_name != sym.name) {
+			ds.appendf(" (from %s)", sym.class_name);
+		}
 	}
 
 	return ds.str_view();

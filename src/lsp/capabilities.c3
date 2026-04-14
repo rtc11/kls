@@ -59,12 +59,30 @@ fn Object* build_capabilities() {
 	Object* workspace_caps = object::new_obj(tmem);
 	Object* file_operations = object::new_obj(tmem);
 
-	// Register interest in .kt file changes
+	// Register interest in .kt file changes and build files
 	Object* watchers = object::new_obj(tmem);
 	Object* watcher = object::new_obj(tmem);
 	watcher.set("globPattern", "**/*.kt");
 	watcher.set("kind", 7); // Create=1 | Change=2 | Delete=4 = 7 (all)
 	watchers.push(watcher);
+
+	// Watch build.gradle.kts
+	Object* gradle_kts_watcher = object::new_obj(tmem);
+	gradle_kts_watcher.set("globPattern", "**/build.gradle.kts");
+	gradle_kts_watcher.set("kind", 7);
+	watchers.push(gradle_kts_watcher);
+
+	// Watch build.gradle
+	Object* gradle_watcher = object::new_obj(tmem);
+	gradle_watcher.set("globPattern", "**/build.gradle");
+	gradle_watcher.set("kind", 7);
+	watchers.push(gradle_watcher);
+
+	// Watch pom.xml
+	Object* pom_watcher = object::new_obj(tmem);
+	pom_watcher.set("globPattern", "**/pom.xml");
+	pom_watcher.set("kind", 7);
+	watchers.push(pom_watcher);
 
 	Object* change_reg = object::new_obj(tmem);
 	change_reg.set("watchers", watchers);

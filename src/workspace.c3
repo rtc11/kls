@@ -7,6 +7,8 @@ import std::collections;
 import kls::kotlin::symbols;
 import kls::kotlin::token;
 import kls::kotlin::lexer;
+import kls::deps::classpath;
+import kls::deps::jar_index;
 
 // ── Workspace symbol entry ─────────────────────────────────────────
 
@@ -38,6 +40,8 @@ struct WorkspaceIndex {
 	List{WorkspaceSymbol} symbols;            // all symbols across workspace
 	HashMap{String, WorkspaceFile} files;     // uri -> file metadata
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
+	Classpath classpath;                      // resolved dependency JARs
+	DependencyIndex dep_index;                // indexed symbols from JARs
 }
 
 fn void WorkspaceIndex.init(WorkspaceIndex* self) {
@@ -46,6 +50,8 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.symbols.init(mem);
 	self.files.init(mem);
 	self.name_index.init(mem);
+	self.classpath.init();
+	self.dep_index.init();
 }
 
 fn void WorkspaceIndex.free(WorkspaceIndex* self) {
@@ -74,6 +80,9 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		}
 	};
 	self.name_index.free();
+
+	self.classpath.free();
+	self.dep_index.free();
 
 	if (self.root_uri.len > 0) mem::free(self.root_uri.ptr);
 	if (self.root_path.len > 0) mem::free(self.root_path.ptr);

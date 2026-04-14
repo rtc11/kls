@@ -17,6 +17,8 @@ import kls::lsp::signature_help;
 import kls::lsp::semantic_tokens;
 import kls::lsp::workspace_symbols;
 import kls::workspace;
+import kls::deps::classpath;
+import kls::deps::jar_index;
 
 struct Server {
 	bool is_running;
@@ -91,6 +93,8 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "initialized":
 			io::eprintfn("[kls] Client initialized");
 			self.workspace.scan_workspace();
+			classpath::resolve_classpath(&self.workspace.classpath, self.workspace.root_path);
+			self.workspace.dep_index.index_classpath(&self.workspace.classpath);
 
 		case "shutdown":
 			Object* result = lifecycle::handle_shutdown();
@@ -193,12 +197,20 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 	Object* changes = params.get("changes") ?? null;
 	if (changes == null) return;
 
+	bool build_file_changed = false;
+
 	for (sz i = 0; i < changes.get_len(); i++) {
 		Object* event = changes.get_at(i);
 		String uri = event.get_string("uri") ?? "";
 		int change_type = event.get_int("type") ?? 0;
 
 		if (uri.len == 0) continue;
+
+		// Check if this is a build file change
+		if (is_build_file(uri)) {
+			build_file_changed = true;
+			continue;
+		}
 
 		switch (change_type) {
 			case FILE_CHANGE_CREATED:
@@ -219,4 +231,24 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 				break;
 		}
 	}
+
+	// Re-resolve classpath if any build file changed
+	if (build_file_changed) {
+		io::eprintfn("[kls] Build file changed, re-resolving classpath...");
+		workspace.classpath.free();
+		workspace.classpath.init();
+		classpath::resolve_classpath(&workspace.classpath, workspace.root_path);
+		workspace.dep_index.free();
+		workspace.dep_index.init();
+		workspace.dep_index.index_classpath(&workspace.classpath);
+	}
+}
+
+/**
+ * Check if a URI refers to a build configuration file.
+ */
+fn bool is_build_file(String uri) {
+	return uri.ends_with("/build.gradle.kts")
+		|| uri.ends_with("/build.gradle")
+		|| uri.ends_with("/pom.xml");
 }
