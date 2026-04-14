@@ -140,3 +140,178 @@ fn void parser_error_expected_name() @test {
 		// The key thing: no crash, and we get diagnostics
 	};
 }
+
+// ── Unused import diagnostic tag tests ────────────────────────────
+
+fn void unused_import_gets_unnecessary_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`import com.example.Foo
+fun main() { val x = 42 }`
+		);
+		assert(result.is_array());
+		assert(result.get_len() == 1, "expected 1 diagnostic, got %d", (int)result.get_len());
+
+		Object* diag = result.get_at(0);
+		assert(diag.get_int("severity")!! == 4); // Hint
+		assert(diag.get_string("source")!! == "kls");
+
+		String message = diag.get_string("message")!!;
+		assert(message.contains("Unused import"));
+		assert(message.contains("com.example.Foo"));
+
+		// Check tags array contains DiagnosticTag.Unnecessary (1)
+		Object* tags = diag.get("tags")!!;
+		assert(tags.is_array());
+		assert(tags.get_len() == 1);
+		assert(tags.get_int_at(0)!! == 1);
+	};
+}
+
+fn void used_import_has_no_diagnostic() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`import com.example.Foo
+fun main() { val x: Foo = Foo() }`
+		);
+		assert(result.is_indexable());
+		if (result.is_array()) {
+			assert(result.get_len() == 0, "expected 0 diagnostics for used import, got %d", (int)result.get_len());
+		}
+	};
+}
+
+fn void wildcard_import_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`import com.example.*
+fun main() { val x = 42 }`
+		);
+		assert(result.is_indexable());
+		if (result.is_array()) {
+			assert(result.get_len() == 0, "expected 0 diagnostics for wildcard import, got %d", (int)result.get_len());
+		}
+	};
+}
+
+fn void aliased_import_used_by_alias() @test {
+	@pool() {
+		// Import is aliased; the alias name is used in the code
+		Object* result = build_test_diagnostics(
+			`import com.example.Bar as Baz
+fun main() { val x: Baz = Baz() }`
+		);
+		assert(result.is_indexable());
+		if (result.is_array()) {
+			assert(result.get_len() == 0, "expected 0 diagnostics for used alias, got %d", (int)result.get_len());
+		}
+	};
+}
+
+fn void aliased_import_unused() @test {
+	@pool() {
+		// Import is aliased but the alias name is never used
+		Object* result = build_test_diagnostics(
+			`import com.example.Bar as Baz
+fun main() { val x = 42 }`
+		);
+		assert(result.is_array());
+		assert(result.get_len() == 1, "expected 1 diagnostic for unused alias, got %d", (int)result.get_len());
+
+		Object* diag = result.get_at(0);
+		assert(diag.get_int("severity")!! == 4); // Hint
+		String message = diag.get_string("message")!!;
+		assert(message.contains("Unused import"));
+	};
+}
+
+fn void multiple_imports_some_unused() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`import com.example.Foo
+import com.example.Bar
+import com.example.Baz
+fun main() { val x: Foo = Foo(); val y: Baz = Baz() }`
+		);
+		assert(result.is_array());
+		// Only Bar is unused
+		assert(result.get_len() == 1, "expected 1 unused import diagnostic, got %d", (int)result.get_len());
+
+		Object* diag = result.get_at(0);
+		String message = diag.get_string("message")!!;
+		assert(message.contains("Bar"));
+	};
+}
+
+fn void import_used_in_type_annotation() @test {
+	@pool() {
+		// The imported name appears only as a type annotation
+		Object* result = build_test_diagnostics(
+			`import com.example.MyType
+fun process(x: MyType) {}`
+		);
+		assert(result.is_indexable());
+		if (result.is_array()) {
+			assert(result.get_len() == 0, "expected 0 diagnostics when import used as type, got %d", (int)result.get_len());
+		}
+	};
+}
+
+fn void import_name_in_other_import_not_counted() @test {
+	@pool() {
+		// "Foo" appears in another import path but not in code body
+		Object* result = build_test_diagnostics(
+			`import com.example.Foo
+import com.other.Foo.Bar
+fun main() { val x: Bar = Bar() }`
+		);
+		assert(result.is_array());
+		// The first import (Foo) is unused -- its name only appears inside
+		// another import path, which should be skipped.
+		// The second import (Bar) is used in code.
+		bool found_unused_foo = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			if (diag.get_int("severity")!! == 4) { // Hint = unused import
+				String msg = diag.get_string("message")!!;
+				if (msg.contains("com.example.Foo")) {
+					found_unused_foo = true;
+				}
+			}
+		}
+		assert(found_unused_foo, "expected unused import diagnostic for com.example.Foo");
+	};
+}
+
+fn void no_unused_import_when_lexer_errors_present() @test {
+	@pool() {
+		// When there are lexer errors, unused import analysis is skipped
+		Object* result = diagnostics::build_diagnostics_array(
+			`import com.example.Foo
+fun main() { & }`, null
+		);
+		assert(result.is_array());
+		// Should only have lexer error for '&', no unused import diagnostic
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			assert(diag.get_int("severity")!! != 4, "should not have Hint diagnostics when lexer errors present");
+		}
+	};
+}
+
+fn void single_segment_import_unused() @test {
+	@pool() {
+		// Single-segment import (no dots)
+		Object* result = build_test_diagnostics(
+			`import Foo
+fun main() { val x = 42 }`
+		);
+		assert(result.is_array());
+		assert(result.get_len() == 1, "expected 1 diagnostic for unused single-segment import, got %d", (int)result.get_len());
+
+		Object* diag = result.get_at(0);
+		assert(diag.get_int("severity")!! == 4);
+		String message = diag.get_string("message")!!;
+		assert(message.contains("Unused import"));
+	};
+}

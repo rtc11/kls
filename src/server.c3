@@ -18,6 +18,7 @@ import kls::lsp::semantic_tokens;
 import kls::lsp::workspace_symbols;
 import kls::lsp::rename;
 import kls::lsp::implementation;
+import kls::lsp::folding_range;
 import kls::workspace;
 import kls::deps::classpath;
 import kls::deps::jar_index;
@@ -208,6 +209,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/documentSymbol":
 			if (params != null) {
 				Object* result = document_symbols::handle_document_symbol(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/foldingRange":
+			if (params != null) {
+				Object* result = folding_range::handle_folding_range(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");

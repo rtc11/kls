@@ -65,6 +65,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Semantic tokens support (full document)
 	caps.set("semanticTokensProvider", semantic_tokens::build_semantic_tokens_options());
 
+	// Folding range support
+	caps.set("foldingRangeProvider", true);
+
 	// Workspace capabilities
 	Object* workspace_caps = object::new_obj(tmem);
 	Object* file_operations = object::new_obj(tmem);
