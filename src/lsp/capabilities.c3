@@ -68,6 +68,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Folding range support
 	caps.set("foldingRangeProvider", true);
 
+	// Document formatting support
+	caps.set("documentFormattingProvider", true);
+
 	// Code action support (quick fixes + organize imports)
 	Object* code_action_opts = object::new_obj(tmem);
 	Object* code_action_kinds = object::new_obj(tmem);
