@@ -204,3 +204,245 @@ fn void get_ast_after_reopen_is_fresh() @test {
 	}
 	assert(found_bar, "expected to find class 'Bar' after reopen");
 }
+
+// ── position_to_byte_offset ───────────────────────────────────────
+
+fn void byte_offset_first_char() @test {
+	long off = document::position_to_byte_offset("fun main()", 0, 0);
+	assert(off == 0, "expected 0, got %d", (int)off);
+}
+
+fn void byte_offset_middle_of_line() @test {
+	long off = document::position_to_byte_offset("fun main()", 0, 4);
+	assert(off == 4, "expected 4, got %d", (int)off);
+}
+
+fn void byte_offset_second_line() @test {
+	long off = document::position_to_byte_offset("abc\ndef", 1, 0);
+	assert(off == 4, "expected 4, got %d", (int)off);
+}
+
+fn void byte_offset_second_line_col() @test {
+	long off = document::position_to_byte_offset("abc\ndef", 1, 2);
+	assert(off == 6, "expected 6, got %d", (int)off);
+}
+
+fn void byte_offset_past_end_line() @test {
+	long off = document::position_to_byte_offset("abc", 5, 0);
+	assert(off == -1, "expected -1 for line past end");
+}
+
+fn void byte_offset_past_end_col() @test {
+	long off = document::position_to_byte_offset("abc", 0, 100);
+	assert(off == -1, "expected -1 for col past end");
+}
+
+fn void byte_offset_end_of_content() @test {
+	// Offset at the very end (past last char) should be valid (for insertions)
+	long off = document::position_to_byte_offset("abc", 0, 3);
+	assert(off == 3, "expected 3, got %d", (int)off);
+}
+
+fn void byte_offset_empty_string() @test {
+	long off = document::position_to_byte_offset("", 0, 0);
+	assert(off == 0, "expected 0 for empty string at 0,0, got %d", (int)off);
+}
+
+// ── Incremental changes (apply_change) ────────────────────────────
+
+fn void incremental_insert_single_char() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// "val x = 1" -> insert 'y' before 'x' at offset 4
+	store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+	store.apply_change("file:///test.kt", 2, 4, 4, "y");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "val yx = 1", "expected 'val yx = 1', got '%s'", doc.content);
+		assert(doc.version == 2);
+	} else {
+		assert(false, "document not found after apply_change");
+	}
+}
+
+fn void incremental_delete_single_char() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// "val x = 1" -> delete 'x' at offset 4..5
+	store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+	store.apply_change("file:///test.kt", 2, 4, 5, "");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "val  = 1", "expected 'val  = 1', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_replace_range() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// "val x = 1" -> replace "x = 1" (offsets 4..9) with "y = 42"
+	store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+	store.apply_change("file:///test.kt", 2, 4, 9, "y = 42");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "val y = 42", "expected 'val y = 42', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_insert_at_beginning() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	store.open("file:///test.kt", "kotlin", 1, "fun main() {}");
+	store.apply_change("file:///test.kt", 2, 0, 0, "package com.example\n");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "package com.example\nfun main() {}",
+			"unexpected content: '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_insert_at_end() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	store.open("file:///test.kt", "kotlin", 1, "fun main()");
+	store.apply_change("file:///test.kt", 2, 10, 10, " {}");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "fun main() {}",
+			"expected 'fun main() {}', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_multiline_change() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// "line1\nline2\nline3" -> replace "line2\n" (offsets 6..12) with "replaced\n"
+	store.open("file:///test.kt", "kotlin", 1, "line1\nline2\nline3");
+	store.apply_change("file:///test.kt", 2, 6, 12, "replaced\n");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "line1\nreplaced\nline3",
+			"expected 'line1\\nreplaced\\nline3', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_replace_entire_content() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	store.open("file:///test.kt", "kotlin", 1, "old content");
+	store.apply_change("file:///test.kt", 2, 0, 11, "new stuff");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "new stuff",
+			"expected 'new stuff', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_multiple_changes_reverse_order() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// "abcdef" -> change1: replace 'c' (2..3) with 'C'
+	//          -> change2: replace 'e' (4..5) with 'E'
+	// Applied in reverse: change2 first, then change1
+	store.open("file:///test.kt", "kotlin", 1, "abcdef");
+
+	// Apply change2 first (higher offset)
+	store.apply_change("file:///test.kt", 2, 4, 5, "E");
+	// Apply change1 (lower offset, still valid because earlier offsets unaffected)
+	store.apply_change("file:///test.kt", 2, 2, 3, "C");
+
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "abCdEf",
+			"expected 'abCdEf', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_invalidates_cached_ast() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	store.open("file:///test.kt", "kotlin", 1, "fun foo() {}");
+
+	// Force AST cache
+	ParseResult* before = store.get_ast("file:///test.kt")!!;
+	assert(before.node_count >= 2);
+
+	// Apply incremental change: replace "foo" (4..7) with "bar"
+	store.apply_change("file:///test.kt", 2, 4, 7, "bar");
+
+	// AST should be re-parsed with new content
+	ParseResult* after = store.get_ast("file:///test.kt")!!;
+	bool found_bar = false;
+	for (uint i = 0; i < after.node_count; i++) {
+		if (after.nodes[i].kind == FUN_DECL && after.nodes[i].name == "bar") {
+			found_bar = true;
+		}
+	}
+	assert(found_bar, "expected to find function 'bar' after incremental change");
+}
+
+fn void incremental_empty_to_content() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	store.open("file:///test.kt", "kotlin", 1, "");
+	store.apply_change("file:///test.kt", 2, 0, 0, "fun main() {}");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "fun main() {}",
+			"expected 'fun main() {}', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_content_to_empty() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	store.open("file:///test.kt", "kotlin", 1, "fun main() {}");
+	store.apply_change("file:///test.kt", 2, 0, 14, "");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "",
+			"expected empty content, got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+fn void incremental_nonexistent_doc_is_safe() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// Should not crash when applying change to non-existent document
+	store.apply_change("file:///nope.kt", 1, 0, 0, "hello");
+}
+
+fn void incremental_clamped_offsets() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+	// End offset past content length should be clamped
+	store.open("file:///test.kt", "kotlin", 1, "abc");
+	store.apply_change("file:///test.kt", 2, 1, 100, "XY");
+	if (try doc = store.get("file:///test.kt")) {
+		assert(doc.content == "aXY",
+			"expected 'aXY', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}

@@ -27,8 +27,13 @@ fn void handle_did_open(DocumentStore* store, WorkspaceIndex* workspace, Object*
 
 /**
  * Handle textDocument/didChange notification.
- * Updates the document content (full sync mode).
- * Also updates the workspace index with the latest symbols.
+ * Supports both incremental (range-based) and full-content changes.
+ * Each contentChanges entry is either:
+ *   - Incremental: { range: { start, end }, text: "..." }
+ *   - Full:        { text: "..." }  (no range field)
+ *
+ * When multiple incremental changes arrive, they must be applied in
+ * reverse order so that earlier byte offsets remain valid.
  */
 fn void handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
@@ -36,16 +41,49 @@ fn void handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Objec
 	String uri = td.get_string("uri")!!;
 	int version = td.get_int("version")!!;
 
-	// Full sync: take the first content change
 	Object* changes = params.get("contentChanges")!!;
-	// #12: Guard against empty contentChanges array
-	if (changes.get_len() == 0) return;
-	Object* change = changes.get_at(0);
-	String text = change.get_string("text")!!;
+	// Guard against empty contentChanges array
+	sz change_count = changes.get_len();
+	if (change_count == 0) return;
 
-	io::eprintfn("[kls] Document changed: %s (v=%d, len=%d)", uri, version, text.len);
-	store.update(uri, version, text);
-	workspace.index_file(uri, text);
+	// Apply changes in reverse order for incremental edits.
+	// If any change lacks a range, it's a full-content replacement.
+	for (sz i = change_count - 1; i >= 0; i--) {
+		Object* change = changes.get_at(i);
+		String text = change.get_string("text")!!;
+
+		if (try range = change.get("range")) {
+			// Incremental change: apply range-based edit
+			Object* start = range.get("start")!!;
+			Object* end = range.get("end")!!;
+			uint start_line = (uint)start.get_int("line")!!;
+			uint start_char = (uint)start.get_int("character")!!;
+			uint end_line = (uint)end.get_int("line")!!;
+			uint end_char = (uint)end.get_int("character")!!;
+
+			// Resolve line/character to byte offsets against current content
+			Document* doc = store.get(uri) ?? null;
+			if (doc == null) break;
+
+			long s_off = document::position_to_byte_offset(doc.content, start_line, start_char);
+			long e_off = document::position_to_byte_offset(doc.content, end_line, end_char);
+
+			// If either position is invalid, clamp to end of content
+			uint s = s_off >= 0 ? (uint)s_off : (uint)doc.content.len;
+			uint e = e_off >= 0 ? (uint)e_off : (uint)doc.content.len;
+
+			store.apply_change(uri, version, s, e, text);
+		} else {
+			// Full-content replacement (no range)
+			store.update(uri, version, text);
+		}
+	}
+
+	io::eprintfn("[kls] Document changed: %s (v=%d)", uri, version);
+	Document* doc = store.get(uri) ?? null;
+	if (doc != null) {
+		workspace.index_file(uri, doc.content);
+	}
 	diagnostics::publish_diagnostics(store, uri, workspace);
 }
 

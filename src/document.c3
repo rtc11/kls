@@ -74,6 +74,86 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 	}
 }
 
+/**
+ * Apply a single incremental change to a document.
+ * The change replaces the byte range [start_offset, end_offset) with new_text.
+ * Invalidates the cached AST.
+ */
+fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
+		uint start_offset, uint end_offset, String new_text) {
+	if (try doc = self.docs.get_ref(uri)) {
+		// Invalidate cached AST
+		if (doc.cached_ast != null) {
+			doc.cached_ast.free_errors();
+			mem::free(doc.cached_ast);
+			doc.cached_ast = null;
+		}
+
+		String old = doc.content;
+
+		// Clamp offsets to content bounds
+		uint s = start_offset > (uint)old.len ? (uint)old.len : start_offset;
+		uint e = end_offset > (uint)old.len ? (uint)old.len : end_offset;
+		if (e < s) e = s;
+
+		usz prefix_len = (usz)s;
+		usz suffix_len = old.len - (usz)e;
+		usz new_len = prefix_len + new_text.len + suffix_len;
+
+		char* buf = mem::alloc_array(char, new_len);
+		// Copy prefix
+		if (prefix_len > 0) {
+			mem::copy(buf, old.ptr, prefix_len);
+		}
+		// Copy replacement text
+		if (new_text.len > 0) {
+			mem::copy(&buf[prefix_len], new_text.ptr, new_text.len);
+		}
+		// Copy suffix
+		if (suffix_len > 0) {
+			mem::copy(&buf[prefix_len + new_text.len], &old.ptr[(usz)e], suffix_len);
+		}
+
+		mem::free(old.ptr);
+		doc.version = version;
+		doc.content = (String)buf[:new_len];
+	}
+}
+
+// ── Position / offset utilities ───────────────────────────────────
+
+/**
+ * Convert an LSP position (0-based line, 0-based character) to a byte
+ * offset in the source string. Returns -1 if the position is past the end.
+ *
+ * This is the canonical implementation used by both incremental sync and
+ * all LSP feature handlers (hover, completion, signature help, etc.).
+ */
+fn long position_to_byte_offset(String content, uint line, uint character) {
+	uint current_line = 0;
+	usz i = 0;
+
+	// Skip to the target line
+	while (i < content.len && current_line < line) {
+		if (content[i] == '\n') {
+			current_line++;
+		}
+		i++;
+	}
+
+	if (current_line < line) {
+		return -1; // Line is past end of content
+	}
+
+	// Add character offset
+	usz offset = i + (usz)character;
+	if (offset > content.len) {
+		return -1;
+	}
+
+	return (long)offset;
+}
+
 fn void DocumentStore.close(DocumentStore* self, String uri) {
 	// Free document strings and cached AST before HashMap.remove() frees the entry
 	if (try doc = self.docs.get_ref(uri)) {
