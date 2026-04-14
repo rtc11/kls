@@ -3,6 +3,7 @@ module kls::lsp::lifecycle;
 import std::io;
 import std::collections::object;
 import kls::lsp::capabilities;
+import kls::lsp::progress;
 import kls::workspace;
 
 /**
@@ -33,6 +34,16 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 						if (enc.is_string() && enc.s == "utf-8") {
 							client_supports_utf8 = true;
 						}
+					}
+				}
+			}
+
+			// Check if client supports window/workDoneProgress
+			if (try window = caps.get("window")) {
+				if (try wdp = window.get("workDoneProgress")) {
+					if (wdp.is_bool() && wdp.b) {
+						progress::set_client_support(true);
+						io::eprintfn("[kls] Client supports workDoneProgress");
 					}
 				}
 			}

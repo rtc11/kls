@@ -20,6 +20,7 @@ import kls::lsp::rename;
 import kls::lsp::implementation;
 import kls::lsp::folding_range;
 import kls::lsp::code_actions;
+import kls::lsp::progress;
 import kls::workspace;
 import kls::deps::classpath;
 import kls::deps::jar_index;
@@ -125,14 +126,28 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "initialized":
 			io::eprintfn("[kls] Client initialized");
+			progress::create("kls-indexing");
+			progress::begin("kls-indexing", "Kotlin Language Server", 0);
+
+			progress::report("kls-indexing", "Scanning workspace...", 20);
 			self.workspace.scan_workspace();
+
+			progress::report("kls-indexing", "Resolving classpath...", 40);
 			classpath::resolve_classpath(&self.workspace.classpath, self.workspace.root_path);
+
+			progress::report("kls-indexing", "Indexing dependencies...", 60);
 			self.workspace.dep_index.index_classpath(&self.workspace.classpath);
+
+			progress::report("kls-indexing", "Indexing JDK...", 80);
 			jdk_index::index_jdk(&self.workspace.dep_index);
+
 			// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
 			if (self.workspace.classpath.jar_count == 0) {
+				progress::report("kls-indexing", "Indexing Kotlin stdlib...", 90);
 				kotlin_fallback::index_system_kotlin(&self.workspace.dep_index);
 			}
+
+			progress::end("kls-indexing", "Ready");
 
 		case "shutdown":
 			Object* result = lifecycle::handle_shutdown();
@@ -332,17 +347,29 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 	// Re-resolve classpath if any build file changed
 	if (build_file_changed) {
 		io::eprintfn("[kls] Build file changed, re-resolving classpath...");
+		progress::create("kls-reindex");
+		progress::begin("kls-reindex", "Kotlin Language Server", 0);
+
+		progress::report("kls-reindex", "Re-resolving classpath...", 20);
 		workspace.classpath.free();
 		workspace.classpath.init();
 		classpath::resolve_classpath(&workspace.classpath, workspace.root_path);
+
+		progress::report("kls-reindex", "Re-indexing dependencies...", 50);
 		workspace.dep_index.free();
 		workspace.dep_index.init();
 		workspace.dep_index.index_classpath(&workspace.classpath);
+
+		progress::report("kls-reindex", "Indexing JDK...", 75);
 		jdk_index::index_jdk(&workspace.dep_index);
+
 		// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
 		if (workspace.classpath.jar_count == 0) {
+			progress::report("kls-reindex", "Indexing Kotlin stdlib...", 90);
 			kotlin_fallback::index_system_kotlin(&workspace.dep_index);
 		}
+
+		progress::end("kls-reindex", "Ready");
 	}
 }
 

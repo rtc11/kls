@@ -19,6 +19,9 @@ faultdef
 	CONTENT_LENGTH_MISSING,
 	READ_ERROR;
 
+// Monotonic counter for server-originated request IDs
+int server_request_id = 0;
+
 /**
  * Read a complete LSP message from stdin.
  * Parses Content-Length header, then reads the JSON body.
@@ -119,6 +122,26 @@ fn void send_notification(String method, Object* params) {
 	}
 
 	write_message(msg);
+}
+
+/**
+ * Send a JSON-RPC request from server to client.
+ * Returns the integer ID assigned to this request.
+ */
+fn int send_request(String method, Object* params) {
+	server_request_id++;
+	int id = server_request_id;
+
+	Object* msg = object::new_obj(tmem);
+	msg.set("jsonrpc", "2.0");
+	msg.set("id", id);
+	msg.set("method", method);
+	if (params != null) {
+		msg.set("params", params);
+	}
+
+	write_message(msg);
+	return id;
 }
 
 /**

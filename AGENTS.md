@@ -40,6 +40,7 @@ kls/
       document_symbols.c3     # kls::lsp::document_symbols - textDocument/documentSymbol (hierarchical)
       semantic_tokens.c3      # kls::lsp::semantic_tokens - textDocument/semanticTokens/full
       code_actions.c3         # kls::lsp::code_actions - textDocument/codeAction (quickfixes, organize imports)
+      progress.c3             # kls::lsp::progress - $/progress (work done progress reporting)
     kotlin/
       token.c3                # kls::kotlin::token - Token enum, Token/TokenSpan structs
       lexer.c3                # kls::kotlin::lexer - Kotlin source tokenizer (next + next_all modes)
