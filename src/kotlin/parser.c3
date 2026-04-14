@@ -465,7 +465,7 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 
 	// Super types: : SuperClass(), Interface
 	if (self.at(COLON)) {
-		self.skip_super_types();
+		self.parse_super_types();
 	}
 
 	// Where clause: where T : Comparable<T>
@@ -584,6 +584,10 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
  */
 fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	usz idx = self.add_node(PROPERTY_DECL);
+	// #13: Track val vs var distinction
+	if (self.at(KW_VAR)) {
+		mods |= ast::MOD_VAR;
+	}
 	self.result.nodes[idx].mod_flags = mods;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'val' or 'var'
@@ -735,7 +739,9 @@ fn void Parser.parse_init_block(Parser* self) {
 	self.advance(); // consume 'init'
 
 	if (self.at(LCURL)) {
+		usz children_start = self.result.node_count;
 		self.parse_block();
+		self.adopt_children(idx, children_start);
 	}
 
 	self.node_end(idx);
@@ -767,7 +773,7 @@ fn void Parser.parse_companion_object(Parser* self, uint mods) {
 
 	// Super types
 	if (self.at(COLON)) {
-		self.skip_super_types();
+		self.parse_super_types();
 	}
 
 	// Body
@@ -797,6 +803,9 @@ fn void Parser.parse_primary_constructor(Parser* self) {
 		bool is_var = !is_val && self.eat(KW_VAR);
 		if (is_val) {
 			param_mods |= ast::MOD_FINAL; // val parameters are final
+		}
+		if (is_var) {
+			param_mods |= ast::MOD_VAR; // var parameters are mutable
 		}
 
 		self.parse_param_with_mods(param_mods);
@@ -871,8 +880,10 @@ fn void Parser.parse_type_params(Parser* self) {
 
 		// Variance: in/out
 		uint mods = ast::MOD_NONE;
-		if (self.eat(KW_IN) || self.eat(KW_OUT)) {
-			// Record variance in modifiers if needed later
+		if (self.eat(KW_IN)) {
+			mods |= ast::MOD_IN;
+		} else if (self.eat(KW_OUT)) {
+			mods |= ast::MOD_OUT;
 		}
 		if (self.eat(KW_REIFIED)) {
 			mods |= ast::MOD_REIFIED;
@@ -907,19 +918,34 @@ fn void Parser.parse_type_params(Parser* self) {
 /**
  * Skip super type list: : SuperClass(), Interface, Mixin by delegate
  */
-fn void Parser.skip_super_types(Parser* self) {
+/**
+ * Parse super type list after ':'. Creates TYPE_REF child nodes for each
+ * supertype so the AST captures inheritance information.
+ *
+ * Handles: class Foo : Bar, Baz<T>, Qux()
+ *          class Foo : Base() by delegate
+ *          class Foo : InterfaceA, InterfaceB
+ */
+fn void Parser.parse_super_types(Parser* self) {
 	self.advance(); // consume ':'
 
 	// Parse super types until we hit { or something that ends them
 	while (!self.at_eof()) {
 		// Type name
 		if (self.at_identifier()) {
+			// Create a TYPE_REF node for this supertype
+			usz ref_idx = self.add_node(TYPE_REF);
+			self.node_start(ref_idx, self.current);
+
+			Token name_tok = self.current;
+			self.node_set_name(ref_idx, name_tok);
 			self.advance();
-			// Generic arguments
+
+			// Generic arguments: <T, R>
 			if (self.at(LANGLE)) {
 				self.skip_angle_brackets();
 			}
-			// Constructor call
+			// Constructor call: ()
 			if (self.at(LPAREN)) {
 				self.skip_balanced_parens();
 			}
@@ -927,6 +953,8 @@ fn void Parser.skip_super_types(Parser* self) {
 			if (self.eat(KW_BY)) {
 				self.skip_delegation_expression();
 			}
+
+			self.node_end(ref_idx);
 		}
 
 		if (self.eat(COMMA)) continue;
@@ -2181,7 +2209,7 @@ fn usz Parser.parse_object_expr(Parser* self) {
 
 	// Super types: : Type
 	if (self.at(COLON)) {
-		self.skip_super_types();
+		self.parse_super_types();
 	}
 
 	// Body

@@ -2839,3 +2839,143 @@ fun get(path: String = "", handler: suspend Exchange.() -> Any?) {}`;
 		assert(fun.name == "get", "expected 'get', got '%s'", fun.name);
 	};
 }
+
+// ── #7: init block BLOCK child adoption ────────────────────────────
+
+fn void parse_init_block_has_block_child() @test {
+	@pool() {
+		String content =
+`class Foo {
+    init {
+        println("init")
+        val x = 42
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL);
+
+		// Find the INIT_BLOCK
+		AstNode* init_node = find_kind(r, cls, INIT_BLOCK);
+		assert(init_node.child_count >= 1, "expected INIT_BLOCK to have at least 1 child (BLOCK), got %d", (int)init_node.child_count);
+
+		// The BLOCK should be a child of INIT_BLOCK
+		AstNode* block_node = find_kind(r, init_node, BLOCK);
+		assert(block_node.kind == BLOCK, "expected BLOCK child of INIT_BLOCK");
+
+		// The BLOCK should contain the local val declaration
+		usz prop_count = count_kind(r, block_node, PROPERTY_DECL);
+		assert(prop_count == 1, "expected 1 PROPERTY_DECL inside init block, got %d", (int)prop_count);
+	};
+}
+
+// ── #14: variance modifiers on type parameters ─────────────────────
+
+fn void parse_type_param_in_variance() @test {
+	@pool() {
+		ParseResult* r = do_parse("interface Consumer<in T> {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* iface = child(r, f, 0);
+		assert(iface.kind == INTERFACE_DECL);
+		assert(iface.name == "Consumer");
+
+		// Find the TYPE_PARAM child
+		AstNode* tp = find_kind(r, iface, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		assert(tp.mod_flags & ast::MOD_IN != 0, "expected MOD_IN flag on type param");
+		assert(tp.mod_flags & ast::MOD_OUT == 0, "expected no MOD_OUT flag");
+	};
+}
+
+fn void parse_type_param_out_variance() @test {
+	@pool() {
+		ParseResult* r = do_parse("interface Producer<out T> {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* iface = child(r, f, 0);
+		assert(iface.kind == INTERFACE_DECL);
+		assert(iface.name == "Producer");
+
+		AstNode* tp = find_kind(r, iface, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		assert(tp.mod_flags & ast::MOD_OUT != 0, "expected MOD_OUT flag on type param");
+		assert(tp.mod_flags & ast::MOD_IN == 0, "expected no MOD_IN flag");
+	};
+}
+
+fn void parse_type_params_mixed_variance() @test {
+	@pool() {
+		ParseResult* r = do_parse("interface Transform<in T, out R> {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* iface = child(r, f, 0);
+		assert(iface.kind == INTERFACE_DECL);
+
+		// Find both type params
+		usz tp_count = count_kind(r, iface, TYPE_PARAM);
+		assert(tp_count == 2, "expected 2 TYPE_PARAMs, got %d", (int)tp_count);
+
+		// First param: in T
+		AstNode* tp1 = find_kind(r, iface, TYPE_PARAM);
+		assert(tp1.name == "T", "expected first type param 'T', got '%s'", tp1.name);
+		assert(tp1.mod_flags & ast::MOD_IN != 0, "expected MOD_IN on first type param");
+
+		// Second param: out R (find by iterating)
+		bool found_r = false;
+		for (usz i = 0; i < iface.child_count; i++) {
+			AstNode* ch = ast::get_child(r, iface, i)!!;
+			if (ch.kind == TYPE_PARAM && ch.name == "R") {
+				found_r = true;
+				assert(ch.mod_flags & ast::MOD_OUT != 0, "expected MOD_OUT on R");
+				assert(ch.mod_flags & ast::MOD_IN == 0, "expected no MOD_IN on R");
+			}
+		}
+		assert(found_r, "expected to find type param 'R'");
+	};
+}
+
+fn void parse_type_param_no_variance() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Box<T> {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		AstNode* tp = find_kind(r, cls, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		// No variance modifiers
+		assert(tp.mod_flags & ast::MOD_IN == 0, "expected no MOD_IN");
+		assert(tp.mod_flags & ast::MOD_OUT == 0, "expected no MOD_OUT");
+	};
+}
+
+// ── #13: MOD_VAR flag on property declarations ─────────────────────
+
+fn void parse_var_has_mod_var_flag() @test {
+	@pool() {
+		ParseResult* r = do_parse("var count = 0"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL);
+		assert(prop.name == "count");
+		assert(prop.mod_flags & ast::MOD_VAR != 0, "expected MOD_VAR flag for 'var'");
+	};
+}
+
+fn void parse_val_has_no_mod_var_flag() @test {
+	@pool() {
+		ParseResult* r = do_parse("val x = 42"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL);
+		assert(prop.name == "x");
+		assert(prop.mod_flags & ast::MOD_VAR == 0, "expected no MOD_VAR flag for 'val'");
+	};
+}
