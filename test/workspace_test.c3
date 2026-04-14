@@ -296,3 +296,115 @@ fn void set_root_stores_path() @test {
 		assert(idx.root_path == "/Users/test/project", "expected root_path match");
 	};
 }
+
+// ── #8: scan_package with soft keyword segments ────────────────────
+
+fn void scan_package_soft_keyword_data() @test {
+	@pool() {
+		String pkg = workspace::scan_package("package data.model\n\nclass Foo {}");
+		assert(pkg == "data.model", "expected 'data.model', got '%s'", pkg);
+	};
+}
+
+fn void scan_package_soft_keyword_value() @test {
+	@pool() {
+		String pkg = workspace::scan_package("package value.types\n");
+		assert(pkg == "value.types", "expected 'value.types', got '%s'", pkg);
+	};
+}
+
+fn void scan_package_soft_keyword_annotation() @test {
+	@pool() {
+		String pkg = workspace::scan_package("package annotation.processor\n");
+		assert(pkg == "annotation.processor", "expected 'annotation.processor', got '%s'", pkg);
+	};
+}
+
+fn void scan_package_soft_keyword_inner() @test {
+	@pool() {
+		String pkg = workspace::scan_package("package inner.core\n");
+		assert(pkg == "inner.core", "expected 'inner.core', got '%s'", pkg);
+	};
+}
+
+// ── #11: remove_file compacts symbols correctly ────────────────────
+
+fn void remove_file_compacts_symbols() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		// Index three files
+		idx.index_file("file:///a.kt", "fun alpha() {}");
+		idx.index_file("file:///b.kt", "fun beta() {}\nclass Bravo {}");
+		idx.index_file("file:///c.kt", "fun charlie() {}");
+
+		// Check initial state
+		assert(idx.symbol_count() == 4, "expected 4 symbols initially, got %d", (int)idx.symbol_count());
+
+		// Remove the middle file
+		idx.remove_file("file:///b.kt");
+
+		// Should have 2 symbols now (alpha + charlie), not 4 with gaps
+		assert(idx.symbol_count() == 2, "expected 2 symbols after compaction, got %d", (int)idx.symbol_count());
+
+		// alpha should still be findable
+		if (try indices = idx.lookup_by_name("alpha")) {
+			assert(indices.len() == 1, "expected 1 index for 'alpha'");
+		} else {
+			assert(false, "expected to find 'alpha' after compaction");
+		}
+
+		// charlie should still be findable
+		if (try indices = idx.lookup_by_name("charlie")) {
+			assert(indices.len() == 1, "expected 1 index for 'charlie'");
+		} else {
+			assert(false, "expected to find 'charlie' after compaction");
+		}
+
+		// beta and Bravo should be gone
+		if (try indices = idx.lookup_by_name("beta")) {
+			assert(false, "expected 'beta' to be removed");
+		}
+		if (try indices = idx.lookup_by_name("Bravo")) {
+			assert(false, "expected 'Bravo' to be removed");
+		}
+	};
+}
+
+fn void remove_file_compaction_preserves_reindex() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		idx.index_file("file:///a.kt", "fun alpha() {}");
+		idx.index_file("file:///b.kt", "fun beta() {}");
+		idx.index_file("file:///c.kt", "fun charlie() {}");
+
+		// Remove middle file, then re-index it with different content
+		idx.remove_file("file:///b.kt");
+		idx.index_file("file:///b.kt", "fun bravo() {}\nfun baker() {}");
+
+		// Should have 4 symbols: alpha, bravo, baker, charlie
+		assert(idx.symbol_count() == 4, "expected 4 symbols after re-index, got %d", (int)idx.symbol_count());
+
+		// Old name should be gone
+		if (try indices = idx.lookup_by_name("beta")) {
+			assert(false, "expected 'beta' to be gone after re-index");
+		}
+
+		// New names should be present
+		if (try indices = idx.lookup_by_name("bravo")) {
+			assert(indices.len() == 1, "expected 1 index for 'bravo'");
+		} else {
+			assert(false, "expected to find 'bravo'");
+		}
+		if (try indices = idx.lookup_by_name("baker")) {
+			assert(indices.len() == 1, "expected 1 index for 'baker'");
+		} else {
+			assert(false, "expected to find 'baker'");
+		}
+	};
+}

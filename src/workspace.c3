@@ -21,6 +21,8 @@ struct WorkspaceSymbol {
 	uint line;             // 0-based line
 	uint col;              // 0-based column
 	uint name_len;         // length of name for range building
+	String[symbols::MAX_SUPERTYPES] supertypes;  // heap-copied supertype names
+	usz supertype_count;
 }
 
 // ── Workspace file entry ───────────────────────────────────────────
@@ -40,6 +42,7 @@ struct WorkspaceIndex {
 	List{WorkspaceSymbol} symbols;            // all symbols across workspace
 	HashMap{String, WorkspaceFile} files;     // uri -> file metadata
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
+	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
 }
@@ -50,6 +53,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.symbols.init(mem);
 	self.files.init(mem);
 	self.name_index.init(mem);
+	self.super_index.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
 }
@@ -61,6 +65,9 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
 		if (sym.uri.len > 0) mem::free(sym.uri.ptr);
 		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+		for (usz j = 0; j < sym.supertype_count; j++) {
+			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
+		}
 	}
 	self.symbols.free();
 
@@ -80,6 +87,14 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		}
 	};
 	self.name_index.free();
+
+	// Free super_index lists
+	@pool() {
+		foreach (&list : self.super_index.tvalues()) {
+			list.free();
+		}
+	};
+	self.super_index.free();
 
 	self.classpath.free();
 	self.dep_index.free();
@@ -117,7 +132,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 	}
 
 	// Scan declarations
-	Symbol[512] buf;
+	Symbol[256] buf;
 	usz count = symbols::scan_declarations(content, &buf);
 
 	usz start = self.symbols.len();
@@ -132,7 +147,14 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			.line = buf[i].line,
 			.col = buf[i].col,
 			.name_len = buf[i].len,
+			.supertype_count = buf[i].supertype_count,
 		};
+
+		// Copy supertypes
+		for (usz j = 0; j < buf[i].supertype_count; j++) {
+			ws.supertypes[j] = buf[i].supertypes[j].copy(mem);
+		}
+
 		self.symbols.push(ws);
 
 		// Update name index
@@ -144,6 +166,20 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			new_list.init(mem);
 			new_list.push(sym_idx);
 			self.name_index.set(buf[i].name, new_list);
+		}
+
+		// Update super_index: map each supertype name -> this symbol
+		for (usz j = 0; j < buf[i].supertype_count; j++) {
+			String st_name = buf[i].supertypes[j];
+			if (st_name.len == 0) continue;
+			if (try list_ref = self.super_index.get_ref(st_name)) {
+				list_ref.push(sym_idx);
+			} else {
+				List{usz} new_list;
+				new_list.init(mem);
+				new_list.push(sym_idx);
+				self.super_index.set(st_name, new_list);
+			}
 		}
 	}
 
@@ -159,7 +195,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 
 /**
  * Remove all symbols for a URI from the index.
- * Note: This invalidates indices in name_index, so we rebuild affected entries.
+ * Frees heap strings, compacts the symbols list, and rebuilds indices.
  */
 fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 	WorkspaceFile* wf = self.files.get_ref(uri) ?? null;
@@ -174,6 +210,10 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
 		if (sym.uri.len > 0) mem::free(sym.uri.ptr);
 		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+		for (usz j = 0; j < sym.supertype_count; j++) {
+			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
+		}
+		sym.supertype_count = 0;
 	}
 
 	// Free file entry strings
@@ -181,25 +221,54 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 	if (wf.package_name.len > 0) mem::free(wf.package_name.ptr);
 	self.files.remove(uri);
 
-	// Mark symbols as removed by setting name to empty
-	// (actual compaction would be expensive; we'll skip empty entries in lookups)
-	for (usz i = start; i < start + count && i < self.symbols.len(); i++) {
-		self.symbols[i].name = "";
-		self.symbols[i].uri = "";
+	// #11: Compact the symbols list by shifting remaining symbols down
+	usz remove_end = start + count;
+	if (remove_end > self.symbols.len()) remove_end = self.symbols.len();
+	usz shift = remove_end - start;
+	if (shift > 0 && remove_end < self.symbols.len()) {
+		// Shift remaining symbols down
+		for (usz i = remove_end; i < self.symbols.len(); i++) {
+			self.symbols[i - shift] = self.symbols[i];
+		}
+	}
+	// Shrink the list by removing the last 'shift' entries
+	for (usz i = 0; i < shift; i++) {
+		self.symbols.pop()!!;
 	}
 
-	// Rebuild name_index (brute force but simple; only needed on file removal)
+	// Update symbol_start in all WorkspaceFile entries that came after the removed range
+	@pool() {
+		foreach (&entry : self.files.tvalues()) {
+			if (entry.symbol_start > start) {
+				if (entry.symbol_start >= shift) {
+					entry.symbol_start -= shift;
+				} else {
+					entry.symbol_start = 0;
+				}
+			}
+		}
+	};
+
+	// Rebuild name_index and super_index from the compacted symbols list
 	self.rebuild_name_index();
 }
 
 fn void WorkspaceIndex.rebuild_name_index(WorkspaceIndex* self) {
-	// Free old lists and clear the map
+	// Free old name_index lists and clear the map
 	@pool() {
 		foreach (&list : self.name_index.tvalues()) {
 			list.free();
 		}
 	};
 	self.name_index.clear();
+
+	// Free old super_index lists and clear the map
+	@pool() {
+		foreach (&list : self.super_index.tvalues()) {
+			list.free();
+		}
+	};
+	self.super_index.clear();
 
 	for (usz i = 0; i < self.symbols.len(); i++) {
 		if (self.symbols[i].name.len == 0) continue; // skip removed
@@ -212,6 +281,20 @@ fn void WorkspaceIndex.rebuild_name_index(WorkspaceIndex* self) {
 			new_list.push(i);
 			self.name_index.set(name, new_list);
 		}
+
+		// Rebuild super_index
+		for (usz j = 0; j < self.symbols[i].supertype_count; j++) {
+			String st_name = self.symbols[i].supertypes[j];
+			if (st_name.len == 0) continue;
+			if (try list_ref = self.super_index.get_ref(st_name)) {
+				list_ref.push(i);
+			} else {
+				List{usz} new_list;
+				new_list.init(mem);
+				new_list.push(i);
+				self.super_index.set(st_name, new_list);
+			}
+		}
 	}
 }
 
@@ -223,6 +306,15 @@ fn void WorkspaceIndex.rebuild_name_index(WorkspaceIndex* self) {
  */
 fn List{usz}*? WorkspaceIndex.lookup_by_name(WorkspaceIndex* self, String name) {
 	return self.name_index.get_ref(name);
+}
+
+/**
+ * Look up symbols that extend/implement a given supertype name.
+ * Returns a pointer to the index list of implementing symbol indices,
+ * or fault if no implementations exist.
+ */
+fn List{usz}*? WorkspaceIndex.lookup_by_supertype(WorkspaceIndex* self, String supertype_name) {
+	return self.super_index.get_ref(supertype_name);
 }
 
 /**
@@ -373,7 +465,8 @@ fn String scan_package(String content) {
 
 	while (true) {
 		Token name_tok = lex.next();
-		if (name_tok.kind != IDENTIFIER) break;
+		// #8: Accept soft keywords as package name segments (e.g., "data.model")
+		if (!name_tok.kind.is_identifier_or_soft_keyword()) break;
 
 		if (first) {
 			start = (usz)name_tok.offset;
