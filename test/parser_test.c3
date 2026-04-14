@@ -1232,7 +1232,6 @@ fn AstNode* fun_block(ParseResult* r, AstNode* fun_node) {
 		if (ch.kind == BLOCK) return ch;
 	}
 	unreachable("expected BLOCK child in FUN_DECL");
-	return null;
 }
 
 // Find the first child of a given kind
@@ -1242,7 +1241,6 @@ fn AstNode* find_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
 		if (ch.kind == kind) return ch;
 	}
 	unreachable("expected child of kind %d", (int)kind);
-	return null;
 }
 
 // Count children of a given kind
@@ -1867,7 +1865,6 @@ fn AstNode* first_expr(ParseResult* r, AstNode* block, NodeKind kind) {
 		if (ch.kind == kind) return ch;
 	}
 	unreachable("expected expression child of kind %d", (int)kind);
-	return null;
 }
 
 // ── Simple name expression ─────────────────────────────────────────
