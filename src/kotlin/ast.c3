@@ -96,6 +96,9 @@ const uint MOD_COMPANION   = 1 << 25;
 const uint MOD_NOINLINE    = 1 << 26;
 const uint MOD_CROSSINLINE = 1 << 27;
 const uint MOD_REIFIED     = 1 << 28;
+const uint MOD_VAR         = 1 << 29;  // property declared with 'var' (mutable)
+const uint MOD_IN          = 1 << 30;  // type parameter variance: in
+const uint MOD_OUT         = 1u << 31; // type parameter variance: out
 
 // ── AST node ───────────────────────────────────────────────────────
 

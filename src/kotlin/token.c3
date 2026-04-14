@@ -167,3 +167,53 @@ struct TokenSpan {
 	uint start;
 	uint end;
 }
+
+/**
+ * Returns true if the token kind is IDENTIFIER or a soft keyword
+ * (which can be used as identifiers in non-modifier contexts).
+ */
+fn bool TokenKind.is_identifier_or_soft_keyword(TokenKind kind) {
+	switch (kind) {
+		case IDENTIFIER:
+		case KW_ABSTRACT:
+		case KW_ANNOTATION:
+		case KW_DATA:
+		case KW_ENUM:
+		case KW_EXTERNAL:
+		case KW_FINAL:
+		case KW_INFIX:
+		case KW_INLINE:
+		case KW_INNER:
+		case KW_INTERNAL:
+		case KW_LATEINIT:
+		case KW_NOINLINE:
+		case KW_OPEN:
+		case KW_OPERATOR:
+		case KW_OVERRIDE:
+		case KW_PRIVATE:
+		case KW_PROTECTED:
+		case KW_PUBLIC:
+		case KW_REIFIED:
+		case KW_SEALED:
+		case KW_SUSPEND:
+		case KW_TAILREC:
+		case KW_VARARG:
+		case KW_CROSSINLINE:
+		case KW_CONST:
+		case KW_EXPECT:
+		case KW_ACTUAL:
+		case KW_VALUE:
+		case KW_GET:
+		case KW_SET:
+		case KW_FIELD:
+		case KW_PROPERTY:
+		case KW_RECEIVER:
+		case KW_PARAM:
+		case KW_SETPARAM:
+		case KW_DELEGATE:
+		case KW_FILE:
+			return true;
+		default:
+			return false;
+	}
+}
