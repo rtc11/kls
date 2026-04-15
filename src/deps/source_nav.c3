@@ -71,6 +71,42 @@ fn String derive_source_jar_path(String jar_path) {
 	return source_path;
 }
 
+/**
+ * Derive the JDK src.zip path from a .jmod file path.
+ * Given "/path/to/jdk/jmods/java.base.jmod", returns
+ * "/path/to/jdk/lib/src.zip" if it exists on disk.
+ * Returns empty string if the path doesn't end with .jmod
+ * or if src.zip doesn't exist.
+ */
+fn String derive_jdk_source_path(String jmod_path) {
+	if (!jmod_path.ends_with(".jmod")) return "";
+
+	// Find the last "/jmods/" segment
+	// jmod_path looks like: /path/to/jdk/jmods/java.base.jmod
+	// We want:              /path/to/jdk/lib/src.zip
+	usz jmods_pos = 0;
+	bool found = false;
+	if (jmod_path.len >= 7) {
+		for (usz i = jmod_path.len - 1; i >= 6; i--) {
+			if (jmod_path[i - 6 .. i] == "/jmods/") {
+				jmods_pos = i - 6; // position of the '/' before "jmods"
+				found = true;
+				break;
+			}
+			if (i == 6) break; // avoid underflow
+		}
+	}
+	if (!found) return "";
+
+	DString ds;
+	ds.tinit();
+	ds.appendf("%s/lib/src.zip", jmod_path[:jmods_pos]);
+
+	String src_zip = ds.str_view();
+	if (!file::is_file(src_zip)) return "";
+	return src_zip;
+}
+
 // ── Source file path inside JAR ────────────────────────────────────
 
 /**
@@ -380,14 +416,21 @@ fn bool find_symbol_position(String content, String symbol_name, DepSymbolKind k
  * Try to navigate to the source definition of a dependency symbol.
  * Returns an LSP Location object pointing to the extracted source file,
  * or null if source navigation is not possible.
+ *
+ * For normal JARs: derives -sources.jar from the binary JAR path.
+ * For JDK jmod files: derives $JAVA_HOME/lib/src.zip path instead.
  */
 fn Object* resolve_dep_definition(DepSymbol* sym) {
 	if (sym == null) return null;
 
-	// Derive source JAR path
+	// Derive source JAR/ZIP path
 	String source_jar = derive_source_jar_path(sym.jar_path);
 	if (source_jar.len == 0) {
-		return null; // No source JAR available
+		// Try JDK src.zip for .jmod paths
+		source_jar = derive_jdk_source_path(sym.jar_path);
+	}
+	if (source_jar.len == 0) {
+		return null; // No source available
 	}
 
 	// Find the source entry in the JAR

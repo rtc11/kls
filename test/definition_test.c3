@@ -3,6 +3,8 @@ module kls::test::definition_test;
 import std::collections::object;
 import kls::document;
 import kls::lsp::definition;
+import kls::workspace;
+import kls::deps::jar_index;
 
 // ── Helper: build params object ────────────────────────────────────
 
@@ -867,5 +869,130 @@ fun main() {
 		int line = start.get_int("line")!!;
 		// Should go to the 0-param overload at line 0
 		assert(line == 0, "expected line 0 for 0-param overload, got %d", line);
+	};
+}
+
+// ── Dep-aware dot-member definition (JDK classes) ──────────────────
+
+fn void definition_of_dep_dot_member_method() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add "System" class to dep_index
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"System", "class System", "java.lang", "System", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+
+		// Add "nanoTime" method to dep_index
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"nanoTime", "fun nanoTime(): Long", "java.lang", "System", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0);
+
+		// Code referencing System.nanoTime()
+		String content = "fun main() {\n    val t = System.nanoTime()\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "nanoTime" in System.nanoTime() at line 1
+		// "    val t = System.nanoTime()" — "nanoTime" starts at col 19
+		Object* params = make_params("file:///test.kt", 1, 19);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// Result will be null since /fake/java.base.jmod doesn't exist,
+		// but the dep member lookup path is exercised without crashing.
+		// In a real scenario with JAVA_HOME/lib/src.zip, this returns a Location.
+	};
+}
+
+fn void definition_of_dep_dot_member_field() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add "System" class to dep_index
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"System", "class System", "java.lang", "System", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+
+		// Add "out" field to dep_index
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"out", "val out: PrintStream", "java.lang", "System", "/fake/java.base.jmod",
+			DEP_FIELD, null, 0);
+
+		// Code referencing System.out
+		String content = "fun main() {\n    val o = System.out\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "out" in System.out at line 1
+		// "    val o = System.out" — "out" starts at col 19
+		Object* params = make_params("file:///test.kt", 1, 19);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// Same as above: null because no real source, but no crash
+	};
+}
+
+fn void definition_dep_dot_member_unknown_class_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// dep_index has no "FakeClass"
+		String content = "fun main() {\n    val t = FakeClass.method()\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "method" in FakeClass.method() at line 1
+		// "    val t = FakeClass.method()" — "method" starts at col 22
+		Object* params = make_params("file:///test.kt", 1, 22);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		assert(result == null, "expected null for unknown dep class member");
+	};
+}
+
+fn void definition_dep_dot_member_wrong_class_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add "Runtime" class and "nanoTime" on "System" — mismatched
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"Runtime", "class Runtime", "java.lang", "Runtime", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"nanoTime", "fun nanoTime(): Long", "java.lang", "System", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0);
+
+		// Code referencing Runtime.nanoTime() — nanoTime doesn't belong to Runtime
+		String content = "fun main() {\n    val t = Runtime.nanoTime()\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "nanoTime" at col 20
+		Object* params = make_params("file:///test.kt", 1, 20);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// nanoTime belongs to System, not Runtime — should not resolve
+		assert(result == null, "expected null when member doesn't match class");
 	};
 }

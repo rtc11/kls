@@ -10,9 +10,9 @@ import kls::deps::classfile;
 import kls::deps::jar_index;
 
 // ── Key JDK modules to index ──────────────────────────────────────
-// We index class-level symbols only (not methods/fields) from a
-// curated set of JDK modules that are most relevant for Kotlin/JVM
-// development.
+// We index classes, methods, and fields from a curated set of JDK
+// modules that are most relevant for Kotlin/JVM development.
+// This enables go-to-definition on JDK members like System.nanoTime().
 
 const String[*] JDK_MODULES = {
 	"java.base.jmod",        // java.lang, java.util, java.io, java.nio, java.math, java.time, java.net, java.security, java.text, java.util.concurrent, etc.
@@ -134,7 +134,78 @@ fn void index_jdk(DependencyIndex* dep_index) {
 	}
 
 	usz total_after = dep_index.symbols.len();
-	io::eprintfn("[kls] JDK index: %d class symbols from jmod files", (int)(total_after - total_before));
+	io::eprintfn("[kls] JDK index: %d symbols from jmod files", (int)(total_after - total_before));
+}
+
+// ── JMOD header stripping ─────────────────────────────────────────
+
+const char[4] JMOD_MAGIC = { 'J', 'M', 0x01, 0x00 };
+const usz JMOD_HEADER_SIZE = 4;
+
+/**
+ * Strip the 4-byte JMOD magic header from a .jmod file.
+ * Writes the remaining bytes (pure ZIP content) to a temp file
+ * and returns the temp file path (heap-allocated).
+ * Returns empty string on failure. Caller must delete the temp
+ * file and free the returned string.
+ */
+fn String strip_jmod_header(String jmod_path) {
+	// Read the entire jmod file
+	char[] data;
+	if (try d = file::load(tmem, jmod_path)) {
+		data = d;
+	} else {
+		return "";
+	}
+
+	// Verify JMOD magic and ensure file is large enough
+	if (data.len <= JMOD_HEADER_SIZE) return "";
+	if (data[0] != JMOD_MAGIC[0] || data[1] != JMOD_MAGIC[1] ||
+		data[2] != JMOD_MAGIC[2] || data[3] != JMOD_MAGIC[3]) {
+		return "";
+	}
+
+	// Build temp file path
+	DString tmp;
+	tmp.tinit();
+	if (try tmpdir = env::tget_var("TMPDIR")) {
+		String t = tmpdir;
+		if (t.len > 0 && t[t.len - 1] == '/') {
+			t = t[:t.len - 1];
+		}
+		tmp.appendf("%s/kls-jmod-%x.zip", t, jmod_path_hash(jmod_path));
+	} else {
+		tmp.appendf("/tmp/kls-jmod-%x.zip", jmod_path_hash(jmod_path));
+	}
+
+	String tmp_path = tmp.str_view();
+
+	// Write ZIP portion (skip first 4 bytes)
+	File f;
+	if (try opened = file::open(tmp_path, "wb")) {
+		f = opened;
+	} else {
+		return "";
+	}
+
+	if (catch excuse = f.write(data[JMOD_HEADER_SIZE..])) {
+		f.close()!!;
+		return "";
+	}
+	f.close()!!;
+
+	return tmp_path.copy(mem);
+}
+
+/**
+ * Simple string hash for creating unique temp file names.
+ */
+fn uint jmod_path_hash(String s) {
+	uint h = 5381;
+	for (usz i = 0; i < s.len; i++) {
+		h = ((h << 5) + h) + (uint)s[i];
+	}
+	return h;
 }
 
 /**
@@ -143,11 +214,26 @@ fn void index_jdk(DependencyIndex* dep_index) {
  * symbols only (no methods/fields).
  */
 fn void index_jmod(DependencyIndex* idx, String jmod_path) {
+	// JMOD files have a 4-byte magic header (JM\x01\x00) before the ZIP
+	// content. The internal ZIP offsets are relative to byte 4, so we
+	// must strip the header before the ZIP library can read them correctly.
+	// Strategy: read the file, skip 4 bytes, write to temp, open as ZIP.
+	String zip_path = strip_jmod_header(jmod_path);
+	if (zip_path.len == 0) {
+		io::eprintfn("[kls]   Skipping jmod (strip header failed): %s", jmod_path);
+		return;
+	}
+	defer {
+		// Clean up temp file
+		file::delete(zip_path)!!;
+		mem::free(zip_path.ptr);
+	}
+
 	ZipArchive archive;
-	if (try a = zip::open(tmem, jmod_path, "r")) {
+	if (try a = zip::open(tmem, zip_path, "r")) {
 		archive = a;
 	} else {
-		io::eprintfn("[kls]   Skipping jmod (open failed): %s", jmod_path);
+		io::eprintfn("[kls]   Skipping jmod (zip open failed): %s", jmod_path);
 		return;
 	}
 	defer archive.close()!!;
@@ -187,7 +273,7 @@ fn void index_jmod(DependencyIndex* idx, String jmod_path) {
 			continue;
 		}
 
-		// Add class-level symbol only (skip methods/fields for JDK)
+		// Add class symbol plus its public methods/fields
 		add_jdk_class_symbol(idx, &info, jmod_path);
 		class_count++;
 	}
@@ -212,9 +298,9 @@ fn bool has_dollar_in_class_name(String name) {
 }
 
 /**
- * Add a single class-level symbol from a JDK class file.
- * Only adds public classes/interfaces/enums/annotations.
- * Does NOT add methods or fields (to keep JDK symbol count manageable).
+ * Add symbols from a JDK class file: the class itself plus its public
+ * methods and fields. This allows go-to-definition on JDK members
+ * like System.nanoTime(), Thread.sleep(), Files.readAllBytes(), etc.
  */
 fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_path) {
 	if (idx.symbols.len() >= jar_index::MAX_DEP_SYMBOLS) return;
@@ -279,4 +365,50 @@ fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_
 
 	jar_index::add_dep_symbol(idx, simple_name, sig.str_view(), pkg, simple_name, jmod_path, class_kind,
 		&class_supertypes, class_supertype_count);
+
+	// Add public methods as symbols
+	for (usz i = 0; i < info.method_count; i++) {
+		if (idx.symbols.len() >= jar_index::MAX_DEP_SYMBOLS) return;
+		ClassMember* m = &info.methods[i];
+
+		// Only index public methods
+		if ((m.access_flags & classfile::ACC_PUBLIC) == 0) continue;
+
+		// Skip constructors and class initializers
+		if (m.name == "<init>" || m.name == "<clinit>") continue;
+
+		DString msig;
+		msig.tinit();
+
+		bool is_static = (m.access_flags & classfile::ACC_STATIC) != 0;
+
+		msig.appendf("fun ");
+		if (!is_static && simple_name.len > 0) {
+			msig.appendf("%s.", simple_name);
+		}
+		msig.appendf("%s", m.name);
+		classfile::method_descriptor_to_kotlin(m.descriptor, &msig);
+
+		jar_index::add_dep_symbol(idx, m.name, msig.str_view(), pkg, simple_name, jmod_path, DEP_METHOD,
+			null, 0);
+	}
+
+	// Add public fields as symbols
+	for (usz i = 0; i < info.field_count; i++) {
+		if (idx.symbols.len() >= jar_index::MAX_DEP_SYMBOLS) return;
+		ClassMember* f = &info.fields[i];
+
+		// Only index public fields
+		if ((f.access_flags & classfile::ACC_PUBLIC) == 0) continue;
+
+		DString fsig;
+		fsig.tinit();
+
+		bool is_final = (f.access_flags & classfile::ACC_FINAL) != 0;
+		fsig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
+		classfile::descriptor_to_kotlin_type(f.descriptor, &fsig);
+
+		jar_index::add_dep_symbol(idx, f.name, fsig.str_view(), pkg, simple_name, jmod_path, DEP_FIELD,
+			null, 0);
+	}
 }

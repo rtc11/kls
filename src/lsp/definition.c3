@@ -351,9 +351,11 @@ faultdef NOT_DOT_MEMBER;
 fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentStore* store,
 		WorkspaceIndex* workspace, Token tok, String current_uri) {
 	// Find the DOT_EXPR that has this token as its member name
+	uint dot_count = 0;
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.kind != DOT_EXPR) continue;
+		dot_count++;
 		if (n.name != tok.text) continue;
 		if (n.name_line != tok.line || n.name_col != tok.col) continue;
 
@@ -385,7 +387,25 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 			}
 		}
 
-		if (receiver_type.kind == UNKNOWN) return NOT_DOT_MEMBER~;
+		if (receiver_type.kind == UNKNOWN) {
+			// Fallback: check if receiver is a known JDK/dependency class
+			// This handles cases like System.nanoTime() where System is a
+			// java.lang class not declared in any Kotlin source file.
+			if (workspace != null && workspace.dep_index.initialized) {
+				String recv_name = "";
+				for (uint j = 0; j < pr.node_count; j++) {
+					if (pr.nodes[j].parent == dot_idx && pr.nodes[j].kind == NAME_EXPR) {
+						recv_name = pr.nodes[j].name;
+						break;
+					}
+				}
+				if (recv_name.len > 0) {
+					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text);
+					if (dep_result != null) return dep_result;
+				}
+			}
+			return NOT_DOT_MEMBER~;
+		}
 
 		String type_name = receiver_type.name;
 		String member_name = tok.text;
@@ -559,6 +579,52 @@ fn Object* build_location_from_member(MemberDecl* m) {
 	location.set("range", range);
 
 	return location;
+}
+
+// ── Dependency member definition lookup ───────────────────────────
+
+/**
+ * Look up a dot-member in the dependency index. First verifies that
+ * the receiver name matches a known class/interface/enum, then searches
+ * for a matching method or field with that class_name.
+ *
+ * This handles JDK classes (System.nanoTime, Files.readAllBytes, etc.)
+ * and any other dependency class whose members are indexed.
+ */
+fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name) {
+	// First verify the class exists in the dep index
+	DepSymbol*[4] class_matches;
+	usz class_count = dep_index.lookup_by_name(class_name, &class_matches);
+	bool is_known_class = false;
+	for (usz i = 0; i < class_count; i++) {
+		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
+			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_ANNOTATION ||
+			class_matches[i].kind == DEP_OBJECT) {
+			is_known_class = true;
+			break;
+		}
+	}
+	if (!is_known_class) {
+		return null;
+	}
+
+	// Look up the member by name, filter by class_name
+	DepSymbol*[16] member_matches;
+	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
+
+	DepSymbol* best = null;
+	for (usz i = 0; i < member_count; i++) {
+		if (member_matches[i].class_name != class_name) continue;
+		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
+		best = member_matches[i];
+		break;
+	}
+
+	if (best == null) {
+		return null;
+	}
+
+	return source_nav::resolve_dep_definition(best);
 }
 
 // ── Receiver lambda member definition lookup ──────────────────────
