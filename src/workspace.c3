@@ -7,6 +7,8 @@ import std::collections;
 import kls::kotlin::symbols;
 import kls::kotlin::token;
 import kls::kotlin::lexer;
+import kls::kotlin::parser;
+import kls::kotlin::ast;
 import kls::deps::classpath;
 import kls::deps::jar_index;
 
@@ -24,6 +26,24 @@ struct WorkspaceSymbol {
 	uint name_len;         // length of name for range building
 	String[symbols::MAX_SUPERTYPES] supertypes;  // heap-copied supertype names
 	usz supertype_count;
+}
+
+// ── Cached member declaration ──────────────────────────────────────
+
+const usz MAX_PARAMS = 16;
+
+struct MemberDecl {
+	String name;           // heap-copied member name
+	String type_text;      // heap-copied type annotation (return type / property type)
+	String uri;            // heap-copied file URI where the member is declared
+	NodeKind node_kind;    // FUN_DECL, PROPERTY_DECL, CLASS_DECL, PARAM, etc.
+	uint mod_flags;        // modifier flags (MOD_VAR, MOD_FINAL, etc.)
+	uint line;             // 0-based line
+	uint col;              // 0-based column
+	uint name_len;         // length of name
+	usz param_count;       // number of parameters (for functions)
+	String[MAX_PARAMS] param_names;   // heap-copied parameter names
+	String[MAX_PARAMS] param_types;   // heap-copied parameter type texts
 }
 
 // ── Workspace file entry ───────────────────────────────────────────
@@ -44,6 +64,7 @@ struct WorkspaceIndex {
 	HashMap{String, WorkspaceFile} files;     // uri -> file metadata
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
+	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
 }
@@ -55,6 +76,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.files.init(mem);
 	self.name_index.init(mem);
 	self.super_index.init(mem);
+	self.member_cache.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
 }
@@ -98,11 +120,182 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 	};
 	self.super_index.free();
 
+	// Free member_cache lists and their heap strings
+	@pool() {
+		foreach (&list : self.member_cache.tvalues()) {
+			for (usz i = 0; i < list.len(); i++) {
+				MemberDecl* m = &(*list)[i];
+				free_member_decl(m);
+			}
+			list.free();
+		}
+	};
+	self.member_cache.free();
+
 	self.classpath.free();
 	self.dep_index.free();
 
 	if (self.root_uri.len > 0) mem::free(self.root_uri.ptr);
 	if (self.root_path.len > 0) mem::free(self.root_path.ptr);
+}
+
+// ── Member cache helpers ───────────────────────────────────────────
+
+/**
+ * Free all heap-allocated strings inside a MemberDecl.
+ */
+fn void free_member_decl(MemberDecl* m) {
+	if (m.name.len > 0) mem::free(m.name.ptr);
+	if (m.type_text.len > 0) mem::free(m.type_text.ptr);
+	if (m.uri.len > 0) mem::free(m.uri.ptr);
+	for (usz i = 0; i < m.param_count; i++) {
+		if (m.param_names[i].len > 0) mem::free(m.param_names[i].ptr);
+		if (m.param_types[i].len > 0) mem::free(m.param_types[i].ptr);
+	}
+}
+
+/**
+ * Parse a file and cache member declarations for all class-like symbols found.
+ * Called at the end of index_file() after symbols have been pushed.
+ *
+ * @param uri     The file URI (borrowed, will be heap-copied per member).
+ * @param content The file content to parse.
+ * @param syms    The scanned Symbol buffer from this file.
+ * @param count   The number of symbols scanned.
+ */
+fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, String content,
+		Symbol* syms, usz count) {
+	// Check if any class-like symbols exist in this file
+	bool has_classes = false;
+	for (usz i = 0; i < count; i++) {
+		if (syms[i].kind == SymbolKind.CLASS || syms[i].kind == SymbolKind.INTERFACE ||
+			syms[i].kind == SymbolKind.OBJECT) {
+			has_classes = true;
+			break;
+		}
+	}
+	if (!has_classes) return;
+
+	// Parse the file
+	ParseResult* pr = mem::new(ParseResult);
+	defer mem::free(pr);
+	parser::parse(content, pr);
+	if (pr.node_count == 0) return;
+
+	// For each class-like symbol, find it in the AST and extract members
+	for (usz s = 0; s < count; s++) {
+		if (syms[s].kind != SymbolKind.CLASS && syms[s].kind != SymbolKind.INTERFACE &&
+			syms[s].kind != SymbolKind.OBJECT) continue;
+
+		String class_name = syms[s].name;
+
+		// Find the class node in the AST
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if ((n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) ||
+				n.name != class_name) continue;
+
+			// Found the class — create member list
+			List{MemberDecl} members;
+			members.init(mem);
+
+			// Iterate direct children for member declarations
+			for (uint j = 0; j < pr.node_count; j++) {
+				AstNode* child = &pr.nodes[j];
+				if (child.parent != i) continue;
+				if (child.name.len == 0) continue;
+
+				MemberDecl m;
+				bool valid = false;
+
+				switch (child.kind) {
+					case FUN_DECL:
+						m = {
+							.name = child.name.copy(mem),
+							.type_text = child.type_text.len > 0 ? child.type_text.copy(mem) : "",
+							.uri = uri.copy(mem),
+							.node_kind = FUN_DECL,
+							.mod_flags = child.mod_flags,
+							.line = child.name_line,
+							.col = child.name_col,
+							.name_len = child.name_len,
+							.param_count = 0,
+						};
+						// Collect parameters
+						uint fun_idx = ast::node_index(pr, child);
+						for (uint k = 0; k < pr.node_count && m.param_count < MAX_PARAMS; k++) {
+							if (pr.nodes[k].parent != fun_idx) continue;
+							if (pr.nodes[k].kind != PARAM) continue;
+							usz pi = m.param_count;
+							m.param_names[pi] = pr.nodes[k].name.len > 0 ? pr.nodes[k].name.copy(mem) : "";
+							m.param_types[pi] = pr.nodes[k].type_text.len > 0 ? pr.nodes[k].type_text.copy(mem) : "";
+							m.param_count++;
+						}
+						valid = true;
+					case PROPERTY_DECL:
+						m = {
+							.name = child.name.copy(mem),
+							.type_text = child.type_text.len > 0 ? child.type_text.copy(mem) : "",
+							.uri = uri.copy(mem),
+							.node_kind = PROPERTY_DECL,
+							.mod_flags = child.mod_flags,
+							.line = child.name_line,
+							.col = child.name_col,
+							.name_len = child.name_len,
+							.param_count = 0,
+						};
+						valid = true;
+					case CLASS_DECL:
+					case INTERFACE_DECL:
+					case OBJECT_DECL:
+						m = {
+							.name = child.name.copy(mem),
+							.type_text = "",
+							.uri = uri.copy(mem),
+							.node_kind = child.kind,
+							.mod_flags = child.mod_flags,
+							.line = child.name_line,
+							.col = child.name_col,
+							.name_len = child.name_len,
+							.param_count = 0,
+						};
+						valid = true;
+					case PARAM:
+						// Data class constructor params with val/var are properties
+						if ((child.mod_flags & ast::MOD_VAR) != 0 || (child.mod_flags & ast::MOD_FINAL) != 0) {
+							m = {
+								.name = child.name.copy(mem),
+								.type_text = child.type_text.len > 0 ? child.type_text.copy(mem) : "",
+								.uri = uri.copy(mem),
+								.node_kind = PARAM,
+								.mod_flags = child.mod_flags,
+								.line = child.name_line,
+								.col = child.name_col,
+								.name_len = child.name_len,
+								.param_count = 0,
+							};
+							valid = true;
+						}
+					default:
+				}
+
+				if (valid) {
+					members.push(m);
+				}
+			}
+
+			self.member_cache.set(class_name, members);
+			break; // Found the class node, done
+		}
+	}
+}
+
+/**
+ * Look up cached members for a class by name.
+ * Returns a pointer to the member list, or fault if not cached.
+ */
+fn List{MemberDecl}*? WorkspaceIndex.lookup_members(WorkspaceIndex* self, String class_name) {
+	return self.member_cache.get_ref(class_name);
 }
 
 // ── Set workspace root ─────────────────────────────────────────────
@@ -194,6 +387,9 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 		.symbol_count = count,
 	};
 	self.files.set(uri, wf);
+
+	// Populate member cache for class-like declarations
+	self.cache_class_members(uri, content, &buf, count);
 }
 
 /**
@@ -206,6 +402,21 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 
 	usz start = wf.symbol_start;
 	usz count = wf.symbol_count;
+
+	// Remove member_cache entries for class-like symbols in this file
+	for (usz i = start; i < start + count && i < self.symbols.len(); i++) {
+		WorkspaceSymbol* sym = &self.symbols[i];
+		if (sym.kind == SymbolKind.CLASS || sym.kind == SymbolKind.INTERFACE ||
+			sym.kind == SymbolKind.OBJECT) {
+			if (try list_ref = self.member_cache.get_ref(sym.name)) {
+				for (usz j = 0; j < list_ref.len(); j++) {
+					free_member_decl(&(*list_ref)[j]);
+				}
+				list_ref.free();
+				self.member_cache.remove(sym.name);
+			}
+		}
+	}
 
 	// Free strings in symbols being removed
 	for (usz i = start; i < start + count && i < self.symbols.len(); i++) {

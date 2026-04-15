@@ -392,7 +392,28 @@ fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String 
  */
 fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentStore* store,
 		String class_name, String member_name) {
-	// Look up the class in the workspace index
+	// Try the member cache first (fast path — no re-parsing)
+	if (try members = workspace.lookup_members(class_name)) {
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = &(*members)[i];
+			if (m.name != member_name) continue;
+
+			// Standard declarations
+			if (ast::is_declaration(m.node_kind)) {
+				return build_location_from_member(m);
+			}
+
+			// Data class constructor params with var/val
+			if (m.node_kind == PARAM) {
+				if ((m.mod_flags & ast::MOD_VAR) != 0 || (m.mod_flags & ast::MOD_FINAL) != 0) {
+					return build_location_from_member(m);
+				}
+			}
+		}
+		return NOT_DOT_MEMBER~;
+	}
+
+	// Fall back to parsing (cache miss)
 	if (try indices = workspace.lookup_by_name(class_name)) {
 		for (usz i = 0; i < indices.len(); i++) {
 			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
@@ -427,6 +448,29 @@ fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentSt
 	}
 
 	return NOT_DOT_MEMBER~;
+}
+
+/**
+ * Build an LSP Location object from a cached MemberDecl.
+ */
+fn Object* build_location_from_member(MemberDecl* m) {
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)m.line);
+	start.set("character", (int)m.col);
+
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)m.line);
+	end_pos.set("character", (int)(m.col + m.name_len));
+
+	Object* range = object::new_obj(tmem);
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	Object* location = object::new_obj(tmem);
+	location.set("uri", m.uri);
+	location.set("range", range);
+
+	return location;
 }
 
 // ── Receiver lambda member definition lookup ──────────────────────

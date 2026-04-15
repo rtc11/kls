@@ -416,7 +416,27 @@ fn void add_workspace_class_members(Object* items, WorkspaceIndex* workspace, Do
 	String type_name = receiver_type.name;
 	if (type_name.len == 0) return;
 
-	// Look up the type name in the workspace index
+	// Try the member cache first (fast path — no re-parsing)
+	if (try members = workspace.lookup_members(type_name)) {
+		add_members_from_cache(items, members, prefix);
+
+		// Walk supertypes to include inherited members
+		List{usz}* indices = workspace.lookup_by_name(type_name) ?? null;
+		if (indices != null) {
+			for (usz i = 0; i < indices.len(); i++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+				if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+					sym.kind != SymbolKind.OBJECT) continue;
+				for (usz s = 0; s < sym.supertype_count; s++) {
+					add_workspace_supertype_members(items, workspace, store, sym.supertypes[s], prefix);
+				}
+				return;
+			}
+		}
+		return;
+	}
+
+	// Fall back to parsing (cache miss — file not yet indexed)
 	List{usz}* indices = workspace.lookup_by_name(type_name) ?? null;
 	if (indices == null) return;
 
@@ -589,6 +609,118 @@ fn void build_property_signature(DString* sig, AstNode* prop_node) {
 }
 
 /**
+ * Add completion items from cached MemberDecl entries.
+ * This is the fast-path equivalent of add_members_from_class_ast,
+ * operating on the pre-computed member cache instead of re-parsing.
+ */
+fn void add_members_from_cache(Object* items, List{MemberDecl}* members, String prefix) {
+	for (usz i = 0; i < members.len(); i++) {
+		MemberDecl* m = &(*members)[i];
+		if (m.name.len == 0) continue;
+
+		// Filter by prefix
+		if (prefix.len > 0 && !m.name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && m.name == prefix) continue;
+
+		// Check for duplicate labels already in items
+		bool already_present = false;
+		for (usz k = 0; k < items.get_len(); k++) {
+			Object* existing = items.get_at(k);
+			if (try label = existing.get_string("label")) {
+				if (label == m.name) {
+					already_present = true;
+					break;
+				}
+			}
+		}
+		if (already_present) continue;
+
+		int kind = 0;
+		String detail = "";
+		DString sig;
+		sig.tinit();
+
+		switch (m.node_kind) {
+			case FUN_DECL:
+				kind = COMPLETION_KIND_METHOD;
+				detail = m.type_text.len > 0 ? m.type_text : "Unit";
+				build_fun_signature_from_cache(&sig, m);
+			case PROPERTY_DECL:
+				kind = COMPLETION_KIND_PROPERTY;
+				detail = m.type_text.len > 0 ? m.type_text : "";
+				build_property_signature_from_cache(&sig, m);
+			case CLASS_DECL:
+			case INTERFACE_DECL:
+			case OBJECT_DECL:
+				kind = COMPLETION_KIND_CLASS;
+				detail = "nested class";
+			case PARAM:
+				// Data class constructor params with val/var
+				if ((m.mod_flags & ast::MOD_VAR) != 0 || (m.mod_flags & ast::MOD_FINAL) != 0) {
+					kind = COMPLETION_KIND_PROPERTY;
+					detail = m.type_text.len > 0 ? m.type_text : "";
+					build_property_signature_from_cache(&sig, m);
+				} else {
+					continue;
+				}
+			default:
+				continue;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", m.name);
+		item.set("kind", kind);
+		item.set("detail", detail);
+
+		String sig_str = sig.str_view();
+		if (sig_str.len > 0) {
+			Object* doc_obj = object::new_obj(tmem);
+			doc_obj.set("kind", "markdown");
+			DString doc_val;
+			doc_val.tinit();
+			doc_val.appendf("```kotlin\n%s\n```", sig_str);
+			doc_obj.set("value", doc_val.str_view());
+			item.set("documentation", doc_obj);
+		}
+
+		items.push(item);
+	}
+}
+
+/**
+ * Build a function signature from a cached MemberDecl.
+ */
+fn void build_fun_signature_from_cache(DString* sig, MemberDecl* m) {
+	sig.appendf("fun %s(", m.name);
+
+	for (usz i = 0; i < m.param_count; i++) {
+		if (i > 0) sig.append(", ");
+		if (m.param_names[i].len > 0) {
+			sig.appendf("%s", m.param_names[i]);
+		}
+		if (m.param_types[i].len > 0) {
+			sig.appendf(": %s", m.param_types[i]);
+		}
+	}
+
+	sig.append(")");
+	if (m.type_text.len > 0) {
+		sig.appendf(": %s", m.type_text);
+	}
+}
+
+/**
+ * Build a property signature from a cached MemberDecl.
+ */
+fn void build_property_signature_from_cache(DString* sig, MemberDecl* m) {
+	String keyword = (m.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
+	sig.appendf("%s %s", keyword, m.name);
+	if (m.type_text.len > 0) {
+		sig.appendf(": %s", m.type_text);
+	}
+}
+
+/**
  * Look up a supertype in the workspace and add its members.
  * This enables inherited member completion (one level deep to avoid
  * infinite recursion with cyclic type hierarchies).
@@ -597,6 +729,13 @@ fn void add_workspace_supertype_members(Object* items, WorkspaceIndex* workspace
 		String supertype_name, String prefix) {
 	if (supertype_name.len == 0) return;
 
+	// Try the member cache first (fast path)
+	if (try members = workspace.lookup_members(supertype_name)) {
+		add_members_from_cache(items, members, prefix);
+		return;
+	}
+
+	// Fall back to parsing (cache miss)
 	List{usz}* indices = workspace.lookup_by_name(supertype_name) ?? null;
 	if (indices == null) return;
 

@@ -2,6 +2,7 @@ module kls::test::workspace_test;
 
 import kls::workspace;
 import kls::kotlin::symbols;
+import kls::kotlin::ast;
 
 // ── scan_package tests ─────────────────────────────────────────────
 
@@ -405,6 +406,265 @@ fn void remove_file_compaction_preserves_reindex() @test {
 			assert(indices.len() == 1, "expected 1 index for 'baker'");
 		} else {
 			assert(false, "expected to find 'baker'");
+		}
+	};
+}
+
+// ── Member cache tests ─────────────────────────────────────────────
+
+fn void member_cache_populated_on_index() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		String content =
+`class MyService {
+    fun fetchData(): String { return "" }
+    fun process(input: String): Int { return 0 }
+    val name: String = ""
+    var count: Int = 0
+}`;
+		idx.index_file("file:///service.kt", content);
+
+		// lookup_members should find "MyService"
+		if (try members = idx.lookup_members("MyService")) {
+			assert(members.len() == 4, "expected 4 members, got %d", (int)members.len());
+
+			// Check function members
+			bool found_fetch = false;
+			bool found_process = false;
+			bool found_name = false;
+			bool found_count = false;
+			for (usz i = 0; i < members.len(); i++) {
+				MemberDecl* m = &(*members)[i];
+				if (m.name == "fetchData") {
+					found_fetch = true;
+					assert(m.node_kind == FUN_DECL, "expected FUN_DECL for fetchData");
+					assert(m.type_text == "String", "expected String return type, got '%s'", m.type_text);
+					assert(m.param_count == 0, "fetchData has no params");
+				}
+				if (m.name == "process") {
+					found_process = true;
+					assert(m.node_kind == FUN_DECL, "expected FUN_DECL for process");
+					assert(m.param_count == 1, "expected 1 param, got %d", (int)m.param_count);
+					assert(m.param_names[0] == "input", "expected param name 'input', got '%s'", m.param_names[0]);
+					assert(m.param_types[0] == "String", "expected param type 'String', got '%s'", m.param_types[0]);
+				}
+				if (m.name == "name") {
+					found_name = true;
+					assert(m.node_kind == PROPERTY_DECL, "expected PROPERTY_DECL for name");
+					assert(m.type_text == "String", "expected String type, got '%s'", m.type_text);
+				}
+				if (m.name == "count") {
+					found_count = true;
+					assert(m.node_kind == PROPERTY_DECL, "expected PROPERTY_DECL for count");
+					assert((m.mod_flags & ast::MOD_VAR) != 0, "expected VAR flag for count");
+				}
+			}
+			assert(found_fetch, "expected 'fetchData' in member cache");
+			assert(found_process, "expected 'process' in member cache");
+			assert(found_name, "expected 'name' in member cache");
+			assert(found_count, "expected 'count' in member cache");
+		} else {
+			assert(false, "expected member cache to have 'MyService' entries");
+		}
+	};
+}
+
+fn void member_cache_data_class_params() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		idx.index_file("file:///user.kt", "data class User(val name: String, val age: Int)");
+
+		if (try members = idx.lookup_members("User")) {
+			assert(members.len() == 2, "expected 2 members for data class, got %d", (int)members.len());
+
+			bool found_name = false;
+			bool found_age = false;
+			for (usz i = 0; i < members.len(); i++) {
+				MemberDecl* m = &(*members)[i];
+				if (m.name == "name") {
+					found_name = true;
+					assert(m.node_kind == PARAM, "expected PARAM for data class val");
+					assert(m.type_text == "String", "expected String type");
+					assert((m.mod_flags & ast::MOD_FINAL) != 0, "expected FINAL flag for val");
+				}
+				if (m.name == "age") {
+					found_age = true;
+					assert(m.type_text == "Int", "expected Int type");
+				}
+			}
+			assert(found_name, "expected 'name' member");
+			assert(found_age, "expected 'age' member");
+		} else {
+			assert(false, "expected member cache for 'User'");
+		}
+	};
+}
+
+fn void member_cache_interface_members() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		String content =
+`interface Repository {
+    fun findAll(): List
+    fun findById(id: Int): String
+    val count: Int
+}`;
+		idx.index_file("file:///repo.kt", content);
+
+		if (try members = idx.lookup_members("Repository")) {
+			assert(members.len() == 3, "expected 3 members, got %d", (int)members.len());
+		} else {
+			assert(false, "expected member cache for 'Repository'");
+		}
+	};
+}
+
+fn void member_cache_invalidated_on_reindex() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		// First version
+		String content1 =
+`class Config {
+    val host: String = "localhost"
+    var port: Int = 8080
+}`;
+		idx.index_file("file:///config.kt", content1);
+
+		if (try members = idx.lookup_members("Config")) {
+			assert(members.len() == 2, "expected 2 members initially");
+		} else {
+			assert(false, "expected Config in member cache");
+		}
+
+		// Re-index with different members
+		String content2 =
+`class Config {
+    val host: String = "localhost"
+    var port: Int = 8080
+    val timeout: Int = 30
+}`;
+		idx.index_file("file:///config.kt", content2);
+
+		if (try members = idx.lookup_members("Config")) {
+			assert(members.len() == 3, "expected 3 members after re-index, got %d", (int)members.len());
+
+			bool found_timeout = false;
+			for (usz i = 0; i < members.len(); i++) {
+				MemberDecl* m = &(*members)[i];
+				if (m.name == "timeout") found_timeout = true;
+			}
+			assert(found_timeout, "expected 'timeout' after re-index");
+		} else {
+			assert(false, "expected Config in member cache after re-index");
+		}
+	};
+}
+
+fn void member_cache_no_class_returns_fault() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		// Index a file with only functions, no classes
+		idx.index_file("file:///utils.kt", "fun helperFunction() {}");
+
+		// Should not have any member cache entries
+		if (try members = idx.lookup_members("helperFunction")) {
+			assert(false, "should not cache members for a function");
+		}
+	};
+}
+
+fn void member_cache_nested_class() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		String content =
+`class Outer {
+    fun outerMethod(): String { return "" }
+    class Inner {
+        fun innerMethod(): Int { return 0 }
+    }
+}`;
+		idx.index_file("file:///outer.kt", content);
+
+		if (try members = idx.lookup_members("Outer")) {
+			bool found_method = false;
+			bool found_inner = false;
+			for (usz i = 0; i < members.len(); i++) {
+				MemberDecl* m = &(*members)[i];
+				if (m.name == "outerMethod") found_method = true;
+				if (m.name == "Inner") {
+					found_inner = true;
+					assert(m.node_kind == CLASS_DECL, "expected CLASS_DECL for Inner");
+				}
+			}
+			assert(found_method, "expected 'outerMethod'");
+			assert(found_inner, "expected 'Inner' nested class");
+		} else {
+			assert(false, "expected member cache for 'Outer'");
+		}
+	};
+}
+
+fn void member_cache_uri_stored() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		idx.index_file("file:///models/user.kt", "class User { fun getName(): String { return \"\" } }");
+
+		if (try members = idx.lookup_members("User")) {
+			assert(members.len() >= 1, "expected at least 1 member");
+			MemberDecl* m = &(*members)[0];
+			assert(m.uri == "file:///models/user.kt", "expected URI to match, got '%s'", m.uri);
+		} else {
+			assert(false, "expected member cache for 'User'");
+		}
+	};
+}
+
+fn void member_cache_line_col_stored() @test {
+	@pool() {
+		WorkspaceIndex idx;
+		idx.init();
+		defer idx.free();
+
+		String content =
+`class Calc {
+    fun add(a: Int, b: Int): Int { return a + b }
+}`;
+		idx.index_file("file:///calc.kt", content);
+
+		if (try members = idx.lookup_members("Calc")) {
+			assert(members.len() == 1, "expected 1 member");
+			MemberDecl* m = &(*members)[0];
+			assert(m.name == "add", "expected 'add'");
+			assert(m.line == 1, "expected line 1, got %d", m.line);
+			assert(m.param_count == 2, "expected 2 params, got %d", (int)m.param_count);
+			assert(m.param_names[0] == "a", "expected first param 'a'");
+			assert(m.param_names[1] == "b", "expected second param 'b'");
+			assert(m.param_types[0] == "Int", "expected first param type 'Int'");
+			assert(m.param_types[1] == "Int", "expected second param type 'Int'");
+			assert(m.type_text == "Int", "expected return type 'Int'");
+		} else {
+			assert(false, "expected member cache for 'Calc'");
 		}
 	};
 }
