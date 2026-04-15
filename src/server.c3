@@ -22,6 +22,7 @@ import kls::lsp::folding_range;
 import kls::lsp::selection_range;
 import kls::lsp::formatting;
 import kls::lsp::code_actions;
+import kls::lsp::code_lens;
 import kls::lsp::inlay_hints;
 import kls::lsp::diagnostics;
 import kls::lsp::progress;
@@ -268,6 +269,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/codeAction":
 			if (params != null) {
 				Object* result = code_actions::handle_code_action(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/codeLens":
+			if (params != null) {
+				Object* result = code_lens::handle_code_lens(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");

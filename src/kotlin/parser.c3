@@ -12,6 +12,7 @@ struct Parser {
 	Token current;
 	Token previous;
 	ParseResult* result;
+	String last_annotations;  // set by parse_modifiers, read by declaration parsers
 }
 
 // ── Public entry point ─────────────────────────────────────────────
@@ -108,6 +109,7 @@ fn uint Parser.add_node(Parser* self, NodeKind kind) {
 		self.result.nodes[idx].name = "";
 		self.result.nodes[idx].type_text = "";
 		self.result.nodes[idx].extra_text = "";
+		self.result.nodes[idx].annotation_text = "";
 		self.result.nodes[idx].mod_flags = ast::MOD_NONE;
 		self.result.nodes[idx].parent = ast::NO_PARENT;
 		self.result.nodes[idx].child_count = 0;
@@ -119,6 +121,7 @@ fn uint Parser.add_node(Parser* self, NodeKind kind) {
 	self.result.nodes[idx].name = "";
 	self.result.nodes[idx].type_text = "";
 	self.result.nodes[idx].extra_text = "";
+	self.result.nodes[idx].annotation_text = "";
 	self.result.nodes[idx].mod_flags = ast::MOD_NONE;
 	self.result.nodes[idx].parent = ast::NO_PARENT;
 	self.result.nodes[idx].child_count = 0;
@@ -339,11 +342,17 @@ fn void Parser.parse_import_decl(Parser* self) {
 
 fn uint Parser.parse_modifiers(Parser* self) {
 	uint flags = ast::MOD_NONE;
+	DString ann_buf;
+	ann_buf.tinit();
 
 	while (!self.at_eof()) {
 		// Annotations
 		if (self.at(AT)) {
-			self.skip_annotation();
+			String ann_name = self.scan_annotation();
+			if (ann_name.len > 0) {
+				if (ann_buf.len() > 0) ann_buf.append(" ");
+				ann_buf.append(ann_name);
+			}
 			continue;
 		}
 
@@ -377,38 +386,46 @@ fn uint Parser.parse_modifiers(Parser* self) {
 			case KW_CROSSINLINE: flags |= ast::MOD_CROSSINLINE; self.advance();
 			case KW_REIFIED:     flags |= ast::MOD_REIFIED;     self.advance();
 			default:
+				self.last_annotations = ann_buf.str_view();
 				return flags;
 		}
 	}
 
+	self.last_annotations = ann_buf.str_view();
 	return flags;
 }
 
 /**
- * Skip an annotation: @Name or @Name(...).
+ * Scan an annotation: @Name or @Name(...).
  * Also handles use-site targets: @file:Name, @get:Name, etc.
+ * Returns the simple (last segment) annotation name, e.g. "Test" for @org.junit.Test.
  */
-fn void Parser.skip_annotation(Parser* self) {
+fn String Parser.scan_annotation(Parser* self) {
 	self.advance(); // consume '@'
 
 	// Consume the first identifier (annotation name or use-site target)
+	String name = "";
 	if (self.at_identifier()) {
+		name = self.current.text;
 		self.advance();
 	} else {
-		return; // bare @ with no name
+		return ""; // bare @ with no name
 	}
 
 	// If colon follows, the identifier was a use-site target (e.g. file:, get:)
 	// and the real annotation name comes after
 	if (self.eat(COLON)) {
 		if (self.at_identifier()) {
+			name = self.current.text;
 			self.advance();
 		}
 	}
 
 	// Dotted annotation name: @com.example.MyAnnotation
+	// Keep the last segment as the simple name
 	while (self.eat(DOT)) {
 		if (self.at_identifier()) {
+			name = self.current.text;
 			self.advance();
 		}
 	}
@@ -417,6 +434,8 @@ fn void Parser.skip_annotation(Parser* self) {
 	if (self.at(LPAREN)) {
 		self.skip_balanced_parens();
 	}
+
+	return name;
 }
 
 // ── Declaration dispatch ───────────────────────────────────────────
@@ -482,6 +501,7 @@ fn bool Parser.parse_declaration(Parser* self, uint mods) {
 fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 	uint idx = self.add_node(kind);
 	self.result.nodes[idx].mod_flags = mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 
 	// Start span from the keyword (or earlier if modifiers present, but
 	// we use keyword start -- the caller could adjust)
@@ -539,6 +559,7 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 	uint idx = self.add_node(FUN_DECL);
 	self.result.nodes[idx].mod_flags = mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'fun'
 
@@ -662,6 +683,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 		mods |= ast::MOD_VAR;
 	}
 	self.result.nodes[idx].mod_flags = mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'val' or 'var'
 
@@ -791,6 +813,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 	uint idx = self.add_node(TYPEALIAS_DECL);
 	self.result.nodes[idx].mod_flags = mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'typealias'
 
@@ -822,6 +845,7 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 fn void Parser.parse_constructor_decl(Parser* self, uint mods) {
 	uint idx = self.add_node(CONSTRUCTOR_DECL);
 	self.result.nodes[idx].mod_flags = mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 	self.node_start(idx, self.current);
 	self.result.nodes[idx].name = "constructor";
 	self.node_set_name(idx, self.current);
@@ -881,6 +905,7 @@ fn void Parser.parse_init_block(Parser* self) {
 fn void Parser.parse_companion_object(Parser* self, uint mods) {
 	uint idx = self.add_node(COMPANION_OBJECT_DECL);
 	self.result.nodes[idx].mod_flags = mods | ast::MOD_COMPANION;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'companion'
 
@@ -968,6 +993,7 @@ fn void Parser.parse_param(Parser* self) {
 fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
 	uint idx = self.add_node(PARAM);
 	self.result.nodes[idx].mod_flags = mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
 	self.node_start(idx, self.current);
 
 	// Parameter name

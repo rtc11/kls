@@ -3724,3 +3724,110 @@ fn void parse_backtick_name_offset_spans_backticks() @test {
 		assert(fun.name_len == 5, "expected name_len 5, got %d", fun.name_len);
 	};
 }
+
+// ── Annotation text storage ─────────────────────────────────────────
+
+fn void parse_annotation_on_fun() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Test fun myTest() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "myTest", "expected 'myTest', got '%s'", fun.name);
+		assert(fun.annotation_text == "Test", "expected annotation_text 'Test', got '%s'", fun.annotation_text);
+		assert(fun.has_annotation("Test"), "expected has_annotation('Test') to be true");
+	};
+}
+
+fn void parse_multiple_annotations_on_fun() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Test @Ignore fun myTest() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.annotation_text == "Test Ignore", "expected 'Test Ignore', got '%s'", fun.annotation_text);
+		assert(fun.has_annotation("Test"), "expected has_annotation('Test')");
+		assert(fun.has_annotation("Ignore"), "expected has_annotation('Ignore')");
+		assert(!fun.has_annotation("Tes"), "partial match should not work");
+	};
+}
+
+fn void parse_dotted_annotation_stores_simple_name() @test {
+	@pool() {
+		ParseResult* r = do_parse("@org.junit.Test fun myTest() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.annotation_text == "Test", "expected 'Test' (simple name), got '%s'", fun.annotation_text);
+		assert(fun.has_annotation("Test"), "expected has_annotation('Test')");
+	};
+}
+
+fn void parse_annotation_on_class() @test {
+	@pool() {
+		ParseResult* r = do_parse("@RunWith(JUnit4::class) class MyTests {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+		assert(cls.annotation_text == "RunWith", "expected 'RunWith', got '%s'", cls.annotation_text);
+		assert(cls.has_annotation("RunWith"), "expected has_annotation('RunWith')");
+	};
+}
+
+fn void parse_no_annotation_empty_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun noAnnotation() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.annotation_text == "", "expected empty annotation_text, got '%s'", fun.annotation_text);
+		assert(!fun.has_annotation("Test"), "expected has_annotation('Test') to be false");
+	};
+}
+
+fn void parse_annotation_with_use_site_target() @test {
+	@pool() {
+		ParseResult* r = do_parse("@get:JvmName(\"foo\") val x = 1"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL, "expected PROPERTY_DECL");
+		assert(prop.annotation_text == "JvmName", "expected 'JvmName', got '%s'", prop.annotation_text);
+	};
+}
+
+fn void parse_annotation_on_class_member_fun() @test {
+	@pool() {
+		String src = `class MyTests {
+	@Test fun testAdd() {}
+	@Test @Timeout(5) fun testSub() {}
+	fun helper() {}
+}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+
+		AstNode* test1 = child(r, cls, 0);
+		assert(test1.kind == FUN_DECL, "expected FUN_DECL for testAdd");
+		assert(test1.name == "testAdd", "expected 'testAdd', got '%s'", test1.name);
+		assert(test1.has_annotation("Test"), "testAdd should have @Test");
+
+		AstNode* test2 = child(r, cls, 1);
+		assert(test2.kind == FUN_DECL, "expected FUN_DECL for testSub");
+		assert(test2.name == "testSub", "expected 'testSub', got '%s'", test2.name);
+		assert(test2.has_annotation("Test"), "testSub should have @Test");
+		assert(test2.has_annotation("Timeout"), "testSub should have @Timeout");
+
+		AstNode* helper = child(r, cls, 2);
+		assert(helper.kind == FUN_DECL, "expected FUN_DECL for helper");
+		assert(helper.name == "helper", "expected 'helper', got '%s'", helper.name);
+		assert(!helper.has_annotation("Test"), "helper should not have @Test");
+	};
+}

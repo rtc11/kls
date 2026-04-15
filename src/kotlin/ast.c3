@@ -137,6 +137,10 @@ struct AstNode {
 	// For PACKAGE_DECL: the full package path text
 	// For FUN_DECL / PROPERTY_DECL: receiver type text (extension declarations)
 	String extra_text;
+
+	// Annotation names: space-separated simple names from @-annotations
+	// e.g. "@Test @Ignore" → "Test Ignore", "@org.junit.Test" → "Test"
+	String annotation_text;
 }
 
 // ── Parse error ────────────────────────────────────────────────────
@@ -263,6 +267,27 @@ fn int to_lsp_symbol_kind(NodeKind kind) {
 }
 
 faultdef NOT_FOUND;
+
+/**
+ * Check if a node has a specific annotation (by simple name).
+ * Searches the space-separated annotation_text for an exact word match.
+ */
+fn bool AstNode.has_annotation(AstNode* self, String name) {
+	if (self.annotation_text.len == 0 || name.len == 0) return false;
+	String text = self.annotation_text;
+	usz i = 0;
+	while (i < text.len) {
+		// Skip leading spaces
+		while (i < text.len && text[i] == ' ') i++;
+		if (i >= text.len) break;
+		// Find end of word
+		usz start = i;
+		while (i < text.len && text[i] != ' ') i++;
+		String word = text[start:i - start];
+		if (word == name) return true;
+	}
+	return false;
+}
 
 /**
  * Free heap-allocated error messages inside a ParseResult.

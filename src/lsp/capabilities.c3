@@ -82,6 +82,11 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	code_action_opts.set("codeActionKinds", code_action_kinds);
 	caps.set("codeActionProvider", code_action_opts);
 
+	// CodeLens support (run/test lenses)
+	Object* code_lens_opts = object::new_obj(tmem);
+	code_lens_opts.set("resolveProvider", false);
+	caps.set("codeLensProvider", code_lens_opts);
+
 	// Inlay hint support
 	caps.set("inlayHintProvider", true);
 
