@@ -29,6 +29,7 @@ enum NodeKind : int {
 	// Statements / expressions (inside blocks)
 	IF_EXPR,
 	WHEN_EXPR,
+	WHEN_ENTRY,       // a single branch: condition(s) -> body
 	FOR_STMT,
 	WHILE_STMT,
 	DO_WHILE_STMT,
@@ -134,6 +135,7 @@ struct AstNode {
 
 	// For IMPORT_DECL: the full import path text
 	// For PACKAGE_DECL: the full package path text
+	// For FUN_DECL / PROPERTY_DECL: receiver type text (extension declarations)
 	String extra_text;
 }
 

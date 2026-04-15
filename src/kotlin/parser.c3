@@ -555,10 +555,29 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 
 		// Check for receiver: if DOT follows, first_name was the receiver type
 		if (self.at(LANGLE)) {
-			// Could be Receiver<T>.name
+			// Could be Receiver<T>.name -- capture full receiver text
+			uint recv_start = first_name.offset;
 			self.skip_angle_brackets();
-			if (self.eat(DOT)) {
-				// Receiver<T>.name
+			// Handle nullable generic receiver: Receiver<T>?.name
+			bool is_nullable_recv = false;
+			if (self.at(QUEST)) {
+				self.advance(); // consume '?'
+				is_nullable_recv = true;
+			}
+			if (self.eat(DOT) || (!is_nullable_recv && self.at(SAFE_CALL))) {
+				bool used_safe_call = false;
+				if (self.at(SAFE_CALL)) {
+					used_safe_call = true;
+					self.advance(); // consume '?.'
+				}
+				// Receiver<T>.name  or  Receiver<T>?.name
+				uint recv_end = self.previous.offset; // offset of '.' or '?.'
+				if (used_safe_call) {
+					// For '?.' token, extra_text should include the '?'
+					self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start + 1];
+				} else {
+					self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start];
+				}
 				if (self.at_identifier()) {
 					Token real_name = self.expect_identifier();
 					self.node_set_name(idx, real_name);
@@ -567,8 +586,18 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 				// Not a receiver -- first_name was the function name
 				self.node_set_name(idx, first_name);
 			}
-		} else if (self.eat(DOT)) {
-			// Receiver.name
+		} else if (self.at(DOT) || self.at(SAFE_CALL)) {
+			// Handle receiver: Receiver.name  or  Receiver?.name
+			uint recv_start = first_name.offset;
+			if (self.at(SAFE_CALL)) {
+				// ?. is a single token -- receiver includes the ?
+				uint recv_end = self.current.offset; // offset of '?.'
+				self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start + 1];
+				self.advance(); // consume '?.'
+			} else {
+				self.advance(); // consume '.'
+				self.result.nodes[idx].extra_text = first_name.text;
+			}
 			if (self.at_identifier()) {
 				Token real_name = self.expect_identifier();
 				self.node_set_name(idx, real_name);
@@ -650,10 +679,28 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	} else if (self.at_identifier()) {
 		Token first_name = self.expect_identifier();
 
-		// Check for receiver: Name.property or Name<T>.property
+		// Check for receiver: Name.property or Name<T>.property or Name?.property
 		if (self.at(LANGLE)) {
+			uint recv_start = first_name.offset;
 			self.skip_angle_brackets();
-			if (self.eat(DOT)) {
+			// Handle nullable generic receiver: Name<T>?.property
+			bool is_nullable_recv = false;
+			if (self.at(QUEST)) {
+				self.advance(); // consume '?'
+				is_nullable_recv = true;
+			}
+			if (self.eat(DOT) || (!is_nullable_recv && self.at(SAFE_CALL))) {
+				bool used_safe_call = false;
+				if (self.at(SAFE_CALL)) {
+					used_safe_call = true;
+					self.advance(); // consume '?.'
+				}
+				uint recv_end = self.previous.offset;
+				if (used_safe_call) {
+					self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start + 1];
+				} else {
+					self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start];
+				}
 				if (self.at_identifier()) {
 					Token real_name = self.expect_identifier();
 					self.node_set_name(idx, real_name);
@@ -661,7 +708,17 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 			} else {
 				self.node_set_name(idx, first_name);
 			}
-		} else if (self.eat(DOT)) {
+		} else if (self.at(DOT) || self.at(SAFE_CALL)) {
+			// Handle receiver: Name.property  or  Name?.property
+			uint recv_start = first_name.offset;
+			if (self.at(SAFE_CALL)) {
+				uint recv_end = self.current.offset;
+				self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start + 1];
+				self.advance(); // consume '?.'
+			} else {
+				self.advance(); // consume '.'
+				self.result.nodes[idx].extra_text = first_name.text;
+			}
 			if (self.at_identifier()) {
 				Token real_name = self.expect_identifier();
 				self.node_set_name(idx, real_name);
@@ -1291,6 +1348,9 @@ fn void Parser.parse_if_expr(Parser* self) {
  * Parse when expression:
  *   when { conditions -> body, ... }
  *   when (subject) { conditions -> body, ... }
+ *
+ * Subject: parsed as an expression child (with rollback fallback).
+ * Each branch: a WHEN_ENTRY child containing condition expression(s) + body.
  */
 fn void Parser.parse_when_expr(Parser* self) {
 	uint idx = self.add_node(WHEN_EXPR);
@@ -1298,9 +1358,30 @@ fn void Parser.parse_when_expr(Parser* self) {
 	self.advance(); // consume 'when'
 	uint children_start = self.result.node_count;
 
-	// Optional subject: (expr)
+	// Optional subject: (expr) -- parse as AST child with rollback
 	if (self.at(LPAREN)) {
-		self.skip_balanced_parens();
+		Lexer save_lexer = self.lexer;
+		Token save_current = self.current;
+		Token save_previous = self.previous;
+		uint save_node_count = self.result.node_count;
+		usz save_error_count = self.result.error_count;
+
+		self.advance(); // consume '('
+		if (!self.at(RPAREN) && !self.at_eof()) {
+			self.parse_expression(0);
+		}
+
+		if (self.at(RPAREN)) {
+			self.advance(); // consume ')'
+		} else {
+			// Rollback and fall back to skipping
+			self.lexer = save_lexer;
+			self.current = save_current;
+			self.previous = save_previous;
+			self.result.node_count = save_node_count;
+			self.result.error_count = save_error_count;
+			self.skip_balanced_parens();
+		}
 	}
 
 	// Body: { branches }
@@ -1313,8 +1394,14 @@ fn void Parser.parse_when_expr(Parser* self) {
 
 			uint saved_pos = self.current.offset;
 
-			// Skip condition part(s) until ->
-			self.skip_when_condition();
+			// Create a WHEN_ENTRY node for this branch
+			uint entry_idx = self.add_node(WHEN_ENTRY);
+			self.node_start(entry_idx, self.current);
+			uint entry_children_start = self.result.node_count;
+
+			// Parse condition(s) with rollback: try expression parsing,
+			// fall back to skip if it fails to reach ->
+			self.parse_when_entry_conditions(entry_idx);
 
 			// Arrow: ->
 			if (self.eat(ARROW)) {
@@ -1326,6 +1413,9 @@ fn void Parser.parse_when_expr(Parser* self) {
 					self.parse_statement();
 				}
 			}
+
+			self.adopt_children(entry_idx, entry_children_start);
+			self.node_end(entry_idx);
 
 			// Stuck detection
 			if (self.current.offset == saved_pos) {
@@ -1340,6 +1430,57 @@ fn void Parser.parse_when_expr(Parser* self) {
 
 	self.adopt_children(idx, children_start);
 	self.node_end(idx);
+}
+
+/**
+ * Parse the condition part of a when entry. Tries to parse conditions
+ * as expressions (comma-separated). Falls back to token skipping if
+ * expression parsing doesn't reach the -> arrow.
+ *
+ * Handles: literal conditions, is/in checks, else, comma-separated conditions.
+ */
+fn void Parser.parse_when_entry_conditions(Parser* self, uint entry_idx) {
+	// Handle 'else' keyword specially
+	if (self.at(KW_ELSE)) {
+		self.result.nodes[entry_idx].extra_text = "else";
+		self.advance();
+		return;
+	}
+
+	// Try to parse condition expressions with rollback
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	uint save_node_count = self.result.node_count;
+	usz save_error_count = self.result.error_count;
+
+	// Parse comma-separated condition expressions
+	bool success = true;
+	while (!self.at(ARROW) && !self.at(RCURL) && !self.at_eof()) {
+		self.parse_expression(PREC_NONE);
+
+		if (self.at(ARROW)) break;
+		if (self.at(COMMA)) {
+			self.advance(); // consume comma between conditions
+			continue;
+		}
+		// Unexpected token -- expression parsing didn't handle condition
+		success = false;
+		break;
+	}
+
+	if (success && self.at(ARROW)) {
+		// Expression parsing succeeded -- conditions are now AST children
+		return;
+	}
+
+	// Rollback and fall back to token skipping
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.result.node_count = save_node_count;
+	self.result.error_count = save_error_count;
+	self.skip_when_condition();
 }
 
 /**

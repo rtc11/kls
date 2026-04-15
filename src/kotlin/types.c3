@@ -745,6 +745,8 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 /**
  * Check if a NAME_EXPR with the given name is inside the then-branch
  * of an `if (name is Type)` check, and if so, return the narrowed type.
+ * Also handles null checks: `if (name != null)` narrows to non-nullable,
+ * and `if (name == null)` narrows to non-nullable in the else branch.
  */
 fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, String name) {
 	// Walk up the parent chain looking for an IF_EXPR
@@ -769,6 +771,17 @@ fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, Stri
 				// Check condition (first child of IF_EXPR) for `x is Type`
 				TypeRef narrowed = find_is_check_in_condition(pr, parent_idx, name);
 				if (narrowed.kind != UNKNOWN) return narrowed;
+
+				// Check for null check: `x != null` -> narrow to non-nullable
+				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, true);
+				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
+			}
+
+			// We're in the else-branch (child 2)
+			if (child_pos == 2) {
+				// Check for `x == null` in condition -> else branch has non-nullable
+				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, false);
+				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
 			}
 		}
 
@@ -831,6 +844,100 @@ fn String? get_is_check_variable_name(ParseResult* pr, uint check_idx) {
 		}
 	}
 	return ast::NOT_FOUND~;
+}
+
+/**
+ * Search the condition (first child) of an IF_EXPR for a null check
+ * and return the variable's type with nullability stripped.
+ *
+ * When then_branch is true, looks for `name != null` (then-branch is non-nullable).
+ * When then_branch is false, looks for `name == null` (else-branch is non-nullable).
+ * Also handles && conjunctions (e.g. `x != null && y != null`).
+ */
+fn TypeRef find_null_check_in_condition(ParseResult* pr, TypeInfo* info, uint if_idx, String name, bool then_branch) {
+	// The operator we're looking for depends on the branch:
+	// then-branch: x != null  (operator "!=")
+	// else-branch: x == null  (operator "==")
+	String target_op = then_branch ? "!=" : "==";
+
+	// Find the first child of the IF_EXPR (the condition)
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != if_idx) continue;
+
+		AstNode* cond = &pr.nodes[j];
+
+		// Direct null check: x != null  or  x == null
+		if (cond.kind == BINARY_EXPR && cond.extra_text == target_op) {
+			TypeRef result = check_null_comparison(pr, info, j, name);
+			if (result.kind != UNKNOWN) return result;
+		}
+
+		// Check for && conjunction: x != null && ...
+		// (only meaningful in then-branch; in else-branch && doesn't narrow)
+		if (then_branch && cond.kind == BINARY_EXPR && cond.extra_text == "&&") {
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				if (pr.nodes[k].kind == BINARY_EXPR && pr.nodes[k].extra_text == target_op) {
+					TypeRef result = check_null_comparison(pr, info, k, name);
+					if (result.kind != UNKNOWN) return result;
+				}
+			}
+		}
+
+		break; // Only check first child (the condition)
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Check if a BINARY_EXPR at `expr_idx` is a null comparison for `name`.
+ * One child must be a NAME_EXPR matching `name`, and the other must be
+ * a LITERAL_EXPR with extra_text "null". If so, look up the variable's
+ * declared type and return it with nullable stripped.
+ */
+fn TypeRef check_null_comparison(ParseResult* pr, TypeInfo* info, uint expr_idx, String name) {
+	bool found_name = false;
+	bool found_null = false;
+
+	for (uint c = 0; c < pr.node_count; c++) {
+		if (pr.nodes[c].parent != expr_idx) continue;
+
+		if (pr.nodes[c].kind == NAME_EXPR && pr.nodes[c].name == name) {
+			found_name = true;
+		}
+		if (pr.nodes[c].kind == LITERAL_EXPR && pr.nodes[c].extra_text == "null") {
+			found_null = true;
+		}
+	}
+
+	if (!found_name || !found_null) return TYPE_UNKNOWN;
+
+	// Look up the declared type of the variable by searching declarations
+	// in enclosing scopes, same as resolve_name_expr_type
+	uint scope_idx = find_innermost_scope(pr, expr_idx);
+	uint current = scope_idx;
+	while (true) {
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* candidate = &pr.nodes[j];
+			if (candidate.parent != current) continue;
+			if (!is_typed_declaration(candidate.kind)) continue;
+			if (candidate.name != name) continue;
+
+			if (info.has_type[j]) {
+				TypeRef result = info.node_types[j];
+				result.nullable = false;
+				return result;
+			}
+			return TYPE_UNKNOWN;
+		}
+
+		AstNode* scope = &pr.nodes[current];
+		if (current == 0 || scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+
+	return TYPE_UNKNOWN;
 }
 
 // ── Call expression resolution ─────────────────────────────────────
@@ -1287,8 +1394,31 @@ fn TypeRef resolve_if_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNo
 
 fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	TypeRef result = TYPE_UNKNOWN;
+	// With WHEN_ENTRY nodes, the type of each branch is determined by
+	// the body expression/block inside each WHEN_ENTRY child.
 	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+		if (pr.nodes[j].parent != idx) continue;
+
+		if (pr.nodes[j].kind == WHEN_ENTRY) {
+			// Find the body child of the WHEN_ENTRY (last child, typically BLOCK or expression)
+			TypeRef entry_type = TYPE_UNKNOWN;
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				// Skip condition expressions -- use the last typed child (the body)
+				if (info.has_type[k]) {
+					entry_type = info.node_types[k];
+				}
+			}
+			if (entry_type.kind != UNKNOWN) {
+				if (result.kind == UNKNOWN) {
+					result = entry_type;
+				} else {
+					result = common_type(result, entry_type);
+				}
+			}
+		} else if (info.has_type[j]) {
+			// Direct children (e.g. subject expression) -- skip for type resolution
+			// or fallback for old-style when without WHEN_ENTRY nodes
 			if (result.kind == UNKNOWN) {
 				result = info.node_types[j];
 			} else {

@@ -2977,3 +2977,195 @@ fn void parse_val_has_no_mod_var_flag() @test {
 		assert(prop.mod_flags & ast::MOD_VAR == 0, "expected no MOD_VAR flag for 'val'");
 	};
 }
+
+// ── #14: Receiver type on extension functions/properties ───────────
+
+fn void parse_extension_fun_receiver_type() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun String.greet() {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "greet", "expected 'greet', got '%s'", fun.name);
+		assert(fun.extra_text == "String", "expected receiver 'String', got '%s'", fun.extra_text);
+	};
+}
+
+fn void parse_extension_fun_generic_receiver() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun List<Int>.first(): Int { return this[0] }"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "first", "expected 'first', got '%s'", fun.name);
+		assert(fun.extra_text == "List<Int>", "expected receiver 'List<Int>', got '%s'", fun.extra_text);
+	};
+}
+
+fn void parse_extension_fun_nullable_receiver() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun String?.orEmpty(): String { return this ?: \"\" }"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "orEmpty", "expected 'orEmpty', got '%s'", fun.name);
+		assert(fun.extra_text.len > 0, "expected non-empty receiver type for nullable extension");
+	};
+}
+
+fn void parse_regular_fun_no_receiver() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun greet() {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "greet");
+		assert(fun.extra_text.len == 0, "expected no receiver on regular fun, got '%s'", fun.extra_text);
+	};
+}
+
+fn void parse_extension_property_receiver_type() @test {
+	@pool() {
+		ParseResult* r = do_parse("val String.lastChar: Char get() = this[length - 1]"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL, "expected PROPERTY_DECL");
+		assert(prop.name == "lastChar", "expected 'lastChar', got '%s'", prop.name);
+		assert(prop.extra_text == "String", "expected receiver 'String', got '%s'", prop.extra_text);
+	};
+}
+
+fn void parse_regular_property_no_receiver() @test {
+	@pool() {
+		ParseResult* r = do_parse("val count: Int = 42"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL, "expected PROPERTY_DECL");
+		assert(prop.name == "count");
+		assert(prop.extra_text.len == 0, "expected no receiver on regular property, got '%s'", prop.extra_text);
+	};
+}
+
+fn void parse_extension_property_nullable_receiver() @test {
+	@pool() {
+		ParseResult* r = do_parse("val String?.isNullOrEmpty: Boolean get() = this == null || this.isEmpty()"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL, "expected PROPERTY_DECL");
+		assert(prop.name == "isNullOrEmpty", "expected 'isNullOrEmpty', got '%s'", prop.name);
+		assert(prop.extra_text.len > 0, "expected non-empty receiver type for nullable extension property");
+	};
+}
+
+// ── #15: WHEN_ENTRY nodes in when expressions ──────────────────────
+
+fn void parse_when_has_entry_children() @test {
+	@pool() {
+		String content =
+`fun foo(x: Int) {
+    when (x) {
+        1 -> println("one")
+        2 -> println("two")
+        else -> println("other")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* when_expr = find_kind(r, block, WHEN_EXPR);
+		usz entry_count = count_kind(r, when_expr, WHEN_ENTRY);
+		assert(entry_count == 3, "expected 3 WHEN_ENTRY children, got %d", (int)entry_count);
+	};
+}
+
+fn void parse_when_else_entry_has_extra_text() @test {
+	@pool() {
+		String content =
+`fun foo(x: Int) {
+    when (x) {
+        1 -> println("one")
+        else -> println("other")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Find WHEN_ENTRY with extra_text == "else"
+		bool found_else = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHEN_ENTRY && r.nodes[i].extra_text == "else") {
+				found_else = true;
+			}
+		}
+		assert(found_else, "expected a WHEN_ENTRY with extra_text 'else'");
+	};
+}
+
+fn void parse_when_without_subject_has_entries() @test {
+	@pool() {
+		String content =
+`fun foo(x: Int) {
+    when {
+        x > 0 -> println("positive")
+        x < 0 -> println("negative")
+        else -> println("zero")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Find the WHEN_EXPR and count entries
+		bool found_when = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHEN_EXPR) {
+				found_when = true;
+				usz entry_count = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == WHEN_ENTRY) {
+						entry_count++;
+					}
+				}
+				assert(entry_count == 3, "expected 3 WHEN_ENTRY, got %d", (int)entry_count);
+			}
+		}
+		assert(found_when, "expected WHEN_EXPR");
+	};
+}
+
+fn void parse_when_with_subject_expression() @test {
+	@pool() {
+		String content =
+`fun foo(x: Int) {
+    when (x) {
+        1 -> println("one")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// The when should have at least one non-WHEN_ENTRY child (the subject)
+		// and one WHEN_ENTRY child
+		bool found_when = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHEN_EXPR) {
+				found_when = true;
+				usz entry_count = 0;
+				usz other_count = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i) {
+						if (r.nodes[j].kind == WHEN_ENTRY) {
+							entry_count++;
+						} else {
+							other_count++;
+						}
+					}
+				}
+				assert(entry_count >= 1, "expected at least 1 WHEN_ENTRY, got %d", (int)entry_count);
+				assert(other_count >= 1, "expected at least 1 non-WHEN_ENTRY child (subject), got %d", (int)other_count);
+			}
+		}
+		assert(found_when, "expected WHEN_EXPR");
+	};
+}

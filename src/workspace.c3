@@ -16,6 +16,7 @@ struct WorkspaceSymbol {
 	String name;           // heap-copied symbol name
 	String uri;            // heap-copied file:// URI
 	String package_name;   // heap-copied package (e.g. "com.example.app")
+	String receiver;       // heap-copied receiver type text (extensions)
 	SymbolKind kind;       // from kls::kotlin::symbols
 	int lsp_kind;          // LSP SymbolKind integer
 	uint line;             // 0-based line
@@ -65,6 +66,7 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
 		if (sym.uri.len > 0) mem::free(sym.uri.ptr);
 		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+		if (sym.receiver.len > 0) mem::free(sym.receiver.ptr);
 		for (usz j = 0; j < sym.supertype_count; j++) {
 			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
 		}
@@ -142,6 +144,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			.name = buf[i].name.copy(mem),
 			.uri = uri.copy(mem),
 			.package_name = pkg_copy.len > 0 ? pkg_copy.copy(mem) : "",
+			.receiver = buf[i].receiver.len > 0 ? buf[i].receiver.copy(mem) : "",
 			.kind = buf[i].kind,
 			.lsp_kind = symbol_kind_to_lsp(buf[i].kind),
 			.line = buf[i].line,
@@ -210,6 +213,7 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
 		if (sym.uri.len > 0) mem::free(sym.uri.ptr);
 		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+		if (sym.receiver.len > 0) mem::free(sym.receiver.ptr);
 		for (usz j = 0; j < sym.supertype_count; j++) {
 			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
 		}

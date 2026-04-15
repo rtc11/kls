@@ -1501,3 +1501,83 @@ fn void parse_nullable_function_type() @test {
 		assert(t.kind == FUNCTION, "expected FUNCTION for function type with nullable return");
 	};
 }
+
+// ── Null smart cast tests ──────────────────────────────────────────
+
+fn void smart_cast_null_check_not_equals() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				if (x != null) {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "null smart cast should give String, got '%s'", t);
+			assert(!ti.node_types[idx].nullable, "null smart cast should not be nullable");
+		}
+	};
+}
+
+fn void smart_cast_null_check_equals_else() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				if (x == null) {
+					val a = 1
+				} else {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "else-branch null smart cast should give String, got '%s'", t);
+			assert(!ti.node_types[idx].nullable, "else-branch null smart cast should not be nullable");
+		}
+	};
+}
+
+fn void smart_cast_null_check_conjunction() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				if (x != null && true) {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "null smart cast with && should give String, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_no_null_check_no_narrowing() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				val y = x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			// Without null check, the type should remain nullable
+			assert(ti.node_types[idx].nullable, "without null check, type should remain nullable");
+		}
+	};
+}

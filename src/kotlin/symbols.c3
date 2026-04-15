@@ -17,6 +17,7 @@ const usz MAX_SUPERTYPES = 8;
 struct Symbol {
 	SymbolKind kind;
 	String name;
+	String receiver;       // receiver type text for extension functions/properties
 	uint line;
 	uint col;
 	uint offset;
@@ -183,19 +184,24 @@ fn Symbol? scan_fun_name(Lexer* lex) {
 		// Receiver.name -- get the actual name
 		Token name_tok = lex.next();
 		if (name_tok.kind == IDENTIFIER) {
-			return make_symbol(SymbolKind.FUNCTION, name_tok);
+			Symbol sym = make_symbol(SymbolKind.FUNCTION, name_tok);
+			sym.receiver = next.text;
+			return sym;
 		}
 		return NO_SYMBOL~;
 	}
 
 	// If LANGLE follows, this could be Receiver<T>.name
 	if (after.kind == LANGLE) {
+		String receiver_text = next.text;
 		skip_angle_brackets(lex);
 		Token dot = lex.next();
 		if (dot.kind == DOT) {
 			Token name_tok = lex.next();
 			if (name_tok.kind == IDENTIFIER) {
-				return make_symbol(SymbolKind.FUNCTION, name_tok);
+				Symbol sym = make_symbol(SymbolKind.FUNCTION, name_tok);
+				sym.receiver = receiver_text;
+				return sym;
 			}
 			return NO_SYMBOL~;
 		}
@@ -226,7 +232,9 @@ fn Symbol? scan_property_name(Lexer* lex) {
 	if (after.kind == DOT) {
 		Token name_tok = lex.next();
 		if (name_tok.kind == IDENTIFIER) {
-			return make_symbol(SymbolKind.PROPERTY, name_tok);
+			Symbol sym = make_symbol(SymbolKind.PROPERTY, name_tok);
+			sym.receiver = next.text;
+			return sym;
 		}
 		return NO_SYMBOL~;
 	}
