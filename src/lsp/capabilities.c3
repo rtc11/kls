@@ -68,6 +68,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Folding range support
 	caps.set("foldingRangeProvider", true);
 
+	// Selection range support (smart selection expand/shrink)
+	caps.set("selectionRangeProvider", true);
+
 	// Document formatting support
 	caps.set("documentFormattingProvider", true);
 

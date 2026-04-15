@@ -19,6 +19,7 @@ import kls::lsp::workspace_symbols;
 import kls::lsp::rename;
 import kls::lsp::implementation;
 import kls::lsp::folding_range;
+import kls::lsp::selection_range;
 import kls::lsp::formatting;
 import kls::lsp::code_actions;
 import kls::lsp::progress;
@@ -241,6 +242,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/foldingRange":
 			if (params != null) {
 				Object* result = folding_range::handle_folding_range(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/selectionRange":
+			if (params != null) {
+				Object* result = selection_range::handle_selection_range(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
