@@ -2,6 +2,7 @@ module kls::lsp::lifecycle;
 
 import std::io;
 import std::collections::object;
+import kls::config;
 import kls::lsp::capabilities;
 import kls::lsp::progress;
 import kls::workspace;
@@ -47,6 +48,11 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 					}
 				}
 			}
+		}
+
+		// Apply client-supplied settings
+		if (try init_opts = params.get("initializationOptions")) {
+			config::apply_init_options(init_opts);
 		}
 
 		// Extract workspace root URI

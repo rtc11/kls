@@ -14,6 +14,7 @@ import kls::kotlin::stdlib;
 import kls::kotlin::types;
 import kls::workspace;
 import kls::deps::jar_index;
+import kls::deps::javadoc;
 
 faultdef NO_TOKEN, NO_DESCRIPTION;
 
@@ -1155,6 +1156,13 @@ fn String? describe_identifier_from_deps(DependencyIndex* dep_index, Token tok) 
 
 		if (sym.class_name.len > 0 && sym.class_name != sym.name) {
 			ds.appendf(" (from %s)", sym.class_name);
+		}
+
+		// Real-time Javadoc/KDoc extraction from source archives
+		if (try doc = javadoc::extract_dep_doc(sym)) {
+			if (doc.len > 0) {
+				ds.appendf("\n\n---\n\n%s", doc);
+			}
 		}
 	}
 
