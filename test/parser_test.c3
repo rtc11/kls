@@ -1525,6 +1525,80 @@ fn void parse_while_loop() @test {
 		AstNode* block = fun_block(r, child(r, f, 0));
 		usz while_count = count_kind(r, block, WHILE_STMT);
 		assert(while_count == 1, "expected 1 WHILE_STMT, got %d", (int)while_count);
+
+		// Condition expression should be an AST child of the WHILE_STMT
+		AstNode* while_node = find_kind(r, block, WHILE_STMT);
+		assert(while_node.child_count >= 2, "expected at least 2 children (condition + block), got %d", (int)while_node.child_count);
+
+		// First child should be the condition expression (NAME_EXPR for 'running')
+		AstNode* cond = child(r, while_node, 0);
+		assert(cond.kind == NAME_EXPR, "expected NAME_EXPR for condition, got %d", (int)cond.kind);
+	};
+}
+
+fn void parse_while_with_complex_condition() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    while (x != 0 && flag) {
+        x--
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* while_node = find_kind(r, block, WHILE_STMT);
+		assert(while_node.child_count >= 2, "expected at least 2 children (condition + block), got %d", (int)while_node.child_count);
+
+		// First child should be the binary expression (x != 0 && flag)
+		AstNode* cond = child(r, while_node, 0);
+		assert(cond.kind == BINARY_EXPR, "expected BINARY_EXPR for condition, got %d", (int)cond.kind);
+	};
+}
+
+fn void parse_while_with_call_condition() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    while (hasNext()) {
+        process()
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* while_node = find_kind(r, block, WHILE_STMT);
+		assert(while_node.child_count >= 2, "expected at least 2 children (condition + block), got %d", (int)while_node.child_count);
+
+		// First child should be a call expression (hasNext())
+		AstNode* cond = child(r, while_node, 0);
+		assert(cond.kind == CALL_EXPR, "expected CALL_EXPR for condition, got %d", (int)cond.kind);
+	};
+}
+
+fn void parse_while_with_not_null_condition() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    while (line != null) {
+        process(line)
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* while_node = find_kind(r, block, WHILE_STMT);
+		assert(while_node.child_count >= 2, "expected at least 2 children (condition + block), got %d", (int)while_node.child_count);
+
+		// First child should be a binary expression (line != null)
+		AstNode* cond = child(r, while_node, 0);
+		assert(cond.kind == BINARY_EXPR, "expected BINARY_EXPR for condition, got %d", (int)cond.kind);
 	};
 }
 
@@ -1545,6 +1619,100 @@ fn void parse_do_while_loop() @test {
 		AstNode* block = fun_block(r, child(r, f, 0));
 		usz do_count = count_kind(r, block, DO_WHILE_STMT);
 		assert(do_count == 1, "expected 1 DO_WHILE_STMT, got %d", (int)do_count);
+
+		// Condition expression should be an AST child of the DO_WHILE_STMT
+		AstNode* do_node = find_kind(r, block, DO_WHILE_STMT);
+		assert(do_node.child_count >= 2, "expected at least 2 children (block + condition), got %d", (int)do_node.child_count);
+
+		// Last child should be the condition expression (line != null)
+		AstNode* cond = child(r, do_node, do_node.child_count - 1);
+		assert(cond.kind == BINARY_EXPR, "expected BINARY_EXPR for do-while condition, got %d", (int)cond.kind);
+	};
+}
+
+fn void parse_do_while_with_simple_condition() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    do {
+        retry()
+    } while (shouldRetry)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* do_node = find_kind(r, block, DO_WHILE_STMT);
+		assert(do_node.child_count >= 2, "expected at least 2 children (block + condition), got %d", (int)do_node.child_count);
+
+		// Last child should be the condition (NAME_EXPR for 'shouldRetry')
+		AstNode* cond = child(r, do_node, do_node.child_count - 1);
+		assert(cond.kind == NAME_EXPR, "expected NAME_EXPR for do-while condition, got %d", (int)cond.kind);
+	};
+}
+
+fn void parse_do_while_with_call_condition() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    do {
+        attempt()
+    } while (hasMore() && count != 0)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* do_node = find_kind(r, block, DO_WHILE_STMT);
+		assert(do_node.child_count >= 2, "expected at least 2 children (block + condition), got %d", (int)do_node.child_count);
+
+		// Last child should be a binary expression (hasMore() && count != 0)
+		AstNode* cond = child(r, do_node, do_node.child_count - 1);
+		assert(cond.kind == BINARY_EXPR, "expected BINARY_EXPR for do-while condition, got %d", (int)cond.kind);
+	};
+}
+
+fn void parse_while_with_generic_ambiguity_rollback() @test {
+	@pool() {
+		// Conditions with bare `>` trigger rollback to skip_balanced_parens
+		// due to generic ambiguity (< and > are not binary operators in the parser).
+		// The while statement should still parse without errors.
+		String content =
+`fun foo() {
+    while (x > 0) {
+        x--
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* while_node = find_kind(r, block, WHILE_STMT);
+		// Rollback means condition is skipped -- only the body block is a child
+		assert(while_node.child_count >= 1, "expected at least 1 child (block), got %d", (int)while_node.child_count);
+	};
+}
+
+fn void parse_do_while_with_generic_ambiguity_rollback() @test {
+	@pool() {
+		// Same rollback behavior for do-while with bare `>`
+		String content =
+`fun foo() {
+    do {
+        attempt()
+    } while (count > 0)
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* block = fun_block(r, child(r, f, 0));
+		AstNode* do_node = find_kind(r, block, DO_WHILE_STMT);
+		// Rollback means condition is skipped -- only the body block is a child
+		assert(do_node.child_count >= 1, "expected at least 1 child (block), got %d", (int)do_node.child_count);
 	};
 }
 
