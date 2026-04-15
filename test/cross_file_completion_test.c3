@@ -260,3 +260,305 @@ fn void workspace_completion_no_match() @test {
 		}
 	};
 }
+
+// ── Cross-file dot-completion for user-defined types ──────────────
+
+fn void dot_completion_workspace_class_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Define a class with a function in another file
+		String class_content =
+`class MyService {
+    fun fetchData(): String { return "" }
+    fun processData(input: String): Int { return 0 }
+}`;
+		ws.index_file("file:///service.kt", class_content);
+		store.open("file:///service.kt", "kotlin", 1, class_content);
+
+		// Current file uses the class
+		String content = "fun main() {\n    val svc: MyService = MyService()\n    svc.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		// Cursor after "svc." on line 2, col 8
+		Object* params = make_params("file:///main.kt", 2, 8);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_fetch = false;
+		bool found_process = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "fetchData") {
+				found_fetch = true;
+				int kind = item.get_int("kind")!!;
+				assert(kind == completion::COMPLETION_KIND_METHOD,
+					"expected Method kind for fetchData, got %d", kind);
+			}
+			if (label == "processData") found_process = true;
+		}
+		assert(found_fetch, "expected 'fetchData' from workspace class members");
+		assert(found_process, "expected 'processData' from workspace class members");
+	};
+}
+
+fn void dot_completion_workspace_class_property() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String class_content =
+`class Config {
+    val host: String = "localhost"
+    var port: Int = 8080
+}`;
+		ws.index_file("file:///config.kt", class_content);
+		store.open("file:///config.kt", "kotlin", 1, class_content);
+
+		String content = "fun main() {\n    val cfg: Config = Config()\n    cfg.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 8);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		Object* items = result.get("items")!!;
+
+		bool found_host = false;
+		bool found_port = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "host") {
+				found_host = true;
+				int kind = item.get_int("kind")!!;
+				assert(kind == completion::COMPLETION_KIND_PROPERTY,
+					"expected Property kind for host, got %d", kind);
+			}
+			if (label == "port") found_port = true;
+		}
+		assert(found_host, "expected 'host' from workspace class members");
+		assert(found_port, "expected 'port' from workspace class members");
+	};
+}
+
+fn void dot_completion_workspace_class_with_prefix() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String class_content =
+`class MyService {
+    fun fetchData(): String { return "" }
+    fun fetchMore(): String { return "" }
+    fun process(): Int { return 0 }
+}`;
+		ws.index_file("file:///service.kt", class_content);
+		store.open("file:///service.kt", "kotlin", 1, class_content);
+
+		// Typing "svc.fe" -- prefix is "fe"
+		String content = "fun main() {\n    val svc: MyService = MyService()\n    svc.fe\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		// Cursor after "svc.fe" on line 2, col 10
+		Object* params = make_params("file:///main.kt", 2, 10);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		Object* items = result.get("items")!!;
+
+		bool found_fetch_data = false;
+		bool found_fetch_more = false;
+		bool found_process = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "fetchData") found_fetch_data = true;
+			if (label == "fetchMore") found_fetch_more = true;
+			if (label == "process") found_process = true;
+		}
+		assert(found_fetch_data, "expected 'fetchData' with prefix 'fe'");
+		assert(found_fetch_more, "expected 'fetchMore' with prefix 'fe'");
+		// process should not match prefix "fe"
+		assert(!found_process, "process should not match prefix 'fe'");
+	};
+}
+
+fn void dot_completion_workspace_data_class_params() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String class_content = "data class User(val name: String, val age: Int)";
+		ws.index_file("file:///user.kt", class_content);
+		store.open("file:///user.kt", "kotlin", 1, class_content);
+
+		String content = "fun main() {\n    val u: User = User(\"Alice\", 30)\n    u.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 6);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		Object* items = result.get("items")!!;
+
+		bool found_name = false;
+		bool found_age = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "name") found_name = true;
+			if (label == "age") found_age = true;
+		}
+		assert(found_name, "expected 'name' from data class params");
+		assert(found_age, "expected 'age' from data class params");
+	};
+}
+
+fn void dot_completion_workspace_inherited_members() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String base_content =
+`open class Base {
+    fun baseMethod(): String { return "" }
+}`;
+		ws.index_file("file:///base.kt", base_content);
+		store.open("file:///base.kt", "kotlin", 1, base_content);
+
+		String child_content =
+`class Child : Base() {
+    fun childMethod(): Int { return 0 }
+}`;
+		ws.index_file("file:///child.kt", child_content);
+		store.open("file:///child.kt", "kotlin", 1, child_content);
+
+		String content = "fun main() {\n    val c: Child = Child()\n    c.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 6);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		Object* items = result.get("items")!!;
+
+		bool found_child_method = false;
+		bool found_base_method = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "childMethod") found_child_method = true;
+			if (label == "baseMethod") found_base_method = true;
+		}
+		assert(found_child_method, "expected 'childMethod' from Child class");
+		assert(found_base_method, "expected 'baseMethod' inherited from Base class");
+	};
+}
+
+fn void dot_completion_workspace_interface_members() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String iface_content =
+`interface Repository {
+    fun findAll(): String
+    fun findById(id: Int): String
+    val count: Int
+}`;
+		ws.index_file("file:///repo.kt", iface_content);
+		store.open("file:///repo.kt", "kotlin", 1, iface_content);
+
+		String content = "fun main() {\n    val repo: Repository = TODO()\n    repo.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 9);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		Object* items = result.get("items")!!;
+
+		bool found_find_all = false;
+		bool found_find_by_id = false;
+		bool found_count = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "findAll") found_find_all = true;
+			if (label == "findById") found_find_by_id = true;
+			if (label == "count") found_count = true;
+		}
+		assert(found_find_all, "expected 'findAll' from interface members");
+		assert(found_find_by_id, "expected 'findById' from interface members");
+		assert(found_count, "expected 'count' from interface members");
+	};
+}
+
+fn void dot_completion_workspace_no_match_unknown_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// No class named "UnknownType" exists
+		String content = "fun main() {\n    val x: UnknownType = TODO()\n    x.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 6);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		// Should still return a result (possibly with keyword/identifier completions)
+		assert(result != null, "expected completion result");
+	};
+}
+
+fn void dot_completion_workspace_null_workspace() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// With null workspace, dot-completion should still work for built-in types
+		String content = "fun main() {\n    val s: String = \"hello\"\n    s.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 6);
+		Object* result = completion::handle_completion(&store, null, params);
+
+		assert(result != null, "expected completion result with null workspace");
+	};
+}

@@ -77,7 +77,7 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	if (is_dot_context) {
 		// Dot-completion: resolve receiver type and offer members
-		add_dot_completions(items, store, uri, doc.content, line, character, prefix);
+		add_dot_completions(items, store, workspace, uri, doc.content, line, character, prefix);
 	}
 
 	// Always add general completions (keywords, identifiers, etc.)
@@ -291,10 +291,11 @@ fn String find_receiver_name(String content, uint line, uint character, String p
 
 /**
  * Add dot-completion items by resolving the receiver type and looking
- * up available members. Falls back to stdlib receiver members.
+ * up available members. Falls back to workspace class lookup and
+ * stdlib receiver members.
  */
-fn void add_dot_completions(Object* items, DocumentStore* store, String uri, String content,
-		uint line, uint character, String prefix) {
+fn void add_dot_completions(Object* items, DocumentStore* store, WorkspaceIndex* workspace,
+		String uri, String content, uint line, uint character, String prefix) {
 	String receiver_name = find_receiver_name(content, line, character, prefix);
 	if (receiver_name.len == 0) return;
 
@@ -317,7 +318,7 @@ fn void add_dot_completions(Object* items, DocumentStore* store, String uri, Str
 
 	if (receiver_type.kind == UNKNOWN) return;
 
-	// Look up members for this type
+	// Look up members for this type from the hardcoded type tables
 	MemberInfo[128] members;
 	usz member_count = types::lookup_members(&receiver_type, members[..]);
 
@@ -345,6 +346,11 @@ fn void add_dot_completions(Object* items, DocumentStore* store, String uri, Str
 		}
 
 		items.push(item);
+	}
+
+	// Look up members from the workspace index for user-defined types
+	if (workspace != null) {
+		add_workspace_class_members(items, workspace, store, &receiver_type, prefix);
 	}
 
 	// Also add receiver-specific stdlib completions
@@ -393,6 +399,235 @@ fn TypeRef guess_receiver_type(String content, String receiver_name, uint line, 
 	}
 
 	return types::TYPE_UNKNOWN;
+}
+
+// ── Workspace class member completion ─────────────────────────────
+
+/**
+ * Look up a user-defined class/interface/object in the workspace index
+ * and add its member declarations as completion items.
+ *
+ * This handles the case where `receiver.` is typed and the receiver's
+ * type resolves to a class defined in the project (not in the hardcoded
+ * type tables or stdlib).
+ */
+fn void add_workspace_class_members(Object* items, WorkspaceIndex* workspace, DocumentStore* store,
+		TypeRef* receiver_type, String prefix) {
+	String type_name = receiver_type.name;
+	if (type_name.len == 0) return;
+
+	// Look up the type name in the workspace index
+	List{usz}* indices = workspace.lookup_by_name(type_name) ?? null;
+	if (indices == null) return;
+
+	for (usz i = 0; i < indices.len(); i++) {
+		WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+
+		// Only look at class-like declarations
+		if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+			sym.kind != SymbolKind.OBJECT) continue;
+
+		// Get the file content (prefer open document, fall back to disk)
+		String content;
+		char[] disk_data;
+
+		if (try doc = store.get(sym.uri)) {
+			content = doc.content;
+		} else {
+			String file_path = workspace::uri_to_path(sym.uri);
+			if (try d = std::io::file::load(tmem, file_path)) {
+				disk_data = d;
+				content = (String)disk_data;
+			} else {
+				continue;
+			}
+		}
+
+		// Parse the file and extract class members
+		ParseResult* pr = mem::new(ParseResult);
+		defer mem::free(pr);
+		parser::parse(content, pr);
+
+		add_members_from_class_ast(items, pr, type_name, prefix);
+
+		// Walk supertypes to include inherited members
+		for (usz s = 0; s < sym.supertype_count; s++) {
+			add_workspace_supertype_members(items, workspace, store, sym.supertypes[s], prefix);
+		}
+
+		return; // Found the class, done
+	}
+}
+
+/**
+ * Extract member declarations from a class AST and add them as
+ * completion items. Handles functions, properties, nested classes,
+ * and data class constructor params with val/var.
+ */
+fn void add_members_from_class_ast(Object* items, ParseResult* pr, String class_name, String prefix) {
+	// Find the class declaration
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if ((n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) ||
+			n.name != class_name) continue;
+
+		// Iterate direct children for member declarations
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.name.len == 0) continue;
+
+			// Filter by prefix
+			if (prefix.len > 0 && !child.name.starts_with(prefix)) continue;
+			if (prefix.len > 0 && child.name == prefix) continue;
+
+			// Check for duplicate labels already in items
+			bool already_present = false;
+			for (usz k = 0; k < items.get_len(); k++) {
+				Object* existing = items.get_at(k);
+				if (try label = existing.get_string("label")) {
+					if (label == child.name) {
+						already_present = true;
+						break;
+					}
+				}
+			}
+			if (already_present) continue;
+
+			int kind = 0;
+			String detail = "";
+			DString sig;
+			sig.tinit();
+
+			switch (child.kind) {
+				case FUN_DECL:
+					kind = COMPLETION_KIND_METHOD;
+					detail = child.type_text.len > 0 ? child.type_text : "Unit";
+					build_fun_signature(&sig, child, pr, i);
+				case PROPERTY_DECL:
+					kind = COMPLETION_KIND_PROPERTY;
+					detail = child.type_text.len > 0 ? child.type_text : "";
+					build_property_signature(&sig, child);
+				case CLASS_DECL:
+				case INTERFACE_DECL:
+				case OBJECT_DECL:
+					kind = COMPLETION_KIND_CLASS;
+					detail = "nested class";
+				case PARAM:
+					// Data class constructor params with val/var
+					if ((child.mod_flags & ast::MOD_VAR) != 0 || (child.mod_flags & ast::MOD_FINAL) != 0) {
+						kind = COMPLETION_KIND_PROPERTY;
+						detail = child.type_text.len > 0 ? child.type_text : "";
+						build_property_signature(&sig, child);
+					} else {
+						continue; // regular param, not a member
+					}
+				default:
+					continue;
+			}
+
+			Object* item = object::new_obj(tmem);
+			item.set("label", child.name);
+			item.set("kind", kind);
+			item.set("detail", detail);
+
+			String sig_str = sig.str_view();
+			if (sig_str.len > 0) {
+				Object* doc_obj = object::new_obj(tmem);
+				doc_obj.set("kind", "markdown");
+				DString doc_val;
+				doc_val.tinit();
+				doc_val.appendf("```kotlin\n%s\n```", sig_str);
+				doc_obj.set("value", doc_val.str_view());
+				item.set("documentation", doc_obj);
+			}
+
+			items.push(item);
+		}
+
+		return; // Found the class, done
+	}
+}
+
+/**
+ * Build a function signature string for documentation:
+ * "fun name(param: Type, ...): ReturnType"
+ */
+fn void build_fun_signature(DString* sig, AstNode* fun_node, ParseResult* pr, uint class_idx) {
+	sig.appendf("fun %s(", fun_node.name);
+
+	bool first = true;
+	for (uint k = 0; k < pr.node_count; k++) {
+		if (pr.nodes[k].parent != ast::node_index(pr, fun_node)) continue;
+		if (pr.nodes[k].kind != PARAM) continue;
+		if (!first) sig.append(", ");
+		first = false;
+		if (pr.nodes[k].name.len > 0) {
+			sig.appendf("%s", pr.nodes[k].name);
+		}
+		if (pr.nodes[k].type_text.len > 0) {
+			sig.appendf(": %s", pr.nodes[k].type_text);
+		}
+	}
+
+	sig.append(")");
+	if (fun_node.type_text.len > 0) {
+		sig.appendf(": %s", fun_node.type_text);
+	}
+}
+
+/**
+ * Build a property signature string for documentation:
+ * "val name: Type" or "var name: Type"
+ */
+fn void build_property_signature(DString* sig, AstNode* prop_node) {
+	String keyword = (prop_node.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
+	sig.appendf("%s %s", keyword, prop_node.name);
+	if (prop_node.type_text.len > 0) {
+		sig.appendf(": %s", prop_node.type_text);
+	}
+}
+
+/**
+ * Look up a supertype in the workspace and add its members.
+ * This enables inherited member completion (one level deep to avoid
+ * infinite recursion with cyclic type hierarchies).
+ */
+fn void add_workspace_supertype_members(Object* items, WorkspaceIndex* workspace, DocumentStore* store,
+		String supertype_name, String prefix) {
+	if (supertype_name.len == 0) return;
+
+	List{usz}* indices = workspace.lookup_by_name(supertype_name) ?? null;
+	if (indices == null) return;
+
+	for (usz i = 0; i < indices.len(); i++) {
+		WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+
+		if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+			sym.kind != SymbolKind.OBJECT) continue;
+
+		String content;
+		char[] disk_data;
+
+		if (try doc = store.get(sym.uri)) {
+			content = doc.content;
+		} else {
+			String file_path = workspace::uri_to_path(sym.uri);
+			if (try d = std::io::file::load(tmem, file_path)) {
+				disk_data = d;
+				content = (String)disk_data;
+			} else {
+				continue;
+			}
+		}
+
+		ParseResult* pr = mem::new(ParseResult);
+		defer mem::free(pr);
+		parser::parse(content, pr);
+
+		add_members_from_class_ast(items, pr, supertype_name, prefix);
+		return; // Only one level of supertypes (avoids infinite recursion)
+	}
 }
 
 /**
