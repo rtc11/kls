@@ -492,6 +492,162 @@ fn Object* resolve_dep_definition(DepSymbol* sym) {
 	return location;
 }
 
+// ── Scope function definition via stdlib sources ──────────────────
+
+const String[6] SCOPE_FUNCTION_NAMES = { "apply", "let", "also", "run", "takeIf", "takeUnless" };
+
+/**
+ * Check if a member name is a known Kotlin scope function.
+ */
+fn bool is_scope_function(String name) {
+	foreach (sf : SCOPE_FUNCTION_NAMES) {
+		if (name == sf) return true;
+	}
+	return false;
+}
+
+/**
+ * Try to navigate to the definition of a Kotlin scope function
+ * (apply, let, also, run, takeIf, takeUnless) in kotlin-stdlib-sources.jar.
+ *
+ * These are extension functions defined in kotlin/Standard.kt (compiled as
+ * kotlin.StandardKt). The source entry in the sources JAR uses a multiplatform
+ * layout (e.g. commonMain/kotlin/util/Standard.kt), so we scan for any entry
+ * ending with "/Standard.kt" rather than using the standard candidate system.
+ *
+ * Because scope functions are `inline`, the Kotlin compiler emits them as
+ * private methods in StandardKt__StandardKt.class. They are NOT in the dep
+ * index (which only indexes public methods). Instead, we find the stdlib
+ * jar_path by looking up the StandardKt facade class (which IS public and
+ * indexed), then navigate to the source from there.
+ *
+ * Returns an LSP Location or null if sources are not available.
+ */
+fn Object* find_scope_function_definition(DependencyIndex* dep_index, String member_name) {
+	if (dep_index == null || !dep_index.initialized) return null;
+
+	// Find the kotlin-stdlib jar_path by looking up the StandardKt class.
+	// StandardKt is the public facade class — it's always indexed even though
+	// it has no methods (the actual inline methods are private in __StandardKt).
+	String stdlib_jar = find_kotlin_stdlib_jar(dep_index);
+	if (stdlib_jar.len == 0) return null;
+
+	// Derive the sources JAR path
+	String source_jar = derive_source_jar_path(stdlib_jar);
+	if (source_jar.len == 0) return null;
+
+	// Scan the sources JAR for an entry ending with "/Standard.kt" or exactly "Standard.kt"
+	String entry_name;
+	if (try e = find_standard_kt_entry(source_jar)) {
+		entry_name = e;
+	} else {
+		return null;
+	}
+
+	// Extract to cache
+	String extracted_path;
+	if (try p = extract_source_to_cache(source_jar, entry_name)) {
+		extracted_path = p;
+	} else {
+		return null;
+	}
+	defer mem::free(extracted_path.ptr);
+
+	// Read the extracted source
+	char[] source_data;
+	if (try d = file::load(tmem, extracted_path)) {
+		source_data = d;
+	} else {
+		return null;
+	}
+	String source_content = (String)source_data;
+
+	// Find the symbol position in the source.
+	// Use DEP_METHOD kind so find_symbol_position looks for "fun <name>".
+	// For extension functions like "fun <T> T.apply(...)", the primary
+	// pattern won't match (prev token is "." not "fun"), but the fallback
+	// finds the first identifier occurrence which lands on the declaration.
+	uint sym_line = 0;
+	uint sym_col = 0;
+	if (!find_symbol_position(source_content, member_name, DEP_METHOD, &sym_line, &sym_col)) {
+		sym_line = 0;
+		sym_col = 0;
+	}
+
+	// Build the LSP Location
+	DString uri_ds;
+	uri_ds.tinit();
+	uri_ds.appendf("file://%s", extracted_path);
+
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)sym_line);
+	start.set("character", (int)sym_col);
+
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)sym_line);
+	end_pos.set("character", (int)(sym_col + member_name.len));
+
+	Object* range = object::new_obj(tmem);
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	Object* location = object::new_obj(tmem);
+	location.set("uri", uri_ds.str_view());
+	location.set("range", range);
+
+	return location;
+}
+
+/**
+ * Find the kotlin-stdlib jar_path from the dependency index.
+ * Looks up the "StandardKt" class (the public facade for Standard.kt),
+ * which is always present when kotlin-stdlib is indexed.
+ * Falls back to scanning symbols for a jar_path containing "kotlin-stdlib".
+ */
+fn String find_kotlin_stdlib_jar(DependencyIndex* dep_index) {
+	// Strategy 1: look up the StandardKt class by name (fast, uses name_index)
+	DepSymbol*[4] matches;
+	usz count = dep_index.lookup_by_name("StandardKt", &matches);
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].kind == DEP_CLASS && matches[i].class_name == "StandardKt") {
+			return matches[i].jar_path;
+		}
+	}
+
+	// Strategy 2: scan all symbols for a kotlin-stdlib jar_path (slower but robust)
+	for (usz i = 0; i < dep_index.symbols.len(); i++) {
+		String jp = dep_index.symbols[i].jar_path;
+		if (jp.len > 0 && jp.contains("kotlin-stdlib") && jp.ends_with(".jar")) {
+			return jp;
+		}
+	}
+
+	return "";
+}
+
+/**
+ * Scan a source JAR for an entry matching Standard.kt.
+ * Uses suffix matching to handle multiplatform layout prefixes
+ * like "commonMain/kotlin/util/Standard.kt".
+ */
+fn String? find_standard_kt_entry(String source_jar_path) {
+	ZipArchive archive = zip::open(tmem, source_jar_path, "r")!;
+	defer archive.close()!!;
+
+	usz entry_count = archive.count();
+	for (usz i = 0; i < entry_count; i++) {
+		if (try entry = archive.stat_at(i)) {
+			if (entry.is_directory) continue;
+			// Match any entry ending with "/Standard.kt" or exactly "Standard.kt"
+			if (entry.name == "Standard.kt" || entry.name.ends_with("/Standard.kt")) {
+				return entry.name.tcopy();
+			}
+		}
+	}
+
+	return SOURCE_NOT_FOUND~;
+}
+
 // ── Lookup + resolve combo ─────────────────────────────────────────
 
 /**

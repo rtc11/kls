@@ -90,7 +90,8 @@ fn usz lookup_by_receiver(String receiver_type, StdlibSymbol*[] out_buf) {
 
 		if (sym.receiver == receiver_type ||
 			sym.receiver == "Any" ||
-			sym.receiver == "Any?") {
+			sym.receiver == "Any?" ||
+			sym.receiver == "T") {
 			out_buf[count] = sym;
 			count++;
 			continue;

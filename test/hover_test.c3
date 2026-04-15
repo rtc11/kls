@@ -455,3 +455,61 @@ fn void hover_no_doc_without_comment() @test {
 		assert(!value.contains("@param"), "should not have @param without KDoc, got: '%s'", value);
 	};
 }
+
+// ── Dot-member hover (scope functions) ────────────────────────────
+
+fn void hover_apply_shows_doc() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String source =
+			"class Foo\n"
+			"fun main() {\n"
+			"    val f = Foo().apply { }\n"
+			"}";
+
+		store.open("file:///test.kt", "kotlin", 1, source);
+		// Hover over "apply" at line 2, col 20
+		Object* params = make_hover_params("file:///test.kt", 2, 20);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result for .apply");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("apply"),
+			"expected 'apply' in hover, got: '%s'", value);
+		assert(value.contains("T.() -> Unit"),
+			"expected signature, got: '%s'", value);
+		assert(value.contains("Calls block with this value as receiver"),
+			"expected doc text, got: '%s'", value);
+	};
+}
+
+fn void hover_let_shows_doc() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String source =
+			"class Bar\n"
+			"fun main() {\n"
+			"    Bar().let { }\n"
+			"}";
+
+		store.open("file:///test.kt", "kotlin", 1, source);
+		// Hover over "let" at line 2, col 10
+		Object* params = make_hover_params("file:///test.kt", 2, 10);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result for .let");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("let"),
+			"expected 'let' in hover, got: '%s'", value);
+		assert(value.contains("Calls block with this value as argument"),
+			"expected doc text, got: '%s'", value);
+	};
+}

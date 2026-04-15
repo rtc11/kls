@@ -2125,6 +2125,7 @@ struct MemberInfo {
 	String signature;
 	String detail;
 	int kind;      // LSP CompletionItemKind
+	String doc;    // optional documentation text
 }
 
 /**
@@ -2166,6 +2167,12 @@ fn usz add_member(MemberInfo[] buf, usz count, String name, String sig, String d
 	return count + 1;
 }
 
+fn usz add_member_with_doc(MemberInfo[] buf, usz count, String name, String sig, String detail, int kind, String doc) {
+	if (count >= buf.len) return count;
+	buf[count] = { .name = name, .signature = sig, .detail = detail, .kind = kind, .doc = doc };
+	return count + 1;
+}
+
 fn usz add_any_members(MemberInfo[] buf, usz count) {
 	count = add_member(buf, count, "toString", "fun toString(): String", "String", 2);
 	count = add_member(buf, count, "hashCode", "fun hashCode(): Int", "Int", 2);
@@ -2174,12 +2181,18 @@ fn usz add_any_members(MemberInfo[] buf, usz count) {
 }
 
 fn usz add_scope_function_members(MemberInfo[] buf, usz count) {
-	count = add_member(buf, count, "let", "fun <T, R> T.let(block: (T) -> R): R", "R", 2);
-	count = add_member(buf, count, "run", "fun <T, R> T.run(block: T.() -> R): R", "R", 2);
-	count = add_member(buf, count, "also", "fun <T> T.also(block: (T) -> Unit): T", "T", 2);
-	count = add_member(buf, count, "apply", "fun <T> T.apply(block: T.() -> Unit): T", "T", 2);
-	count = add_member(buf, count, "takeIf", "fun <T> T.takeIf(predicate: (T) -> Boolean): T?", "T?", 2);
-	count = add_member(buf, count, "takeUnless", "fun <T> T.takeUnless(predicate: (T) -> Boolean): T?", "T?", 2);
+	count = add_member_with_doc(buf, count, "let", "fun <T, R> T.let(block: (T) -> R): R", "R", 2,
+		"Calls block with this value as argument and returns the result.");
+	count = add_member_with_doc(buf, count, "run", "fun <T, R> T.run(block: T.() -> R): R", "R", 2,
+		"Calls block with this value as receiver and returns the result.");
+	count = add_member_with_doc(buf, count, "also", "fun <T> T.also(block: (T) -> Unit): T", "T", 2,
+		"Calls block with this value as argument and returns this value.");
+	count = add_member_with_doc(buf, count, "apply", "fun <T> T.apply(block: T.() -> Unit): T", "T", 2,
+		"Calls block with this value as receiver and returns this value.");
+	count = add_member_with_doc(buf, count, "takeIf", "fun <T> T.takeIf(predicate: (T) -> Boolean): T?", "T?", 2,
+		"Returns this value if it satisfies the predicate, or null otherwise.");
+	count = add_member_with_doc(buf, count, "takeUnless", "fun <T> T.takeUnless(predicate: (T) -> Boolean): T?", "T?", 2,
+		"Returns this value if it does not satisfy the predicate, or null otherwise.");
 	return count;
 }
 

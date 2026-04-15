@@ -228,6 +228,9 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok) {
 				if (receiver_str.len > 0) {
 					ds.appendf("\n\n*Member of %s*", receiver_str);
 				}
+				if (members[m].doc.len > 0) {
+					ds.appendf("\n\n%s", members[m].doc);
+				}
 				return ds.str_view();
 			}
 		}

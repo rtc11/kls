@@ -423,6 +423,22 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 			}
 		}
 
+		// Check if this is a known scope function (apply, let, also, run, etc.)
+		// These are extension functions available on all types, defined in
+		// kotlin.StandardKt. Navigate to their definition in stdlib sources
+		// rather than falling through to the generic dep lookup which would
+		// incorrectly match unrelated methods (e.g., BiFunction.apply).
+		if (source_nav::is_scope_function(member_name)) {
+			if (workspace != null) {
+				Object* scope_result = source_nav::find_scope_function_definition(
+					&workspace.dep_index, member_name);
+				if (scope_result != null) return scope_result;
+			}
+			// Even if sources aren't available, return null rather than
+			// falling through to the wrong definition
+			return null;
+		}
+
 		break;
 	}
 

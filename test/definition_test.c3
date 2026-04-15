@@ -996,3 +996,99 @@ fn void definition_dep_dot_member_wrong_class_returns_null() @test {
 		assert(result == null, "expected null when member doesn't match class");
 	};
 }
+
+// ── Scope function definition (apply, let, etc.) ───────────────────
+
+fn void definition_scope_fn_apply_not_bifunction() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add BiFunction.apply — the wrong target that was previously matched
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"apply", "fun apply(t: Object, u: Object): Object", "java.util.function",
+			"BiFunction", "/fake/java.base.jmod", DEP_METHOD, null, 0);
+
+		// Add StandardKt class — the public facade from kotlin-stdlib.
+		// The actual apply method is private (inline), so only the class is indexed.
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"StandardKt", "class StandardKt", "kotlin",
+			"StandardKt", "/fake/kotlin-stdlib.jar", DEP_CLASS, null, 0);
+
+		// Code using .apply on a local variable
+		String content = "class Builder {\n    fun build() = 42\n}\nfun main() {\n    val b = Builder().apply {\n        build()\n    }\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "apply" at line 4
+		// "    val b = Builder().apply {" — "apply" starts at col 22
+		Object* params = make_params("file:///test.kt", 4, 22);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// Result is null because /fake/kotlin-stdlib.jar doesn't exist on disk,
+		// but crucially we do NOT navigate to BiFunction.java.
+		// The scope function check short-circuits the dep fallback.
+		assert(result == null, "expected null (no real sources), not BiFunction");
+	};
+}
+
+fn void definition_scope_fn_let_not_dep_fallback() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add a hypothetical dep method named "let" on some class
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"let", "fun let(): Unit", "com.example",
+			"SomeClass", "/fake/some-lib.jar", DEP_METHOD, null, 0);
+
+		// Add StandardKt class — the public facade from kotlin-stdlib
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"StandardKt", "class StandardKt", "kotlin",
+			"StandardKt", "/fake/kotlin-stdlib.jar", DEP_CLASS, null, 0);
+
+		// Code using .let on a string
+		String content = "fun main() {\n    val x = \"hello\".let { it.length }\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "let" at line 1
+		// `    val x = "hello".let { it.length }` — "let" starts at col 22
+		Object* params = make_params("file:///test.kt", 1, 22);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// Null because no real sources, but does NOT fall through to SomeClass.let
+		assert(result == null, "expected null for scope fn let, not SomeClass");
+	};
+}
+
+fn void definition_scope_fn_also_returns_null_without_deps() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// No dep symbols at all — just verify .also doesn't crash
+		String content = "fun main() {\n    val x = listOf(1).also { println(it) }\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "also" at line 1
+		// `    val x = listOf(1).also { println(it) }` — "also" starts at col 24
+		Object* params = make_params("file:///test.kt", 1, 24);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		assert(result == null, "expected null for .also with no deps");
+	};
+}
