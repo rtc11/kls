@@ -461,6 +461,11 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	// Phase 5: Re-run initializer inference for declarations whose
 	// initializer expressions were resolved in Phase 4
 	resolve_initializer_types(pr, info);
+
+	// Phase 6: Re-resolve expressions that depend on Phase 5 inferred types
+	// (e.g., val x = listOf("a"); x.filter { it } — x's type is inferred
+	// in Phase 5, but the filter chain needs another expression pass)
+	resolve_expression_types(pr, info);
 }
 
 /**
@@ -718,6 +723,12 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 	TypeRef smart_cast = check_smart_cast(pr, info, idx, node.name);
 	if (smart_cast.kind != UNKNOWN) return smart_cast;
 
+	// Special case: implicit lambda parameter `it`
+	if (node.name == "it") {
+		TypeRef it_type = resolve_lambda_it_type(pr, info, idx);
+		if (it_type.kind != UNKNOWN) return it_type;
+	}
+
 	uint scope_idx = find_innermost_scope(pr, idx);
 
 	uint current = scope_idx;
@@ -737,6 +748,156 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		AstNode* scope = &pr.nodes[current];
 		if (current == 0 || scope.parent == ast::NO_PARENT) break;
 		current = scope.parent;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+// ── Lambda `it` type inference ─────────────────────────────────────
+
+/**
+ * Resolve the type of the implicit `it` parameter inside a lambda.
+ *
+ * Strategy: walk up from the NAME_EXPR to find the enclosing LAMBDA_EXPR.
+ * If the lambda has no explicit PARAM children (implicit `it`), find the
+ * enclosing CALL_EXPR, determine the call method name and receiver type,
+ * then return the expected `it` type based on the method.
+ *
+ * For scope functions (let, also, takeIf, takeUnless): it = receiver type
+ * For collection HOFs (filter, forEach, etc.): it = element type T
+ * For map HOFs (forEach, etc.): it = Map.Entry<K,V> (simplified to UNKNOWN)
+ */
+fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx) {
+	// Walk up to find the enclosing LAMBDA_EXPR
+	uint lambda_idx = ast::NO_PARENT;
+	uint current = name_idx;
+	while (current != 0 && current != ast::NO_PARENT) {
+		uint parent = pr.nodes[current].parent;
+		if (parent == ast::NO_PARENT) break;
+		if (pr.nodes[parent].kind == LAMBDA_EXPR) {
+			lambda_idx = parent;
+			break;
+		}
+		current = parent;
+	}
+	if (lambda_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	// Check that this lambda has no explicit parameters
+	// (if it has PARAM children, `it` is not the implicit parameter)
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == lambda_idx && pr.nodes[j].kind == PARAM) {
+			return TYPE_UNKNOWN; // Has explicit params, `it` is not implicit
+		}
+	}
+
+	// Walk up from the LAMBDA_EXPR to find the enclosing CALL_EXPR
+	// The lambda can be a direct child of a CALL_EXPR (trailing lambda),
+	// or nested further
+	uint call_idx = ast::NO_PARENT;
+	uint parent_of_lambda = pr.nodes[lambda_idx].parent;
+	if (parent_of_lambda != ast::NO_PARENT) {
+		if (pr.nodes[parent_of_lambda].kind == CALL_EXPR) {
+			call_idx = parent_of_lambda;
+		}
+	}
+	if (call_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	String method_name = pr.nodes[call_idx].name;
+	if (method_name.len == 0) return TYPE_UNKNOWN;
+
+	// Case 1: Scope functions — `it` is the receiver itself
+	// receiver.let { it }, receiver.also { it }, receiver.takeIf { it }
+	if (method_name == "let" || method_name == "also" ||
+	    method_name == "takeIf" || method_name == "takeUnless") {
+		// The CALL_EXPR might be a child of a DOT_EXPR
+		// Look for the DOT_EXPR receiver to get the type
+		return find_call_receiver_type(pr, info, call_idx);
+	}
+
+	// Case 2: Collection HOFs — `it` is the element type T
+	// receiver.filter { it }, receiver.forEach { it }, etc.
+	if (is_collection_hof(method_name)) {
+		TypeRef receiver = find_call_receiver_type(pr, info, call_idx);
+		if (receiver.kind == GENERIC && receiver.type_arg_count > 0) {
+			return { .kind = SIMPLE, .name = receiver.type_arg_names[0],
+			         .nullable = receiver.type_arg_nullable[0] };
+		}
+		// For String.forEach { it } -> Char
+		if (receiver.name == "String") return TYPE_CHAR;
+		return TYPE_UNKNOWN;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Determine if a method name is a collection higher-order function
+ * where the lambda's implicit `it` parameter is the element type.
+ */
+fn bool is_collection_hof(String name) {
+	return name == "filter" || name == "filterNot" || name == "filterNotNull" ||
+	       name == "forEach" || name == "forEachIndexed" ||
+	       name == "onEach" || name == "onEachIndexed" ||
+	       name == "any" || name == "all" || name == "none" || name == "count" ||
+	       name == "first" || name == "firstOrNull" ||
+	       name == "last" || name == "lastOrNull" ||
+	       name == "single" || name == "singleOrNull" ||
+	       name == "find" || name == "findLast" ||
+	       name == "sortedBy" || name == "sortedByDescending" ||
+	       name == "maxBy" || name == "maxByOrNull" ||
+	       name == "minBy" || name == "minByOrNull" ||
+	       name == "groupBy" || name == "associateBy" || name == "associateWith" ||
+	       name == "distinctBy" || name == "partition" ||
+	       name == "takeWhile" || name == "dropWhile" ||
+	       name == "map" || name == "flatMap" || name == "mapNotNull" ||
+	       name == "sumOf" || name == "sumBy";
+}
+
+/**
+ * Find the receiver type of a CALL_EXPR by looking for the DOT_EXPR parent
+ * or the receiver child of the DOT_EXPR.
+ *
+ * For `receiver.method { ... }`, the DOT_EXPR has the receiver as first child
+ * and the call is either:
+ * - A trailing lambda: CALL_EXPR wraps DOT_EXPR and LAMBDA_EXPR
+ * - A regular call: DOT_EXPR contains CALL_EXPR
+ *
+ * In the KLS AST, trailing lambda calls like `items.filter { }` produce:
+ *   CALL_EXPR "filter"
+ *     DOT_EXPR "filter"
+ *       NAME_EXPR "items"     <-- receiver (has type)
+ *     LAMBDA_EXPR
+ *
+ * Or for chained calls like `items.filter { }.first()`:
+ *   CALL_EXPR "first"
+ *     DOT_EXPR "first"
+ *       CALL_EXPR "filter"
+ *         ...
+ */
+fn TypeRef find_call_receiver_type(ParseResult* pr, TypeInfo* info, uint call_idx) {
+	// Look for DOT_EXPR child of CALL_EXPR
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind == DOT_EXPR) {
+			// The DOT_EXPR's first child is the receiver
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent == j && info.has_type[k]) {
+					return info.node_types[k];
+				}
+			}
+			break;
+		}
+	}
+
+	// If the CALL_EXPR itself is a child of a DOT_EXPR, the DOT_EXPR's
+	// first child (before this CALL_EXPR) is the receiver
+	uint call_parent = pr.nodes[call_idx].parent;
+	if (call_parent != ast::NO_PARENT && pr.nodes[call_parent].kind == DOT_EXPR) {
+		for (uint k = 0; k < pr.node_count; k++) {
+			if (pr.nodes[k].parent == call_parent && info.has_type[k]) {
+				return info.node_types[k];
+			}
+		}
 	}
 
 	return TYPE_UNKNOWN;

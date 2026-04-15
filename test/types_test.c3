@@ -1867,3 +1867,241 @@ fn void generic_sequence_preserves_type_args() @test {
 		}
 	};
 }
+
+// ── Lambda `it` parameter type inference tests ─────────────────────
+
+fn void lambda_it_let_has_receiver_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val name: String = "hello"
+				name.let { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		// Find the NAME_EXPR for "it"
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "String",
+					"it in let should be String, got '%s'", ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_also_has_receiver_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val x: Int = 42
+				x.also { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "Int",
+					"it in also should be Int, got '%s'", ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_filter_has_element_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a", "b")
+				items.filter { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "String",
+					"it in filter should be String, got '%s'", ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_forEach_has_element_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val nums: List<Int> = listOf(1, 2, 3)
+				nums.forEach { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "Int",
+					"it in forEach should be Int, got '%s'", ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_map_has_element_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val names: List<String> = listOf("a", "b")
+				names.map { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "String",
+					"it in map should be String, got '%s'", ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_takeIf_has_receiver_type() @test {
+	@pool() {
+		// Use explicit type annotation to ensure the property type is resolved
+		// in Phase 1, so the receiver is available when `it` is resolved.
+		// Note: `value.takeIf { it }` may be parsed as a bare CALL_EXPR
+		// in some cases (parser limitation with trailing lambdas on simple names),
+		// so we test with a collection type where the DOT_EXPR is preserved.
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a")
+				items.takeIf { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				TypeRef t = ti.node_types[i];
+				assert(t.name == "List",
+					"it in takeIf should be List, got '%s'", t.name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_explicit_param_no_inference() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a", "b")
+				items.filter { x -> it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		// When lambda has explicit params, `it` should NOT be resolved
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				// `it` should be UNKNOWN since lambda has explicit param `x`
+				if (ti.has_type[i]) {
+					// If it somehow resolved, that's a bug unless it matched something else
+					assert(false, "it should not resolve when lambda has explicit params");
+				}
+				return;
+			}
+		}
+		// It's OK if `it` doesn't appear at all (parser might handle differently)
+	};
+}
+
+fn void lambda_it_string_forEach_returns_char() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val s: String = "hello"
+				s.forEach { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "Char",
+					"it in String.forEach should be Char, got '%s'", ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_let_generic_receiver() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a")
+				items.let { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				TypeRef t = ti.node_types[i];
+				assert(t.name == "List",
+					"it in let on List<String> should be List, got '%s'", t.name);
+				assert(t.kind == GENERIC, "expected GENERIC for List<String>");
+				assert(t.type_arg_count == 1 && t.type_arg_names[0] == "String",
+					"expected List<String>, got List<%s>",
+					t.type_arg_count > 0 ? t.type_arg_names[0] : "?");
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
+
+fn void lambda_it_inferred_list_filter() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val names = listOf("alice", "bob")
+				names.filter { it }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
+				assert(ti.has_type[i], "expected 'it' to have a type");
+				assert(ti.node_types[i].name == "String",
+					"it in filter with inferred List<String> should be String, got '%s'",
+					ti.node_types[i].name);
+				return;
+			}
+		}
+		assert(false, "did not find 'it' NAME_EXPR");
+	};
+}
