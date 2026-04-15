@@ -51,7 +51,7 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
 		ParseResult* pr = store.get_ast(uri) ?? null;
 		TypeInfo* ti = store.get_types(uri) ?? null;
 		if (pr != null) {
-			if (try desc = describe_identifier_from_ast(pr, ti, doc.content, tok)) {
+			if (try desc = describe_identifier_from_ast(pr, ti, doc.content, tok, workspace)) {
 				description = desc;
 				found_description = true;
 			}
@@ -120,7 +120,7 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
  * and return a rich signature description. Also checks for inferred
  * types from TypeInfo when explicit type annotations are missing.
  */
-fn String? describe_identifier_from_ast(ParseResult* pr, TypeInfo* ti, String source, Token tok) {
+fn String? describe_identifier_from_ast(ParseResult* pr, TypeInfo* ti, String source, Token tok, WorkspaceIndex* workspace = null) {
 	if (pr.node_count == 0) return NO_DESCRIPTION~;
 
 	// Search all declarations for one matching this identifier name
@@ -146,7 +146,7 @@ fn String? describe_identifier_from_ast(ParseResult* pr, TypeInfo* ti, String so
 
 	// No declaration found - try to show inferred type for expression identifiers
 	if (ti != null) {
-		if (try desc = describe_expression_type(pr, ti, tok)) {
+		if (try desc = describe_expression_type(pr, ti, tok, workspace)) {
 			return desc;
 		}
 	}
@@ -159,9 +159,9 @@ fn String? describe_identifier_from_ast(ParseResult* pr, TypeInfo* ti, String so
  * a description with its inferred type from TypeInfo.
  * Also handles dot-expression members (e.g. str.length -> show member info).
  */
-fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok) {
+fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok, WorkspaceIndex* workspace = null) {
 	// First, check if this token is the member name of a DOT_EXPR
-	if (try desc = describe_dot_member(pr, ti, tok)) {
+	if (try desc = describe_dot_member(pr, ti, tok, workspace)) {
 		return desc;
 	}
 
@@ -186,11 +186,206 @@ fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok) {
 	return NO_DESCRIPTION~;
 }
 
+// ── Receiver-filtered dependency hover ────────────────────────────
+
+/**
+ * Look up a member name in the dependency index, filtering to only show
+ * overloads whose receiver type is compatible with the given type.
+ *
+ * Kotlin extension functions compile to JVM static methods where the
+ * receiver becomes the first parameter. For instance methods, the
+ * signature has the class name as prefix (e.g. "fun ArrayList.get(...)").
+ * This function checks both patterns to find the best match.
+ */
+fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type) {
+	DepSymbol*[16] all_matches;
+	usz total = dep_index.lookup_by_name(tok.text, &all_matches);
+	if (total == 0) return NO_DESCRIPTION~;
+
+	// Collect matches that are compatible with the receiver type
+	DepSymbol*[16] filtered;
+	usz filtered_count = 0;
+
+	for (usz i = 0; i < total && filtered_count < 16; i++) {
+		DepSymbol* sym = all_matches[i];
+
+		// Check 1: instance method signature "fun ReceiverType.name(...)"
+		if (sig_has_receiver_prefix(sym.signature, receiver_type)) {
+			filtered[filtered_count] = sym;
+			filtered_count++;
+			continue;
+		}
+
+		// Check 2: static extension function where receiver is first param
+		String first_param = extract_first_param_type(sym.signature);
+		if (first_param.len > 0 && receiver_type_matches(first_param, receiver_type)) {
+			filtered[filtered_count] = sym;
+			filtered_count++;
+			continue;
+		}
+	}
+
+	if (filtered_count == 0) return NO_DESCRIPTION~;
+
+	DString ds;
+	ds.tinit();
+
+	for (usz i = 0; i < filtered_count; i++) {
+		DepSymbol* sym = filtered[i];
+
+		if (i > 0) {
+			ds.appendf("\n\n---\n\n");
+		}
+
+		ds.appendf("```kotlin\n%s\n```", sym.signature);
+
+		if (sym.package_name.len > 0) {
+			ds.appendf("\n\n*%s*", sym.package_name);
+		}
+
+		if (sym.class_name.len > 0 && sym.class_name != sym.name) {
+			ds.appendf(" (from %s)", sym.class_name);
+		}
+
+		// Real-time Javadoc/KDoc extraction from source archives
+		if (try doc = javadoc::extract_dep_doc(sym)) {
+			if (doc.len > 0) {
+				ds.appendf("\n\n---\n\n%s", doc);
+			}
+		}
+	}
+
+	return ds.str_view();
+}
+
+/**
+ * Check if a signature starts with "fun ReceiverType.name(..." pattern.
+ * E.g. sig="fun ArrayList.get(Int): Any", receiver="ArrayList" -> true
+ */
+fn bool sig_has_receiver_prefix(String sig, String receiver_type) {
+	// Skip "fun " prefix
+	if (sig.len < 5 || sig[:4] != "fun ") return false;
+	String after_fun = sig[4..];
+
+	// Look for "ReceiverType." at the start
+	if (after_fun.len <= receiver_type.len) return false;
+
+	// Check if it starts with the receiver type name followed by '.'
+	if (after_fun[:receiver_type.len] == receiver_type &&
+		after_fun[receiver_type.len] == '.') {
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * Extract the base type name from a signature's first parameter.
+ * For "fun getOrNull(Array<Any>, Int): Any" -> "Array"
+ * For "fun getOrNull(List, Int): Any" -> "List"
+ * Returns empty string if no parameters or cannot parse.
+ */
+fn String extract_first_param_type(String sig) {
+	// Find opening '('
+	usz paren = 0;
+	while (paren < sig.len && sig[paren] != '(') {
+		paren++;
+	}
+	if (paren >= sig.len) return "";
+	paren++; // skip '('
+
+	// Skip whitespace
+	while (paren < sig.len && sig[paren] == ' ') paren++;
+
+	if (paren >= sig.len || sig[paren] == ')') return "";
+
+	// Read the first parameter type (up to ',', ')', '<', or ' ')
+	usz start = paren;
+	usz end = start;
+	while (end < sig.len) {
+		char c = sig[end];
+		if (c == ',' || c == ')' || c == '<') break;
+		end++;
+	}
+
+	if (end <= start) return "";
+
+	// Trim trailing whitespace
+	while (end > start && sig[end - 1] == ' ') end--;
+
+	return sig[start..end - 1];
+}
+
+/**
+ * Check if a parameter type is compatible with the receiver type.
+ * Handles base type name matching:
+ *   "Array" matches receiver "Array" (for Array<String> -> getOrNull(Array<Any>, ...))
+ *   "List" matches receiver "List", "MutableList", "ArrayList"
+ *   "CharSequence" matches receiver "String"
+ *   "Iterable" matches receiver "List", "Set", "Collection", etc.
+ *   "Any" matches any receiver type.
+ */
+fn bool receiver_type_matches(String param_type, String receiver_type) {
+	// Exact match
+	if (param_type == receiver_type) return true;
+
+	// "Any" or "Object" matches everything
+	if (param_type == "Any" || param_type == "Object") return true;
+
+	// Array types: "Array" matches "Array"
+	if (param_type == "Array" && receiver_type == "Array") return true;
+
+	// Collection hierarchy
+	if (param_type == "Iterable" || param_type == "Collection") {
+		if (receiver_type == "List" || receiver_type == "MutableList" ||
+			receiver_type == "Set" || receiver_type == "MutableSet" ||
+			receiver_type == "Collection" || receiver_type == "ArrayList" ||
+			receiver_type == "HashSet" || receiver_type == "LinkedHashSet" ||
+			receiver_type == "Iterable" || receiver_type == "Sequence") {
+			return true;
+		}
+	}
+
+	if (param_type == "List") {
+		if (receiver_type == "List" || receiver_type == "MutableList" ||
+			receiver_type == "ArrayList") {
+			return true;
+		}
+	}
+
+	if (param_type == "Set") {
+		if (receiver_type == "Set" || receiver_type == "MutableSet" ||
+			receiver_type == "HashSet" || receiver_type == "LinkedHashSet") {
+			return true;
+		}
+	}
+
+	if (param_type == "Map") {
+		if (receiver_type == "Map" || receiver_type == "MutableMap" ||
+			receiver_type == "HashMap" || receiver_type == "LinkedHashMap") {
+			return true;
+		}
+	}
+
+	// CharSequence matches String
+	if (param_type == "CharSequence") {
+		if (receiver_type == "String" || receiver_type == "StringBuilder" ||
+			receiver_type == "CharSequence") {
+			return true;
+		}
+	}
+
+	// Comparable
+	if (param_type == "Comparable") return true;
+
+	return false;
+}
+
 /**
  * Check if the token at the cursor is a member name in a DOT_EXPR,
  * resolve the receiver type, and show member signature information.
  */
-fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok) {
+fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, WorkspaceIndex* workspace = null) {
 	// Find a DOT_EXPR node that has this token as its member name
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
@@ -250,6 +445,15 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok) {
 					ds.appendf("\n\n%s", stdlib_matches[m].doc);
 				}
 				return ds.str_view();
+			}
+		}
+
+		// Check dependency index, filtering by receiver type.
+		// Kotlin extension functions compile to static methods where the
+		// receiver becomes the first parameter, so we match against that.
+		if (workspace != null && workspace.dep_index.initialized) {
+			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name)) {
+				return desc;
 			}
 		}
 
