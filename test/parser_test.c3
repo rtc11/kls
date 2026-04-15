@@ -3645,3 +3645,82 @@ fn void parse_property_setter_with_typed_param() @test {
 		assert(false, "expected PROPERTY_DECL 'w'");
 	};
 }
+
+// ── Backtick-quoted identifiers ─────────────────────────────────────
+
+fn void parse_backtick_fun_name() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun `should work`() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		assert(f.child_count >= 1, "expected at least 1 child");
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL, got %d", (int)fun.kind);
+		assert(fun.name == "should work", "expected 'should work', got '%s'", fun.name);
+	};
+}
+
+fn void parse_backtick_keyword_as_name() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun `return`(): Int { return 0 }"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		assert(f.child_count >= 1, "expected at least 1 child");
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "return", "expected name 'return', got '%s'", fun.name);
+	};
+}
+
+fn void parse_backtick_property_name() @test {
+	@pool() {
+		ParseResult* r = do_parse("val `class` = 42"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		assert(f.child_count >= 1, "expected at least 1 child");
+		AstNode* prop = child(r, f, 0);
+		assert(prop.kind == PROPERTY_DECL, "expected PROPERTY_DECL, got %d", (int)prop.kind);
+		assert(prop.name == "class", "expected name 'class', got '%s'", prop.name);
+	};
+}
+
+fn void parse_backtick_class_name() @test {
+	@pool() {
+		ParseResult* r = do_parse("class `MyClass` { }"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		assert(f.child_count >= 1, "expected at least 1 child");
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL, got %d", (int)cls.kind);
+		assert(cls.name == "MyClass", "expected name 'MyClass', got '%s'", cls.name);
+	};
+}
+
+fn void parse_backtick_test_style_fun() @test {
+	// Common pattern in Kotlin test code
+	@pool() {
+		String src = "fun `given valid input should return correct result`() { }";
+		ParseResult* r = do_parse(src); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "given valid input should return correct result",
+			"expected long test name, got '%s'", fun.name);
+	};
+}
+
+fn void parse_backtick_name_offset_spans_backticks() @test {
+	// name_offset/name_len should cover the backticks for correct LSP ranges
+	@pool() {
+		ParseResult* r = do_parse("fun `foo`() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "foo", "expected name 'foo', got '%s'", fun.name);
+		// `foo` starts at offset 4 (after "fun "), length 5 (backtick + foo + backtick)
+		assert(fun.name_offset == 4, "expected name_offset 4, got %d", fun.name_offset);
+		assert(fun.name_len == 5, "expected name_len 5, got %d", fun.name_len);
+	};
+}

@@ -917,3 +917,103 @@ fn void not_in_not_prefix_of_identifier() @test {
 	assert(toks[1].kind == IDENTIFIER);
 	assert(toks[1].text == "index");
 }
+
+// ── Backtick-quoted identifiers ─────────────────────────────────────
+
+fn void backtick_simple_identifier() @test {
+	Token tok = first("`foo`");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER, got %d", (int)tok.kind);
+	assert(tok.text == "foo", "expected 'foo', got '%s'", tok.text);
+}
+
+fn void backtick_keyword_escape() @test {
+	// `fun` should be IDENTIFIER, not KW_FUN
+	Token tok = first("`fun`");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER, got %d", (int)tok.kind);
+	assert(tok.text == "fun", "expected 'fun', got '%s'", tok.text);
+}
+
+fn void backtick_hard_keyword_class() @test {
+	Token tok = first("`class`");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER, got %d", (int)tok.kind);
+	assert(tok.text == "class", "expected 'class', got '%s'", tok.text);
+}
+
+fn void backtick_with_spaces() @test {
+	Token tok = first("`my test name`");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER, got %d", (int)tok.kind);
+	assert(tok.text == "my test name", "expected 'my test name', got '%s'", tok.text);
+}
+
+fn void backtick_offset_and_length() @test {
+	// offset should point at the opening backtick, len should include both backticks
+	Token tok = first("`foo`");
+	assert(tok.offset == 0, "expected offset 0, got %d", tok.offset);
+	assert(tok.len == 5, "expected len 5, got %d", tok.len);
+	assert(tok.col == 0, "expected col 0, got %d", tok.col);
+}
+
+fn void backtick_after_whitespace() @test {
+	Token[] toks = all_tokens("val `return` = 42");
+	assert(toks.len == 4, "expected 4 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == KW_VAL);
+	assert(toks[1].kind == IDENTIFIER);
+	assert(toks[1].text == "return");
+	assert(toks[1].offset == 4, "expected offset 4, got %d", toks[1].offset);
+	assert(toks[1].len == 8, "expected len 8 for `return`, got %d", toks[1].len);
+	assert(toks[2].kind == ASSIGNMENT);
+	assert(toks[3].kind == INTEGER_LITERAL);
+}
+
+fn void backtick_unterminated_is_error() @test {
+	// Unterminated backtick identifier (no closing backtick)
+	Token tok = first("`foo");
+	assert(tok.kind == ERROR, "expected ERROR for unterminated backtick, got %d", (int)tok.kind);
+}
+
+fn void backtick_empty_is_error() @test {
+	// Empty backtick identifier `` is an error
+	Token tok = first("``");
+	assert(tok.kind == ERROR, "expected ERROR for empty backtick, got %d", (int)tok.kind);
+}
+
+fn void backtick_unterminated_at_newline() @test {
+	// Newline terminates a backtick identifier as an error
+	Token tok = first("`foo\nbar");
+	assert(tok.kind == ERROR, "expected ERROR for backtick at newline, got %d", (int)tok.kind);
+}
+
+fn void backtick_in_fun_declaration() @test {
+	Token[] toks = all_tokens("fun `should work`() {}");
+	assert(toks.len == 6, "expected 6 tokens, got %d", (int)toks.len);
+	assert(toks[0].kind == KW_FUN);
+	assert(toks[1].kind == IDENTIFIER);
+	assert(toks[1].text == "should work");
+	assert(toks[2].kind == LPAREN);
+	assert(toks[3].kind == RPAREN);
+	assert(toks[4].kind == LCURL);
+	assert(toks[5].kind == RCURL);
+}
+
+fn void backtick_in_string_template_expr() @test {
+	// Inside ${...}, backtick identifiers should work
+	// Source: "${`class`}" — a string with a template expression containing a backtick identifier
+	String src = "\"${`class`}\"";
+	Token[] toks = all_tokens(src);
+	// Expect: STRING_OPEN, STRING_TEMPLATE_START, IDENTIFIER(class), RCURL, STRING_CLOSE
+	assert(toks.len >= 4, "expected at least 4 tokens, got %d", (int)toks.len);
+	// Find the IDENTIFIER token
+	bool found_ident = false;
+	foreach (tok : toks) {
+		if (tok.kind == IDENTIFIER && tok.text == "class") {
+			found_ident = true;
+		}
+	}
+	assert(found_ident, "expected IDENTIFIER 'class' inside string template");
+}
+
+fn void backtick_is_identifier_or_soft_keyword() @test {
+	// Backtick-quoted identifiers should pass is_identifier_or_soft_keyword
+	Token tok = first("`fun`");
+	assert(tok.kind.is_identifier_or_soft_keyword(), "backtick identifier should pass is_identifier_or_soft_keyword");
+}

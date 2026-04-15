@@ -92,6 +92,11 @@ fn Token Lexer.lex_normal_token(Lexer* self) {
 	uint start_col = self.col;
 	char c = self.peek();
 
+	// Backtick-quoted identifiers: `fun`, `my test`, etc.
+	if (c == '`') {
+		return self.lex_backtick_identifier(start, start_line, start_col);
+	}
+
 	// Identifiers and keywords
 	if (is_ident_start(c)) {
 		return self.lex_identifier(start, start_line, start_col);
@@ -321,6 +326,53 @@ fn Token Lexer.lex_identifier(Lexer* self, usz start, uint start_line, uint star
 	return {
 		.kind = kind,
 		.text = text,
+		.line = start_line,
+		.col = start_col,
+		.offset = (uint)start,
+		.len = (uint)(self.pos - start),
+	};
+}
+
+/**
+ * Lex a backtick-quoted identifier: `foo`, `fun`, `my test name`.
+ * The opening backtick has NOT been consumed yet.
+ * Emits IDENTIFIER with text = inner content (no backticks),
+ * offset/col = opening backtick, len = full span including backticks.
+ */
+fn Token Lexer.lex_backtick_identifier(Lexer* self, usz start, uint start_line, uint start_col) {
+	self.advance(); // consume opening backtick
+
+	// Consume characters until closing backtick, newline, or EOF
+	usz inner_start = self.pos;
+	while (self.pos < self.source.len) {
+		char ch = self.peek();
+		if (ch == '`') {
+			break;
+		}
+		if (ch == '\n') {
+			break; // unterminated: newline not allowed in backtick identifiers
+		}
+		self.advance();
+	}
+
+	usz inner_end = self.pos;
+
+	// Check for closing backtick
+	if (self.pos < self.source.len && self.peek() == '`') {
+		self.advance(); // consume closing backtick
+	} else {
+		// Unterminated backtick identifier
+		return self.make_token_at(ERROR, start, start_line, start_col);
+	}
+
+	// Empty backtick identifier `` is an error
+	if (inner_end == inner_start) {
+		return self.make_token_at(ERROR, start, start_line, start_col);
+	}
+
+	return {
+		.kind = IDENTIFIER,
+		.text = self.source[inner_start:inner_end - inner_start],
 		.line = start_line,
 		.col = start_col,
 		.offset = (uint)start,
