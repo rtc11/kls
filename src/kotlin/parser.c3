@@ -675,7 +675,35 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	// Destructuring: val (a, b) = pair
 	if (self.at(LPAREN)) {
 		self.result.nodes[idx].name = "(destructuring)";
-		self.skip_balanced_parens();
+		self.advance(); // consume '('
+		while (!self.at(RPAREN) && !self.at_eof()) {
+			if (self.at(COMMA)) {
+				self.advance(); // consume ','
+				continue;
+			}
+			if (self.at_identifier()) {
+				uint child_idx = self.add_node(PROPERTY_DECL);
+				// Inherit val/var from parent
+				self.result.nodes[child_idx].mod_flags = mods;
+				self.node_start(child_idx, self.current);
+				Token comp_name = self.expect_identifier();
+				self.node_set_name(child_idx, comp_name);
+				// Optional type annotation: (a: Int, b: String)
+				if (self.eat(COLON)) {
+					uint type_start = self.current.offset;
+					self.skip_type_ref();
+					uint type_end = self.previous.offset + self.previous.len;
+					if (type_end > type_start) {
+						self.result.nodes[child_idx].type_text = self.source[type_start:type_end - type_start];
+					}
+				}
+				self.node_end(child_idx);
+			} else {
+				// Skip unexpected token
+				self.advance();
+			}
+		}
+		self.expect(RPAREN);
 	} else if (self.at_identifier()) {
 		Token first_name = self.expect_identifier();
 
@@ -746,7 +774,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	// Property accessors: get() = ..., set(value) { ... }
 	// These are soft keywords, so they appear as KW_GET / KW_SET
 	while (self.at(KW_GET) || self.at(KW_SET)) {
-		self.skip_property_accessor();
+		self.parse_property_accessor();
 	}
 
 	// Delegation: by expression
@@ -1546,8 +1574,34 @@ fn void Parser.parse_for_stmt(Parser* self) {
 	if (self.eat(LPAREN)) {
 		// Loop variable -- may be destructuring: (a, b)
 		if (self.at(LPAREN)) {
-			// Destructuring declaration -- skip it
-			self.skip_balanced_parens();
+			// Destructuring declaration -- parse individual names as PARAM nodes
+			self.advance(); // consume '('
+			while (!self.at(RPAREN) && !self.at_eof()) {
+				if (self.at(COMMA)) {
+					self.advance(); // consume ','
+					continue;
+				}
+				if (self.at_identifier()) {
+					uint param_idx = self.add_node(PARAM);
+					self.node_start(param_idx, self.current);
+					Token name = self.expect_identifier();
+					self.node_set_name(param_idx, name);
+					// Optional type annotation: (a: Int, b: String)
+					if (self.eat(COLON)) {
+						uint type_start = self.current.offset;
+						self.skip_type_ref();
+						uint type_end = self.previous.offset + self.previous.len;
+						if (type_end > type_start) {
+							self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+						}
+					}
+					self.node_end(param_idx);
+				} else {
+					// Skip unexpected token
+					self.advance();
+				}
+			}
+			self.expect(RPAREN);
 		} else if (self.at_identifier()) {
 			// Simple loop variable -- create a PARAM node for it
 			uint param_idx = self.add_node(PARAM);
@@ -1572,8 +1626,10 @@ fn void Parser.parse_for_stmt(Parser* self) {
 			self.advance();
 		}
 
-		// Skip collection expression until closing ')'
-		self.skip_until_closing_paren();
+		// Parse collection expression (creates an AST node for type resolution)
+		if (!self.at(RPAREN) && !self.at_eof()) {
+			self.parse_expression(PREC_NONE);
+		}
 
 		self.expect(RPAREN);
 	}
@@ -3010,48 +3066,76 @@ fn void Parser.skip_param_default(Parser* self) {
 /**
  * Skip a property accessor: get() = ... or set(value) { ... }
  */
-fn void Parser.skip_property_accessor(Parser* self) {
+/**
+ * Parse a property accessor (get/set) into a FUN_DECL child node.
+ *
+ * Kotlin property accessors:
+ *   val x: Int
+ *       get() = field + 1
+ *
+ *   var y: Int
+ *       get() { return field }
+ *       set(value) { field = value }
+ *
+ * We represent them as FUN_DECL children of the PROPERTY_DECL, with name "get" or "set".
+ */
+fn void Parser.parse_property_accessor(Parser* self) {
+	uint idx = self.add_node(FUN_DECL);
+	self.node_start(idx, self.current);
+	uint children_start = self.result.node_count;
+
+	// Set name to "get" or "set"
+	self.node_set_name(idx, self.current);
 	self.advance(); // consume 'get' or 'set'
 
-	// Annotations and modifiers before the accessor
-	// (already consumed by parse_modifiers in some paths)
-
-	// Parameters for set
+	// Parameters for set: set(value) or set(value: Type)
 	if (self.at(LPAREN)) {
-		self.skip_balanced_parens();
-	}
-
-	// Return type
-	if (self.eat(COLON)) {
-		self.skip_type_ref();
-	}
-
-	// Body
-	if (self.at(LCURL)) {
-		// Block body
-		int depth = 1;
-		self.advance(); // consume '{'
-		while (depth > 0 && !self.at_eof()) {
-			if (self.at(STRING_OPEN) || self.at(MULTILINE_STRING_OPEN)) {
-				self.skip_string_tokens();
+		self.advance(); // consume '('
+		while (!self.at(RPAREN) && !self.at_eof()) {
+			if (self.at(COMMA)) {
+				self.advance();
 				continue;
 			}
-			if (self.at(LCURL)) {
-				depth++;
-			} else if (self.at(RCURL)) {
-				depth--;
-			}
-			if (depth > 0) {
+			if (self.at_identifier()) {
+				uint param_idx = self.add_node(PARAM);
+				self.node_start(param_idx, self.current);
+				Token name = self.expect_identifier();
+				self.node_set_name(param_idx, name);
+				if (self.eat(COLON)) {
+					uint type_start = self.current.offset;
+					self.skip_type_ref();
+					uint type_end = self.previous.offset + self.previous.len;
+					if (type_end > type_start) {
+						self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+					}
+				}
+				self.node_end(param_idx);
+			} else {
 				self.advance();
 			}
 		}
-		if (self.at(RCURL)) {
-			self.advance();
+		self.expect(RPAREN);
+	}
+
+	// Return type annotation
+	if (self.eat(COLON)) {
+		uint type_start = self.current.offset;
+		self.skip_type_ref();
+		uint type_end = self.previous.offset + self.previous.len;
+		if (type_end > type_start) {
+			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
 		}
+	}
+
+	// Body: block or expression-body
+	if (self.at(LCURL)) {
+		self.parse_block();
 	} else if (self.eat(ASSIGNMENT)) {
-		// Expression body
 		self.parse_expression_body();
 	}
+
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
 }
 
 /**

@@ -466,6 +466,11 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	// (e.g., val x = listOf("a"); x.filter { it } — x's type is inferred
 	// in Phase 5, but the filter chain needs another expression pass)
 	resolve_expression_types(pr, info);
+
+	// Phase 7: Resolve destructuring component types
+	// val (a, b) = pair -> a: Pair.component1, b: Pair.component2
+	// for ((k, v) in map) -> k: Map.Entry.component1, v: Map.Entry.component2
+	resolve_destructuring_types(pr, info);
 }
 
 /**
@@ -637,8 +642,194 @@ fn void resolve_initializer_types(ParseResult* pr, TypeInfo* info) {
 }
 
 /**
- * Phase 4: Propagate types through expression nodes.
+ * Phase 7: Resolve types for destructuring declaration components.
+ *
+ * For val (a, b) = expr:
+ *   The parent PROPERTY_DECL has name "(destructuring)" with child PROPERTY_DECL nodes.
+ *   If the initializer type is Pair<A,B>, child 0 gets A, child 1 gets B.
+ *   If Triple<A,B,C>, child 0 gets A, child 1 gets B, child 2 gets C.
+ *
+ * For for ((k, v) in map):
+ *   The FOR_STMT has PARAM children from the destructuring.
+ *   If iterating a Map<K,V>, children get K and V.
+ *   If iterating a List<Pair<A,B>>, children get A and B.
  */
+fn void resolve_destructuring_types(ParseResult* pr, TypeInfo* info) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+
+		// Case 1: val (a, b) = expr
+		if (node.kind == PROPERTY_DECL && node.name == "(destructuring)") {
+			// Find the initializer type (first expression child of this node)
+			TypeRef init_type = TYPE_UNKNOWN;
+			for (uint j = 0; j < pr.node_count; j++) {
+				AstNode* child = &pr.nodes[j];
+				if (child.parent != i) continue;
+				// Skip child PROPERTY_DECL nodes (they are the destructured vars)
+				if (child.kind == PROPERTY_DECL || child.kind == PARAM ||
+					child.kind == TYPE_PARAM || child.kind == BLOCK ||
+					child.kind == TYPE_REF) continue;
+				// This is an expression child — use its type
+				if (info.has_type[j]) {
+					init_type = info.node_types[j];
+				}
+				break;
+			}
+
+			if (init_type.kind == UNKNOWN) continue;
+
+			// Assign component types to child PROPERTY_DECL nodes
+			assign_component_types(pr, info, i, init_type);
+			continue;
+		}
+
+		// Case 2: for ((k, v) in map) — FOR_STMT with multiple PARAM children
+		if (node.kind == FOR_STMT) {
+			// Count PARAM children to detect destructuring
+			uint param_count = ast::count_children_of_kind(pr, node, PARAM);
+			if (param_count < 2) continue;
+
+			// Find the collection type: look for the expression after 'in'
+			// The collection expression is a non-PARAM, non-BLOCK child
+			TypeRef collection_type = TYPE_UNKNOWN;
+			for (uint j = 0; j < pr.node_count; j++) {
+				AstNode* child = &pr.nodes[j];
+				if (child.parent != i) continue;
+				if (child.kind == PARAM || child.kind == BLOCK) continue;
+				if (info.has_type[j]) {
+					collection_type = info.node_types[j];
+				}
+				break;
+			}
+
+			if (collection_type.kind == UNKNOWN) continue;
+
+			// Determine element type for the iteration
+			TypeRef element_type = get_iteration_element_type(collection_type);
+			if (element_type.kind == UNKNOWN) continue;
+
+			// Assign component types to the PARAM children
+			assign_component_types_for_params(pr, info, i, element_type);
+		}
+	}
+}
+
+/**
+ * Assign componentN types to child PROPERTY_DECL nodes of a destructuring parent.
+ */
+fn void assign_component_types(ParseResult* pr, TypeInfo* info, uint parent_idx, TypeRef init_type) {
+	uint comp_index = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != parent_idx || child.kind != PROPERTY_DECL) continue;
+		// Skip if child already has an explicit type annotation
+		if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
+			TypeRef comp_type = get_component_type(init_type, comp_index);
+			if (comp_type.kind != UNKNOWN) {
+				info.node_types[j] = comp_type;
+				info.has_type[j] = true;
+			}
+		}
+		comp_index++;
+	}
+}
+
+/**
+ * Assign componentN types to PARAM children of a FOR_STMT with destructuring.
+ */
+fn void assign_component_types_for_params(ParseResult* pr, TypeInfo* info, uint parent_idx, TypeRef element_type) {
+	uint comp_index = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != parent_idx || child.kind != PARAM) continue;
+		// Skip if child already has an explicit type annotation
+		if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
+			TypeRef comp_type = get_component_type(element_type, comp_index);
+			if (comp_type.kind != UNKNOWN) {
+				info.node_types[j] = comp_type;
+				info.has_type[j] = true;
+			}
+		}
+		comp_index++;
+	}
+}
+
+/**
+ * Get the Nth component type from a type that supports destructuring.
+ *
+ * Supported types:
+ * - Pair<A, B>: component1 = A, component2 = B
+ * - Triple<A, B, C>: component1 = A, component2 = B, component3 = C
+ * - Map.Entry<K, V>: component1 = K, component2 = V
+ * - Any data class with known type args (positional)
+ */
+fn TypeRef get_component_type(TypeRef source_type, uint index) {
+	// For generic types with type arguments, map by position
+	if (source_type.kind == GENERIC && source_type.type_arg_count > index) {
+		String arg_name = source_type.type_arg_names[index];
+		bool arg_nullable = source_type.type_arg_nullable[index];
+		if (arg_name.len > 0) {
+			return { .kind = SIMPLE, .name = arg_name, .nullable = arg_nullable };
+		}
+	}
+
+	// For simple types that are known Pair/Triple (without explicit type args somehow)
+	// This shouldn't normally happen, but handle gracefully
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Get the element type for iteration over a collection.
+ *
+ * - Map<K, V> -> Map.Entry<K, V> (represented as Pair<K, V> for destructuring)
+ * - List<T> / Set<T> / Collection<T> / Iterable<T> -> T
+ * - Array<T> -> T
+ */
+fn TypeRef get_iteration_element_type(TypeRef collection_type) {
+	if (collection_type.kind != GENERIC || collection_type.type_arg_count == 0) {
+		return TYPE_UNKNOWN;
+	}
+
+	String name = collection_type.name;
+
+	// Map<K, V> iterates as Map.Entry<K, V> — destructures to (K, V)
+	if (name == "Map" || name == "MutableMap" || name == "HashMap" || name == "LinkedHashMap" || name == "SortedMap" || name == "TreeMap") {
+		if (collection_type.type_arg_count >= 2) {
+			// Return a Pair-like type with K, V so destructuring works
+			return {
+				.kind = GENERIC,
+				.name = "Map.Entry",
+				.type_arg_count = 2,
+				.type_arg_names = {
+					collection_type.type_arg_names[0],
+					collection_type.type_arg_names[1],
+					"", "", "", "", "", ""
+				},
+				.type_arg_nullable = {
+					collection_type.type_arg_nullable[0],
+					collection_type.type_arg_nullable[1],
+					false, false, false, false, false, false
+				},
+			};
+		}
+	}
+
+	// List<Pair<A,B>>, Set<Pair<A,B>> etc. — element type is the first type arg
+	// But the element itself needs to be resolved to handle nested generics
+	// For now, just return the element as a simple type from first arg
+	if (name == "List" || name == "MutableList" || name == "Set" || name == "MutableSet" ||
+		name == "Collection" || name == "Iterable" || name == "Sequence" || name == "Array") {
+		if (collection_type.type_arg_count >= 1) {
+			String elem = collection_type.type_arg_names[0];
+			bool elem_nullable = collection_type.type_arg_nullable[0];
+			if (elem.len > 0) {
+				return { .kind = SIMPLE, .name = elem, .nullable = elem_nullable };
+			}
+		}
+	}
+
+	return TYPE_UNKNOWN;
+}
 fn void resolve_expression_types(ParseResult* pr, TypeInfo* info) {
 	// Multiple passes to propagate types through chains
 	for (int pass = 0; pass < 3; pass++) {
@@ -1103,6 +1294,24 @@ fn TypeRef check_null_comparison(ParseResult* pr, TypeInfo* info, uint expr_idx,
 
 // ── Call expression resolution ─────────────────────────────────────
 
+/**
+ * Count the number of arguments in a CALL_EXPR node.
+ * Skips the callee NAME_EXPR and trailing LAMBDA_EXPR.
+ */
+fn uint count_call_args(ParseResult* pr, uint call_idx, String callee_name) {
+	uint count = 0;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != call_idx) continue;
+		// Skip the callee NAME_EXPR
+		if (child.kind == NAME_EXPR && child.name == callee_name) continue;
+		// Skip trailing lambdas (they count as a parameter but not a positional arg)
+		if (child.kind == LAMBDA_EXPR) continue;
+		count++;
+	}
+	return count;
+}
+
 fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
@@ -1116,14 +1325,37 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		return known;
 	}
 
-	// Search for a FUN_DECL matching this name
+	// Count arguments of this call expression
+	uint call_arg_count = count_call_args(pr, idx, node.name);
+
+	// Search for best FUN_DECL matching this name (prefer param count match)
+	uint best_idx = 0;
+	bool found_any = false;
+	bool found_exact = false;
+
 	for (uint j = 0; j < pr.node_count; j++) {
 		AstNode* candidate = &pr.nodes[j];
 		if (candidate.kind != FUN_DECL) continue;
 		if (candidate.name != node.name) continue;
 
-		if (info.has_type[j]) {
-			return info.node_types[j];
+		if (!found_any) {
+			best_idx = j;
+			found_any = true;
+		}
+
+		// Score by parameter count match
+		if (!found_exact) {
+			uint param_count = ast::count_children_of_kind(pr, candidate, PARAM);
+			if (param_count == call_arg_count) {
+				best_idx = j;
+				found_exact = true;
+			}
+		}
+	}
+
+	if (found_any) {
+		if (info.has_type[best_idx]) {
+			return info.node_types[best_idx];
 		}
 		return TYPE_UNKNOWN;
 	}
@@ -1525,6 +1757,48 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 	// Scope functions: also/apply return receiver type
 	if (member_name == "also" || member_name == "apply") {
 		return receiver;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Resolve a member type through inheritance. When the receiver type is not
+ * a hardcoded type, check its supertypes (if provided) against the member
+ * table. This allows types that extend stdlib types (e.g., class StringList : List<String>)
+ * to resolve inherited member types.
+ *
+ * supertypes: array of supertype name strings
+ * count: number of supertypes
+ */
+fn TypeRef resolve_member_type_with_supertypes(TypeRef receiver, String member_name,
+		String[] supertypes, usz count) {
+	// Try direct first
+	TypeRef direct = resolve_member_type(receiver, member_name);
+	if (direct.kind != UNKNOWN) return direct;
+
+	// Try supertypes
+	for (usz i = 0; i < count; i++) {
+		String st = supertypes[i];
+		if (st.len == 0) continue;
+
+		// Build a TypeRef for the supertype
+		TypeRef super_ref = { .kind = SIMPLE, .name = st };
+
+		// If receiver has generic type args, propagate them to the supertype
+		// This handles cases like: class StringList : List<String>
+		// where receiver has type_arg_count > 0 from the class declaration
+		if (receiver.kind == GENERIC && receiver.type_arg_count > 0) {
+			super_ref.kind = GENERIC;
+			super_ref.type_arg_count = receiver.type_arg_count;
+			for (usz j = 0; j < receiver.type_arg_count && j < MAX_TYPE_ARGS; j++) {
+				super_ref.type_arg_names[j] = receiver.type_arg_names[j];
+				super_ref.type_arg_nullable[j] = receiver.type_arg_nullable[j];
+			}
+		}
+
+		TypeRef result = resolve_member_type(super_ref, member_name);
+		if (result.kind != UNKNOWN) return result;
 	}
 
 	return TYPE_UNKNOWN;

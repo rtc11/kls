@@ -710,3 +710,186 @@ fn int symbol_kind_to_lsp(SymbolKind kind) {
 		case TYPEALIAS: return 5;  // Class (no TypeAlias in LSP)
 	}
 }
+
+// ── Import-aware visibility ───────────────────────────────────────
+
+// Maximum number of imports per file we track
+const usz MAX_IMPORTS = 256;
+
+struct ImportMap {
+	String package_name;             // this file's package
+	usz import_count;
+	String[MAX_IMPORTS] import_paths; // full import paths (e.g. "com.example.Foo")
+	String[MAX_IMPORTS] import_names; // simple name or alias (e.g. "Foo" or alias "Bar")
+	bool[MAX_IMPORTS] is_star;        // true if wildcard import (com.example.*)
+	String[MAX_IMPORTS] star_packages;// for star imports, the package prefix (com.example)
+}
+
+/**
+ * Build an import map from a parsed file's AST.
+ * Extracts the package declaration and all import declarations.
+ */
+fn ImportMap build_import_map(ParseResult* pr) {
+	ImportMap map;
+	map.package_name = "";
+	map.import_count = 0;
+
+	if (pr == null || pr.node_count == 0) return map;
+
+	// FILE is node 0
+	for (uint i = 1; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.parent != 0) continue; // only direct children of FILE
+
+		if (node.kind == PACKAGE_DECL) {
+			map.package_name = node.extra_text;
+			continue;
+		}
+
+		if (node.kind == IMPORT_DECL) {
+			if (map.import_count >= MAX_IMPORTS) break;
+			String path = node.extra_text;
+			if (path.len == 0) continue;
+
+			usz idx = map.import_count;
+
+			// Check for star import: path ends with ".*"
+			if (path.len >= 2 && path[path.len - 2] == '.' && path[path.len - 1] == '*') {
+				map.is_star[idx] = true;
+				map.star_packages[idx] = path[:path.len - 2]; // trim ".*"
+				map.import_paths[idx] = path;
+				map.import_names[idx] = "*";
+			} else {
+				map.is_star[idx] = false;
+				map.star_packages[idx] = "";
+				map.import_paths[idx] = path;
+
+				// Determine simple name: alias if present, otherwise last path segment
+				if (node.name.len > 0) {
+					// Has alias: import com.example.Foo as Bar
+					map.import_names[idx] = node.name;
+				} else {
+					// Extract last segment from path
+					usz last_dot = path.len;
+					for (usz j = path.len; j > 0; j--) {
+						if (path[j - 1] == '.') {
+							last_dot = j - 1;
+							break;
+						}
+					}
+					if (last_dot < path.len) {
+						map.import_names[idx] = path[last_dot + 1..];
+					} else {
+						map.import_names[idx] = path;
+					}
+				}
+			}
+			map.import_count++;
+			continue;
+		}
+	}
+	return map;
+}
+
+/**
+ * Check if a workspace symbol is visible from a file with the given import map.
+ *
+ * A symbol is visible if:
+ * 1. It's in the same package as the importing file
+ * 2. It's in a package covered by a star import (import com.example.*)
+ * 3. It's explicitly imported by name (import com.example.Foo)
+ * 4. It's in a Kotlin auto-imported package (kotlin.*, kotlin.collections.*, etc.)
+ *
+ * For aliased imports, the alias name must be used instead of the real name.
+ * Returns the name to use (alias or real name), or empty string if not visible.
+ */
+fn String is_symbol_visible(WorkspaceSymbol* sym, ImportMap* imports, String lookup_name) {
+	// Same package — always visible
+	if (sym.package_name.len > 0 && sym.package_name == imports.package_name) {
+		return sym.name;
+	}
+
+	// Kotlin auto-imported packages — always visible
+	if (is_auto_imported_package(sym.package_name)) {
+		return sym.name;
+	}
+
+	// Check explicit and star imports
+	for (usz i = 0; i < imports.import_count; i++) {
+		if (imports.is_star[i]) {
+			// Star import: import com.example.*
+			// Matches any symbol whose package equals the star prefix
+			if (sym.package_name == imports.star_packages[i]) {
+				return sym.name;
+			}
+		} else {
+			// Explicit import: check if import path matches package.name
+			// The import path should be "package.SymbolName"
+			// If it has an alias, the lookup_name should match the alias
+			String import_name = imports.import_names[i];
+			String import_path = imports.import_paths[i];
+
+			// Check if this import refers to this symbol
+			if (sym.name == get_import_real_name(import_path) &&
+				sym.package_name == get_import_package(import_path)) {
+				// If the import has an alias, only match the alias
+				if (import_name != sym.name) {
+					// Aliased import: only match when lookup uses the alias
+					if (lookup_name == import_name) {
+						return import_name;
+					}
+				} else {
+					return sym.name;
+				}
+			}
+		}
+	}
+
+	// No package info on symbol — treat as same-package (backward compat)
+	if (sym.package_name.len == 0) {
+		return sym.name;
+	}
+
+	return "";
+}
+
+/**
+ * Check if a package is auto-imported in Kotlin (always available without explicit import).
+ */
+fn bool is_auto_imported_package(String package_name) {
+	if (package_name.len == 0) return false;
+	return package_name == "kotlin" ||
+		package_name == "kotlin.annotation" ||
+		package_name == "kotlin.collections" ||
+		package_name == "kotlin.comparisons" ||
+		package_name == "kotlin.io" ||
+		package_name == "kotlin.ranges" ||
+		package_name == "kotlin.sequences" ||
+		package_name == "kotlin.text";
+}
+
+/**
+ * Extract the simple name (last segment) from a fully qualified import path.
+ * e.g., "com.example.Foo" -> "Foo"
+ */
+fn String get_import_real_name(String path) {
+	for (usz i = path.len; i > 0; i--) {
+		if (path[i - 1] == '.') {
+			return path[i..];
+		}
+	}
+	return path;
+}
+
+/**
+ * Extract the package part from a fully qualified import path.
+ * e.g., "com.example.Foo" -> "com.example"
+ */
+fn String get_import_package(String path) {
+	for (usz i = path.len; i > 0; i--) {
+		if (path[i - 1] == '.') {
+			return path[:i - 1];
+		}
+	}
+	return "";
+}

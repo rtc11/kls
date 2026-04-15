@@ -93,7 +93,8 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	// Add workspace completions from other files
 	if (workspace != null) {
-		add_workspace_completions(items, workspace, prefix, uri);
+		ParseResult* pr = store.get_ast(uri) ?? null;
+		add_workspace_completions(items, workspace, prefix, uri, pr);
 
 		// Add dependency completions from indexed JARs
 		if (workspace.dep_index.initialized) {
@@ -727,11 +728,32 @@ fn void build_property_signature_from_cache(DString* sig, MemberDecl* m) {
  */
 fn void add_workspace_supertype_members(Object* items, WorkspaceIndex* workspace, DocumentStore* store,
 		String supertype_name, String prefix) {
-	if (supertype_name.len == 0) return;
+	add_workspace_supertype_members_depth(items, workspace, store, supertype_name, prefix, 0);
+}
+
+const int MAX_SUPERTYPE_DEPTH = 5;
+
+fn void add_workspace_supertype_members_depth(Object* items, WorkspaceIndex* workspace, DocumentStore* store,
+		String supertype_name, String prefix, int depth) {
+	if (supertype_name.len == 0 || depth > MAX_SUPERTYPE_DEPTH) return;
 
 	// Try the member cache first (fast path)
 	if (try members = workspace.lookup_members(supertype_name)) {
 		add_members_from_cache(items, members, prefix);
+
+		// Continue walking supertypes
+		List{usz}* indices = workspace.lookup_by_name(supertype_name) ?? null;
+		if (indices != null) {
+			for (usz i = 0; i < indices.len(); i++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+				if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+					sym.kind != SymbolKind.OBJECT) continue;
+				for (usz s = 0; s < sym.supertype_count; s++) {
+					add_workspace_supertype_members_depth(items, workspace, store, sym.supertypes[s], prefix, depth + 1);
+				}
+				return;
+			}
+		}
 		return;
 	}
 
@@ -765,7 +787,12 @@ fn void add_workspace_supertype_members(Object* items, WorkspaceIndex* workspace
 		parser::parse(content, pr);
 
 		add_members_from_class_ast(items, pr, supertype_name, prefix);
-		return; // Only one level of supertypes (avoids infinite recursion)
+
+		// Continue walking supertypes
+		for (usz s = 0; s < sym.supertype_count; s++) {
+			add_workspace_supertype_members_depth(items, workspace, store, sym.supertypes[s], prefix, depth + 1);
+		}
+		return;
 	}
 }
 
@@ -828,8 +855,17 @@ fn void add_stdlib_receiver_completions(Object* items, TypeRef* receiver_type, S
  * Add completion items from the workspace index for symbols matching
  * the given prefix. Skips symbols from the current document (already
  * covered by identifier completions) and deduplicates by name.
+ * Uses import map to prioritize imported symbols.
  */
-fn void add_workspace_completions(Object* items, WorkspaceIndex* workspace, String prefix, String current_uri) {
+fn void add_workspace_completions(Object* items, WorkspaceIndex* workspace, String prefix, String current_uri, ParseResult* pr) {
+	// Build import map for import-aware filtering
+	ImportMap imports;
+	if (pr != null) {
+		imports = workspace::build_import_map(pr);
+	} else {
+		imports = (ImportMap) {};
+	}
+
 	// Track seen names to avoid duplicates (also dedup against local items)
 	String[256] seen_buf;
 	usz seen_count = 0;
@@ -850,16 +886,23 @@ fn void add_workspace_completions(Object* items, WorkspaceIndex* workspace, Stri
 		// Skip symbols from current document
 		if (sym.uri == current_uri) continue;
 
-		// Filter by prefix
-		if (prefix.len > 0 && !sym.name.starts_with(prefix)) continue;
+		// Check import visibility
+		String visible_name = workspace::is_symbol_visible(sym, &imports, sym.name);
+		bool is_imported = visible_name.len > 0;
+
+		// Use visible name (alias) for display if available, otherwise real name
+		String display_name = is_imported ? visible_name : sym.name;
+
+		// Filter by prefix (using display name for alias matching)
+		if (prefix.len > 0 && !display_name.starts_with(prefix)) continue;
 
 		// Skip exact matches
-		if (prefix.len > 0 && sym.name == prefix) continue;
+		if (prefix.len > 0 && display_name == prefix) continue;
 
 		// Dedup check
 		bool already_seen = false;
 		for (usz j = 0; j < seen_count; j++) {
-			if (seen_buf[j] == sym.name) {
+			if (seen_buf[j] == display_name) {
 				already_seen = true;
 				break;
 			}
@@ -867,15 +910,24 @@ fn void add_workspace_completions(Object* items, WorkspaceIndex* workspace, Stri
 		if (already_seen) continue;
 
 		if (seen_count < 256) {
-			seen_buf[seen_count] = sym.name;
+			seen_buf[seen_count] = display_name;
 			seen_count++;
 		}
 
 		Object* item = object::new_obj(tmem);
-		item.set("label", sym.name);
+		item.set("label", display_name);
 		item.set("kind", symbol_kind_to_completion_kind(sym.kind));
 		// Detail shows file origin
 		item.set("detail", sym.uri);
+		// Imported symbols sort before non-imported ones
+		if (is_imported) {
+			item.set("sortText", display_name);
+		} else {
+			DString sort_text;
+			sort_text.tinit();
+			sort_text.appendf("~%s", display_name); // '~' sorts after letters
+			item.set("sortText", sort_text.str_view());
+		}
 		items.push(item);
 	}
 }

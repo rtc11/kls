@@ -3169,3 +3169,311 @@ fn void parse_when_with_subject_expression() @test {
 		assert(found_when, "expected WHEN_EXPR");
 	};
 }
+
+// ── Destructuring declarations ──────────────────────────────────────
+
+fn void parse_destructuring_val_pair() @test {
+	@pool() {
+		String content = `fun test() { val (a, b) = pair }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Find the destructuring PROPERTY_DECL
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "(destructuring)") {
+				found = true;
+				// Should have 2 child PROPERTY_DECL nodes for 'a' and 'b'
+				uint child_count = ast::count_children_of_kind(r, &r.nodes[i], PROPERTY_DECL);
+				assert(child_count == 2, "expected 2 child PROPERTY_DECL, got %d", (int)child_count);
+
+				// First child: 'a'
+				AstNode* c0 = child(r, &r.nodes[i], 0);
+				assert(c0.kind == PROPERTY_DECL, "child 0 should be PROPERTY_DECL");
+				assert(c0.name == "a", "child 0 name should be 'a', got '%s'", c0.name);
+
+				// Second child: 'b'
+				AstNode* c1 = child(r, &r.nodes[i], 1);
+				assert(c1.kind == PROPERTY_DECL, "child 1 should be PROPERTY_DECL");
+				assert(c1.name == "b", "child 1 name should be 'b', got '%s'", c1.name);
+				break;
+			}
+		}
+		assert(found, "expected destructuring PROPERTY_DECL");
+	};
+}
+
+fn void parse_destructuring_val_triple() @test {
+	@pool() {
+		String content = `fun test() { val (x, y, z) = triple }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "(destructuring)") {
+				uint child_count = ast::count_children_of_kind(r, &r.nodes[i], PROPERTY_DECL);
+				assert(child_count == 3, "expected 3 child PROPERTY_DECL, got %d", (int)child_count);
+				AstNode* c0 = child(r, &r.nodes[i], 0);
+				assert(c0.name == "x", "child 0 name should be 'x', got '%s'", c0.name);
+				AstNode* c1 = child(r, &r.nodes[i], 1);
+				assert(c1.name == "y", "child 1 name should be 'y', got '%s'", c1.name);
+				AstNode* c2 = child(r, &r.nodes[i], 2);
+				assert(c2.name == "z", "child 2 name should be 'z', got '%s'", c2.name);
+				return;
+			}
+		}
+		assert(false, "expected destructuring PROPERTY_DECL");
+	};
+}
+
+fn void parse_destructuring_val_with_types() @test {
+	@pool() {
+		String content = `fun test() { val (a: Int, b: String) = pair }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "(destructuring)") {
+				AstNode* c0 = child(r, &r.nodes[i], 0);
+				assert(c0.name == "a", "child 0 name should be 'a', got '%s'", c0.name);
+				assert(c0.type_text == "Int", "child 0 type should be 'Int', got '%s'", c0.type_text);
+
+				AstNode* c1 = child(r, &r.nodes[i], 1);
+				assert(c1.name == "b", "child 1 name should be 'b', got '%s'", c1.name);
+				assert(c1.type_text == "String", "child 1 type should be 'String', got '%s'", c1.type_text);
+				return;
+			}
+		}
+		assert(false, "expected destructuring PROPERTY_DECL");
+	};
+}
+
+fn void parse_destructuring_var() @test {
+	@pool() {
+		String content = `fun test() { var (a, b) = mutable }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "(destructuring)") {
+				// Children should inherit MOD_VAR
+				AstNode* c0 = child(r, &r.nodes[i], 0);
+				assert(c0.mod_flags & ast::MOD_VAR != 0, "child 0 should have MOD_VAR");
+				AstNode* c1 = child(r, &r.nodes[i], 1);
+				assert(c1.mod_flags & ast::MOD_VAR != 0, "child 1 should have MOD_VAR");
+				return;
+			}
+		}
+		assert(false, "expected destructuring PROPERTY_DECL");
+	};
+}
+
+fn void parse_for_destructuring() @test {
+	@pool() {
+		String content = `fun test() { for ((k, v) in map) { } }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FOR_STMT) {
+				uint param_count = ast::count_children_of_kind(r, &r.nodes[i], PARAM);
+				assert(param_count == 2, "expected 2 PARAM children in for-destructuring, got %d", (int)param_count);
+
+				// Find first two PARAMs
+				uint found = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == PARAM) {
+						if (found == 0) {
+							assert(r.nodes[j].name == "k", "param 0 should be 'k', got '%s'", r.nodes[j].name);
+						} else if (found == 1) {
+							assert(r.nodes[j].name == "v", "param 1 should be 'v', got '%s'", r.nodes[j].name);
+						}
+						found++;
+					}
+				}
+				return;
+			}
+		}
+		assert(false, "expected FOR_STMT");
+	};
+}
+
+fn void parse_for_destructuring_with_types() @test {
+	@pool() {
+		String content = `fun test() { for ((k: String, v: Int) in map) { } }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FOR_STMT) {
+				uint found = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == PARAM) {
+						if (found == 0) {
+							assert(r.nodes[j].name == "k", "param 0 should be 'k'");
+							assert(r.nodes[j].type_text == "String", "param 0 type should be 'String', got '%s'", r.nodes[j].type_text);
+						} else if (found == 1) {
+							assert(r.nodes[j].name == "v", "param 1 should be 'v'");
+							assert(r.nodes[j].type_text == "Int", "param 1 type should be 'Int', got '%s'", r.nodes[j].type_text);
+						}
+						found++;
+					}
+				}
+				assert(found == 2, "expected 2 params, got %d", found);
+				return;
+			}
+		}
+		assert(false, "expected FOR_STMT");
+	};
+}
+
+// ── Property accessor parsing ───────────────────────────────────────
+
+fn void parse_property_getter_expression() @test {
+	@pool() {
+		String content =
+`class Foo {
+    val x: Int
+        get() = 42
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Find property 'x'
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "x") {
+				// Should have a FUN_DECL child named "get"
+				uint getter_count = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == FUN_DECL && r.nodes[j].name == "get") {
+						getter_count++;
+					}
+				}
+				assert(getter_count == 1, "expected 1 getter FUN_DECL, got %d", getter_count);
+				return;
+			}
+		}
+		assert(false, "expected PROPERTY_DECL 'x'");
+	};
+}
+
+fn void parse_property_getter_block() @test {
+	@pool() {
+		String content =
+`class Foo {
+    val x: Int
+        get() { return field + 1 }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "x") {
+				uint getter_count = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == FUN_DECL && r.nodes[j].name == "get") {
+						getter_count++;
+						// The getter should have a BLOCK child
+						uint block_count = ast::count_children_of_kind(r, &r.nodes[j], BLOCK);
+						assert(block_count == 1, "getter should have 1 BLOCK child, got %d", block_count);
+					}
+				}
+				assert(getter_count == 1, "expected 1 getter FUN_DECL, got %d", getter_count);
+				return;
+			}
+		}
+		assert(false, "expected PROPERTY_DECL 'x'");
+	};
+}
+
+fn void parse_property_setter_with_param() @test {
+	@pool() {
+		String content =
+`class Foo {
+    var y: Int = 0
+        set(value) { field = value }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "y") {
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == FUN_DECL && r.nodes[j].name == "set") {
+						// Setter should have a PARAM child named "value"
+						uint param_count = ast::count_children_of_kind(r, &r.nodes[j], PARAM);
+						assert(param_count == 1, "setter should have 1 PARAM, got %d", param_count);
+						for (uint k = 0; k < r.node_count; k++) {
+							if (r.nodes[k].parent == j && r.nodes[k].kind == PARAM) {
+								assert(r.nodes[k].name == "value", "setter param should be 'value', got '%s'", r.nodes[k].name);
+								return;
+							}
+						}
+					}
+				}
+				assert(false, "expected setter FUN_DECL for 'y'");
+			}
+		}
+		assert(false, "expected PROPERTY_DECL 'y'");
+	};
+}
+
+fn void parse_property_getter_and_setter() @test {
+	@pool() {
+		String content =
+`class Foo {
+    var z: String = ""
+        get() = field.uppercase()
+        set(value) { field = value.trim() }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "z") {
+				uint getter_count = 0;
+				uint setter_count = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == FUN_DECL) {
+						if (r.nodes[j].name == "get") getter_count++;
+						if (r.nodes[j].name == "set") setter_count++;
+					}
+				}
+				assert(getter_count == 1, "expected 1 getter, got %d", getter_count);
+				assert(setter_count == 1, "expected 1 setter, got %d", setter_count);
+				return;
+			}
+		}
+		assert(false, "expected PROPERTY_DECL 'z'");
+	};
+}
+
+fn void parse_property_setter_with_typed_param() @test {
+	@pool() {
+		String content =
+`class Foo {
+    var w: Int = 0
+        set(v: Int) { field = v }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "w") {
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == FUN_DECL && r.nodes[j].name == "set") {
+						for (uint k = 0; k < r.node_count; k++) {
+							if (r.nodes[k].parent == j && r.nodes[k].kind == PARAM) {
+								assert(r.nodes[k].name == "v", "setter param should be 'v', got '%s'", r.nodes[k].name);
+								assert(r.nodes[k].type_text == "Int", "setter param type should be 'Int', got '%s'", r.nodes[k].type_text);
+								return;
+							}
+						}
+					}
+				}
+				assert(false, "expected setter FUN_DECL for 'w'");
+			}
+		}
+		assert(false, "expected PROPERTY_DECL 'w'");
+	};
+}

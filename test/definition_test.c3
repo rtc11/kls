@@ -813,3 +813,59 @@ fun main() {
 		assert(line == 4, "expected line 4 for local src, got %d", line);
 	};
 }
+
+// ── Overload resolution: go-to-definition picks correct overload ───
+
+fn void definition_overload_two_params() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process(x: Int): String = ""
+fun process(x: Int, y: Int): Boolean = true
+fun main() {
+    process(1, 2)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "process" in the call at line 3 — process(1, 2) has 2 args
+		Object* params = make_params("file:///test.kt", 3, 5);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected a Location result");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to the 2-param overload at line 1
+		assert(line == 1, "expected line 1 for 2-param overload, got %d", line);
+	};
+}
+
+fn void definition_overload_zero_params() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun create(): String = ""
+fun create(name: String): Int = 0
+fun main() {
+    create()
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "create" in create() call at line 3 — 0 args
+		Object* params = make_params("file:///test.kt", 3, 5);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected a Location result");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to the 0-param overload at line 0
+		assert(line == 0, "expected line 0 for 0-param overload, got %d", line);
+	};
+}

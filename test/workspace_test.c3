@@ -3,6 +3,7 @@ module kls::test::workspace_test;
 import kls::workspace;
 import kls::kotlin::symbols;
 import kls::kotlin::ast;
+import kls::kotlin::parser;
 
 // ── scan_package tests ─────────────────────────────────────────────
 
@@ -666,5 +667,178 @@ fn void member_cache_line_col_stored() @test {
 		} else {
 			assert(false, "expected member cache for 'Calc'");
 		}
+	};
+}
+
+// ── Import map tests ───────────────────────────────────────────────
+
+fn ParseResult* do_parse(String src) {
+	ParseResult* result = mem::new(ParseResult);
+	parser::parse(src, result);
+	return result;
+}
+
+fn void free_result(ParseResult* r) {
+	r.free_errors();
+	mem::free(r);
+}
+
+fn void import_map_explicit_import() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.Foo
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+		assert(map.package_name == "com.example", "expected package 'com.example', got '%s'", map.package_name);
+		assert(map.import_count == 1, "expected 1 import, got %d", (int)map.import_count);
+		assert(map.import_names[0] == "Foo", "expected import name 'Foo', got '%s'", map.import_names[0]);
+		assert(map.import_paths[0] == "com.other.Foo", "expected import path 'com.other.Foo', got '%s'", map.import_paths[0]);
+		assert(!map.is_star[0], "expected non-star import");
+	};
+}
+
+fn void import_map_star_import() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.*
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+		assert(map.import_count == 1, "expected 1 import, got %d", (int)map.import_count);
+		assert(map.is_star[0], "expected star import");
+		assert(map.star_packages[0] == "com.other", "expected star package 'com.other', got '%s'", map.star_packages[0]);
+	};
+}
+
+fn void import_map_aliased_import() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.Foo as MyFoo
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+		assert(map.import_count == 1, "expected 1 import, got %d", (int)map.import_count);
+		assert(map.import_names[0] == "MyFoo", "expected alias 'MyFoo', got '%s'", map.import_names[0]);
+		assert(map.import_paths[0] == "com.other.Foo", "expected path 'com.other.Foo', got '%s'", map.import_paths[0]);
+	};
+}
+
+fn void import_visibility_same_package() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+
+		WorkspaceSymbol sym = { .name = "Foo", .package_name = "com.example" };
+		String visible = workspace::is_symbol_visible(&sym, &map, "Foo");
+		assert(visible.len > 0, "same-package symbol should be visible");
+		assert(visible == "Foo", "visible name should be 'Foo', got '%s'", visible);
+	};
+}
+
+fn void import_visibility_explicit_import() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.Foo
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+
+		WorkspaceSymbol sym = { .name = "Foo", .package_name = "com.other" };
+		String visible = workspace::is_symbol_visible(&sym, &map, "Foo");
+		assert(visible.len > 0, "explicitly imported symbol should be visible");
+	};
+}
+
+fn void import_visibility_star_import() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.*
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+
+		WorkspaceSymbol sym = { .name = "Foo", .package_name = "com.other" };
+		String visible = workspace::is_symbol_visible(&sym, &map, "Foo");
+		assert(visible.len > 0, "star-imported symbol should be visible");
+	};
+}
+
+fn void import_visibility_not_imported() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.Bar
+			class Baz {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+
+		WorkspaceSymbol sym = { .name = "Foo", .package_name = "com.unrelated" };
+		String visible = workspace::is_symbol_visible(&sym, &map, "Foo");
+		assert(visible.len == 0, "non-imported symbol from different package should not be visible");
+	};
+}
+
+fn void import_visibility_aliased_import() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.other.Foo as MyFoo
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+
+		WorkspaceSymbol sym = { .name = "Foo", .package_name = "com.other" };
+
+		// Lookup with alias name should succeed
+		String visible_alias = workspace::is_symbol_visible(&sym, &map, "MyFoo");
+		assert(visible_alias.len > 0, "aliased import should be visible with alias name");
+		assert(visible_alias == "MyFoo", "visible name should be alias 'MyFoo', got '%s'", visible_alias);
+
+		// Lookup with real name should NOT match (alias replaces the name)
+		String visible_real = workspace::is_symbol_visible(&sym, &map, "Foo");
+		assert(visible_real.len == 0, "aliased import should NOT be visible with real name");
+	};
+}
+
+fn void import_visibility_no_package_symbol() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+
+		// Symbol with no package — backward compat, should be visible
+		WorkspaceSymbol sym = { .name = "Foo", .package_name = "" };
+		String visible = workspace::is_symbol_visible(&sym, &map, "Foo");
+		assert(visible.len > 0, "symbol with no package should be visible (backward compat)");
+	};
+}
+
+fn void import_map_multiple_imports() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			`package com.example
+			import com.a.Foo
+			import com.b.*
+			import com.c.Baz as MyBaz
+			class Bar {}`); defer free_result(r);
+
+		ImportMap map = workspace::build_import_map(r);
+		assert(map.import_count == 3, "expected 3 imports, got %d", (int)map.import_count);
+		assert(map.import_names[0] == "Foo", "import 0 name");
+		assert(!map.is_star[0], "import 0 not star");
+		assert(map.is_star[1], "import 1 is star");
+		assert(map.star_packages[1] == "com.b", "import 1 star package");
+		assert(map.import_names[2] == "MyBaz", "import 2 alias");
 	};
 }

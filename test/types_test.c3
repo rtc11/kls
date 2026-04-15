@@ -2105,3 +2105,274 @@ fn void lambda_it_inferred_list_filter() @test {
 		assert(false, "did not find 'it' NAME_EXPR");
 	};
 }
+
+// ── Destructuring type inference ────────────────────────────────────
+
+fn void destructuring_pair_component_types() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val pair: Pair<String, Int> = Pair("a", 1)
+				val (a, b) = pair
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint a_idx = find_decl(r, "a");
+		assert(a_idx > 0, "expected to find decl 'a'");
+		assert(ti.has_type[a_idx], "expected 'a' to have a type");
+		assert(ti.node_types[a_idx].name == "String",
+			"'a' should be String, got '%s'", ti.node_types[a_idx].name);
+
+		uint b_idx = find_decl(r, "b");
+		assert(b_idx > 0, "expected to find decl 'b'");
+		assert(ti.has_type[b_idx], "expected 'b' to have a type");
+		assert(ti.node_types[b_idx].name == "Int",
+			"'b' should be Int, got '%s'", ti.node_types[b_idx].name);
+	};
+}
+
+fn void destructuring_triple_component_types() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val t: Triple<Int, String, Boolean> = Triple(1, "a", true)
+				val (x, y, z) = t
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint x_idx = find_decl(r, "x");
+		assert(x_idx > 0, "expected to find decl 'x'");
+		assert(ti.has_type[x_idx], "expected 'x' to have a type");
+		assert(ti.node_types[x_idx].name == "Int",
+			"'x' should be Int, got '%s'", ti.node_types[x_idx].name);
+
+		uint y_idx = find_decl(r, "y");
+		assert(y_idx > 0, "expected to find decl 'y'");
+		assert(ti.has_type[y_idx], "expected 'y' to have a type");
+		assert(ti.node_types[y_idx].name == "String",
+			"'y' should be String, got '%s'", ti.node_types[y_idx].name);
+
+		uint z_idx = find_decl(r, "z");
+		assert(z_idx > 0, "expected to find decl 'z'");
+		assert(ti.has_type[z_idx], "expected 'z' to have a type");
+		assert(ti.node_types[z_idx].name == "Boolean",
+			"'z' should be Boolean, got '%s'", ti.node_types[z_idx].name);
+	};
+}
+
+fn void destructuring_explicit_types_override() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val pair: Pair<String, Int> = Pair("a", 1)
+				val (a: String, b: Int) = pair
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		// When explicit types are given, they should be used (Phase 1)
+		uint a_idx = find_decl(r, "a");
+		assert(a_idx > 0, "expected to find decl 'a'");
+		assert(ti.has_type[a_idx], "expected 'a' to have a type");
+		assert(ti.node_types[a_idx].name == "String",
+			"'a' should be String, got '%s'", ti.node_types[a_idx].name);
+
+		uint b_idx = find_decl(r, "b");
+		assert(b_idx > 0, "expected to find decl 'b'");
+		assert(ti.has_type[b_idx], "expected 'b' to have a type");
+		assert(ti.node_types[b_idx].name == "Int",
+			"'b' should be Int, got '%s'", ti.node_types[b_idx].name);
+	};
+}
+
+fn void destructuring_for_map_iteration() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val map: Map<String, Int> = mapOf()
+				for ((k, v) in map) { }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		// Find PARAM nodes inside FOR_STMT
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FOR_STMT) {
+				uint found_params = 0;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == PARAM) {
+						if (found_params == 0) {
+							assert(r.nodes[j].name == "k", "param 0 should be 'k'");
+							assert(ti.has_type[j], "expected 'k' to have a type");
+							assert(ti.node_types[j].name == "String",
+								"'k' should be String, got '%s'", ti.node_types[j].name);
+						} else if (found_params == 1) {
+							assert(r.nodes[j].name == "v", "param 1 should be 'v'");
+							assert(ti.has_type[j], "expected 'v' to have a type");
+							assert(ti.node_types[j].name == "Int",
+								"'v' should be Int, got '%s'", ti.node_types[j].name);
+						}
+						found_params++;
+					}
+				}
+				assert(found_params == 2, "expected 2 params, got %d", found_params);
+				return;
+			}
+		}
+		assert(false, "expected FOR_STMT");
+	};
+}
+
+// ── Inheritance-based member type resolution ────────────────────────
+
+fn void inherited_member_type_from_list_supertype() @test {
+	@pool() {
+		// Simulate: class StringList : List<String>
+		// StringList.size should resolve to Int (via List supertype)
+		TypeRef receiver = { .kind = SIMPLE, .name = "StringList" };
+		String[1] supertypes = { "List" };
+
+		TypeRef result = types::resolve_member_type_with_supertypes(receiver, "size", supertypes[..], 1);
+		assert(result.kind != UNKNOWN, "expected size to resolve through List supertype");
+		assert(result.name == "Int", "size should be Int, got '%s'", result.name);
+	};
+}
+
+fn void inherited_member_type_from_list_with_generic_args() @test {
+	@pool() {
+		// Simulate: class StringList : List<String>
+		// StringList.first() should resolve to String
+		TypeRef receiver = {
+			.kind = GENERIC,
+			.name = "StringList",
+			.type_arg_count = 1,
+			.type_arg_names = { [0] = "String" },
+		};
+		String[1] supertypes = { "List" };
+
+		TypeRef result = types::resolve_member_type_with_supertypes(receiver, "first", supertypes[..], 1);
+		assert(result.kind != UNKNOWN, "expected first to resolve through List supertype");
+		assert(result.name == "String", "first should be String, got '%s'", result.name);
+	};
+}
+
+fn void inherited_member_not_found() @test {
+	@pool() {
+		// No supertype has this member
+		TypeRef receiver = { .kind = SIMPLE, .name = "MyClass" };
+		String[1] supertypes = { "SomeOther" };
+
+		TypeRef result = types::resolve_member_type_with_supertypes(receiver, "nonExistent", supertypes[..], 1);
+		assert(result.kind == UNKNOWN, "expected UNKNOWN for non-existent member");
+	};
+}
+
+fn void inherited_member_direct_takes_priority() @test {
+	@pool() {
+		// Direct member lookup should succeed without needing supertypes
+		TypeRef receiver = { .kind = SIMPLE, .name = "String" };
+		String[1] supertypes = { "Any" };
+
+		TypeRef result = types::resolve_member_type_with_supertypes(receiver, "length", supertypes[..], 1);
+		assert(result.kind != UNKNOWN, "expected length to resolve directly");
+		assert(result.name == "Int", "length should be Int, got '%s'", result.name);
+	};
+}
+
+fn void inherited_member_multiple_supertypes() @test {
+	@pool() {
+		// Try multiple supertypes — second one has the member
+		TypeRef receiver = { .kind = SIMPLE, .name = "MyClass" };
+		String[2] supertypes = { "UnknownType", "Map" };
+
+		TypeRef result = types::resolve_member_type_with_supertypes(receiver, "size", supertypes[..], 2);
+		assert(result.kind != UNKNOWN, "expected size to resolve through Map supertype");
+		assert(result.name == "Int", "size should be Int, got '%s'", result.name);
+	};
+}
+
+// ── Overload resolution tests ─────────────────────────────────────
+
+fn void overload_resolution_picks_matching_param_count() @test {
+	@pool() {
+		// Two overloads of 'process': one with 1 param, one with 2 params
+		// Calling process(x) should resolve to the 1-param version
+		String src =
+`fun process(x: Int): String = ""
+fun process(x: Int, y: Int): Boolean = true
+fun main() {
+    val a = process(1)
+    val b = process(1, 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint a_idx = find_decl(pr, "a");
+		assert(a_idx != 0, "should find 'a'");
+		assert(ti.has_type[a_idx], "a should have a type");
+		assert(ti.node_types[a_idx].name == "String",
+			"a should be String (1-param overload), got '%s'", ti.node_types[a_idx].name);
+
+		uint b_idx = find_decl(pr, "b");
+		assert(b_idx != 0, "should find 'b'");
+		assert(ti.has_type[b_idx], "b should have a type");
+		assert(ti.node_types[b_idx].name == "Boolean",
+			"b should be Boolean (2-param overload), got '%s'", ti.node_types[b_idx].name);
+	};
+}
+
+fn void overload_resolution_no_match_uses_first() @test {
+	@pool() {
+		// Two overloads but call has 3 args — no match, should fall back to first
+		String src =
+`fun calc(a: Int): String = ""
+fun calc(a: Int, b: Int): Boolean = true
+fun main() {
+    val r = calc(1, 2, 3)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint r_idx = find_decl(pr, "r");
+		assert(r_idx != 0, "should find 'r'");
+		assert(ti.has_type[r_idx], "r should have a type");
+		// Falls back to first overload (String)
+		assert(ti.node_types[r_idx].name == "String",
+			"r should be String (first fallback), got '%s'", ti.node_types[r_idx].name);
+	};
+}
+
+fn void overload_resolution_zero_params() @test {
+	@pool() {
+		// Overload with 0 params vs 1 param
+		String src =
+`fun create(): String = ""
+fun create(name: String): Int = 0
+fun main() {
+    val a = create()
+    val b = create("test")
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint a_idx = find_decl(pr, "a");
+		assert(a_idx != 0, "should find 'a'");
+		assert(ti.has_type[a_idx], "a should have a type");
+		assert(ti.node_types[a_idx].name == "String",
+			"a should be String (0-param overload), got '%s'", ti.node_types[a_idx].name);
+
+		uint b_idx = find_decl(pr, "b");
+		assert(b_idx != 0, "should find 'b'");
+		assert(ti.has_type[b_idx], "b should have a type");
+		assert(ti.node_types[b_idx].name == "Int",
+			"b should be Int (1-param overload), got '%s'", ti.node_types[b_idx].name);
+	};
+}

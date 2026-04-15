@@ -90,7 +90,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	// ── Cross-file fallback via workspace index ──────────────────
 	if (workspace != null) {
-		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri)) {
+		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri, pr)) {
 			return result;
 		}
 	}
@@ -107,12 +107,66 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 }
 
 /**
+ * Count the number of arguments in a CALL_EXPR at the given cursor offset.
+ * Returns -1 if no CALL_EXPR is found at the cursor position.
+ */
+fn int find_call_arg_count(ParseResult* pr, String target_name, uint cursor_offset) {
+	// Find the CALL_EXPR that contains the cursor
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != target_name) continue;
+		if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) continue;
+
+		// Count arguments (skip callee NAME_EXPR and trailing LAMBDA_EXPR)
+		uint count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.kind == NAME_EXPR && child.name == target_name) continue;
+			if (child.kind == LAMBDA_EXPR) continue;
+			count++;
+		}
+		return (int)count;
+	}
+	return -1;
+}
+
+/**
+ * Pick the best FUN_DECL among candidates by matching argument count.
+ * If call_arg_count is -1, returns the first func_match (no scoring).
+ */
+fn AstNode* pick_best_overload(ParseResult* pr, AstNode*[] candidates, usz count, int call_arg_count) {
+	if (count == 0) return null;
+	if (count == 1 || call_arg_count < 0) return candidates[0];
+
+	// Try to find exact parameter count match
+	for (usz i = 0; i < count; i++) {
+		uint param_count = ast::count_children_of_kind(pr, candidates[i], PARAM);
+		if (param_count == (uint)call_arg_count) {
+			return candidates[i];
+		}
+	}
+
+	// No exact match -- return first candidate
+	return candidates[0];
+}
+
+/**
  * Search the AST for a declaration matching the target name.
  * Starts from the innermost scope containing the cursor offset
  * and works outward. Prefers function declarations in call context.
+ * When multiple overloads match, prefers the one whose parameter
+ * count matches the call's argument count.
  */
 fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cursor_offset, bool is_call) {
 	if (pr.node_count == 0) return ast::NOT_FOUND~;
+
+	// If this is a call, find the argument count for overload resolution
+	int call_arg_count = -1;
+	if (is_call) {
+		call_arg_count = find_call_arg_count(pr, target_name, cursor_offset);
+	}
 
 	// Find the innermost scope containing the cursor.
 	// Walk all nodes, tracking the deepest container that contains the cursor.
@@ -134,7 +188,8 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 
 		// Search direct children of this scope for matching declarations
 		AstNode* first_match = null;
-		AstNode* func_match = null;
+		AstNode*[16] func_candidates;
+		usz func_count = 0;
 
 		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
@@ -145,13 +200,14 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 			if (first_match == null) {
 				first_match = n;
 			}
-			if (func_match == null && n.kind == FUN_DECL) {
-				func_match = n;
+			if (n.kind == FUN_DECL && func_count < 16) {
+				func_candidates[func_count] = n;
+				func_count++;
 			}
 		}
 
-		if (is_call && func_match != null) {
-			return func_match;
+		if (is_call && func_count > 0) {
+			return pick_best_overload(pr, func_candidates[:func_count], func_count, call_arg_count);
 		}
 		if (first_match != null) {
 			return first_match;
@@ -171,7 +227,8 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 	// Search ALL declarations in the entire AST as a fallback.
 	{
 		AstNode* first_match = null;
-		AstNode* func_match = null;
+		AstNode*[16] func_candidates;
+		usz func_count = 0;
 
 		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
@@ -181,13 +238,14 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 			if (first_match == null) {
 				first_match = n;
 			}
-			if (func_match == null && n.kind == FUN_DECL) {
-				func_match = n;
+			if (n.kind == FUN_DECL && func_count < 16) {
+				func_candidates[func_count] = n;
+				func_count++;
 			}
 		}
 
-		if (is_call && func_match != null) {
-			return func_match;
+		if (is_call && func_count > 0) {
+			return pick_best_overload(pr, func_candidates[:func_count], func_count, call_arg_count);
 		}
 		if (first_match != null) {
 			return first_match;
@@ -392,6 +450,15 @@ fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String 
  */
 fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentStore* store,
 		String class_name, String member_name) {
+	return find_member_in_workspace_class_depth(workspace, store, class_name, member_name, 0);
+}
+
+const int MAX_SUPERTYPE_DEPTH = 5;
+
+fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, DocumentStore* store,
+		String class_name, String member_name, int depth) {
+	if (depth > MAX_SUPERTYPE_DEPTH) return NOT_DOT_MEMBER~;
+
 	// Try the member cache first (fast path — no re-parsing)
 	if (try members = workspace.lookup_members(class_name)) {
 		for (usz i = 0; i < members.len(); i++) {
@@ -407,6 +474,20 @@ fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentSt
 			if (m.node_kind == PARAM) {
 				if ((m.mod_flags & ast::MOD_VAR) != 0 || (m.mod_flags & ast::MOD_FINAL) != 0) {
 					return build_location_from_member(m);
+				}
+			}
+		}
+
+		// Not found in direct class — check supertypes
+		if (try indices = workspace.lookup_by_name(class_name)) {
+			for (usz i = 0; i < indices.len(); i++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+				if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+					sym.kind != SymbolKind.OBJECT) continue;
+				for (usz s = 0; s < sym.supertype_count; s++) {
+					if (try result = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1)) {
+						return result;
+					}
 				}
 			}
 		}
@@ -443,6 +524,13 @@ fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentSt
 			// Find the class, then its member
 			if (try result = find_member_in_class_ast(pr, class_name, member_name, sym.uri)) {
 				return result;
+			}
+
+			// Not found in direct class — check supertypes
+			for (usz s = 0; s < sym.supertype_count; s++) {
+				if (try result = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1)) {
+					return result;
+				}
 			}
 		}
 	}
@@ -640,12 +728,18 @@ faultdef NOT_FOUND_IN_WORKSPACE;
  * Look up a definition in the workspace index. Searches all indexed files
  * for a symbol matching the target name. In call context, prefers FUNCTION
  * kind. Skips symbols from the current document (already searched via AST).
+ * Uses import map to prefer imported symbols over non-imported ones.
  */
-fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String target_name, bool is_call, String current_uri) {
+fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String target_name, bool is_call, String current_uri, ParseResult* pr) {
 	List{usz}* indices = workspace.lookup_by_name(target_name)!;
+
+	// Build import map for import-aware filtering
+	ImportMap imports = workspace::build_import_map(pr);
 
 	WorkspaceSymbol* first_match = null;
 	WorkspaceSymbol* func_match = null;
+	WorkspaceSymbol* imported_match = null;
+	WorkspaceSymbol* imported_func_match = null;
 
 	for (usz i = 0; i < indices.len(); i++) {
 		WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
@@ -660,13 +754,33 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		if (func_match == null && sym.kind == FUNCTION) {
 			func_match = sym;
 		}
+
+		// Check import visibility
+		String visible_name = workspace::is_symbol_visible(sym, &imports, target_name);
+		if (visible_name.len > 0) {
+			if (imported_match == null) {
+				imported_match = sym;
+			}
+			if (imported_func_match == null && sym.kind == FUNCTION) {
+				imported_func_match = sym;
+			}
+		}
 	}
 
+	// Prefer imported matches over non-imported
 	WorkspaceSymbol* chosen = null;
-	if (is_call && func_match != null) {
-		chosen = func_match;
-	} else if (first_match != null) {
-		chosen = first_match;
+	if (is_call) {
+		if (imported_func_match != null) {
+			chosen = imported_func_match;
+		} else {
+			chosen = func_match;
+		}
+	} else {
+		if (imported_match != null) {
+			chosen = imported_match;
+		} else {
+			chosen = first_match;
+		}
 	}
 
 	if (chosen == null) return NOT_FOUND_IN_WORKSPACE~;
