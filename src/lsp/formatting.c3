@@ -99,7 +99,7 @@ fn String format_content(String content, int tab_size, bool insert_spaces,
 	usz i = 0;
 	int consecutive_blank_lines = 0;
 
-	while (i <= content.len) {
+	while (i < content.len) {
 		// Find end of current line
 		usz line_start = i;
 		usz line_end = i;
