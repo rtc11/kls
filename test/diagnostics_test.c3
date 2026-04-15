@@ -4,6 +4,7 @@ import std::collections::object;
 import kls::lsp::diagnostics;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
+import kls::document;
 import kls::workspace;
 
 /**
@@ -604,5 +605,219 @@ fun main() { val id = UUID.randomUUID() }`
 			assert(msg != "Unresolved reference: 'UUID'",
 				"wildcard import should prevent UUID diagnostic");
 		}
+	};
+}
+
+// ── Pull diagnostics tests (LSP 3.17) ────────────────────────────
+
+/**
+ * Helper: create a DocumentStore with one document and return it.
+ * Caller must call store.free() when done.
+ */
+fn DocumentStore create_test_store(String uri, String content, int version = 1) {
+	DocumentStore store;
+	store.init();
+	store.open(uri, "kotlin", version, content);
+	return store;
+}
+
+/**
+ * Helper: build textDocument/diagnostic params.
+ */
+fn Object* build_doc_diagnostic_params(String uri, String prev_result_id = "") {
+	Object* params = object::new_obj(tmem);
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+	params.set("textDocument", td);
+	if (prev_result_id.len > 0) {
+		params.set("previousResultId", prev_result_id);
+	}
+	return params;
+}
+
+fn void document_diagnostic_returns_full_report() @test {
+	@pool() {
+		DocumentStore store = create_test_store("file:///test.kt", "fun main() {}");
+		defer store.free();
+
+		Object* params = build_doc_diagnostic_params("file:///test.kt");
+		Object* result = diagnostics::handle_document_diagnostic(&store, null, params);
+
+		String kind = result.get_string("kind")!!;
+		assert(kind == "full", "expected kind 'full'");
+
+		// resultId should be present
+		String result_id = result.get_string("resultId")!!;
+		assert(result_id.len > 0, "expected non-empty resultId");
+		assert(result_id == "v1", "expected resultId 'v1' for version 1");
+
+		// items should be present (valid code = empty array)
+		Object* items = result.get("items")!!;
+		assert(items.is_indexable(), "expected items to be indexable");
+	};
+}
+
+fn void document_diagnostic_returns_unchanged_when_same_version() @test {
+	@pool() {
+		DocumentStore store = create_test_store("file:///test.kt", "fun main() {}", 3);
+		defer store.free();
+
+		// First pull to get the result ID
+		Object* params = build_doc_diagnostic_params("file:///test.kt", "v3");
+		Object* result = diagnostics::handle_document_diagnostic(&store, null, params);
+
+		String kind = result.get_string("kind")!!;
+		assert(kind == "unchanged", "expected kind 'unchanged' when previousResultId matches");
+
+		String result_id = result.get_string("resultId")!!;
+		assert(result_id == "v3", "expected resultId 'v3'");
+
+		// items should NOT be present for unchanged reports
+		Object* items = result.get("items") ?? null;
+		assert(items == null, "unchanged report should not have items");
+	};
+}
+
+fn void document_diagnostic_returns_full_when_version_differs() @test {
+	@pool() {
+		DocumentStore store = create_test_store("file:///test.kt", "fun main() {}", 5);
+		defer store.free();
+
+		// Pass a stale result ID
+		Object* params = build_doc_diagnostic_params("file:///test.kt", "v3");
+		Object* result = diagnostics::handle_document_diagnostic(&store, null, params);
+
+		String kind = result.get_string("kind")!!;
+		assert(kind == "full", "expected kind 'full' when version differs");
+
+		String result_id = result.get_string("resultId")!!;
+		assert(result_id == "v5", "expected resultId 'v5' for version 5");
+
+		Object* items = result.get("items")!!;
+		assert(items.is_indexable(), "expected items in full report");
+	};
+}
+
+fn void document_diagnostic_unknown_uri_returns_empty_full() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		Object* params = build_doc_diagnostic_params("file:///nonexistent.kt");
+		Object* result = diagnostics::handle_document_diagnostic(&store, null, params);
+
+		String kind = result.get_string("kind")!!;
+		assert(kind == "full", "expected kind 'full' for unknown URI");
+
+		Object* items = result.get("items")!!;
+		assert(items.is_indexable(), "expected items to be indexable");
+		if (items.is_array()) {
+			assert(items.get_len() == 0, "expected empty items for unknown URI");
+		}
+	};
+}
+
+fn void document_diagnostic_includes_errors() @test {
+	@pool() {
+		// '&' is an invalid token -- should produce a diagnostic
+		DocumentStore store = create_test_store("file:///err.kt", "&");
+		defer store.free();
+
+		Object* params = build_doc_diagnostic_params("file:///err.kt");
+		Object* result = diagnostics::handle_document_diagnostic(&store, null, params);
+
+		String kind = result.get_string("kind")!!;
+		assert(kind == "full");
+
+		Object* items = result.get("items")!!;
+		assert(items.is_array());
+		assert(items.get_len() >= 1, "expected at least one diagnostic for invalid token");
+	};
+}
+
+fn void workspace_diagnostic_returns_all_documents() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		store.open("file:///a.kt", "kotlin", 1, "fun a() {}");
+		store.open("file:///b.kt", "kotlin", 2, "fun b() {}");
+
+		// Build params with empty previousResultIds
+		Object* params = object::new_obj(tmem);
+		Object* prev_ids = object::new_obj(tmem);
+		params.set("previousResultIds", prev_ids);
+
+		Object* result = diagnostics::handle_workspace_diagnostic(&store, null, params);
+
+		Object* items = result.get("items")!!;
+		assert(items.is_array(), "expected items array");
+		assert(items.get_len() == 2, "expected 2 workspace diagnostic reports");
+
+		// Each item should have kind, uri, and version
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* report = items.get_at(i);
+			String rk = report.get_string("kind")!!;
+			assert(rk == "full", "expected kind 'full' for first pull");
+			String uri = report.get_string("uri")!!;
+			assert(uri.len > 0, "expected non-empty uri");
+			// version should be present
+			int ver = report.get_int("version")!!;
+			assert(ver > 0, "expected positive version");
+		}
+	};
+}
+
+fn void workspace_diagnostic_uses_previous_result_ids() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		store.open("file:///unchanged.kt", "kotlin", 3, "fun unchanged() {}");
+		store.open("file:///changed.kt", "kotlin", 5, "fun changed() {}");
+
+		// Build params: unchanged.kt has current result ID, changed.kt has stale one
+		Object* params = object::new_obj(tmem);
+		Object* prev_ids = object::new_obj(tmem);
+
+		Object* prev_unchanged = object::new_obj(tmem);
+		prev_unchanged.set("uri", "file:///unchanged.kt");
+		prev_unchanged.set("value", "v3"); // matches current version
+		prev_ids.push(prev_unchanged);
+
+		Object* prev_changed = object::new_obj(tmem);
+		prev_changed.set("uri", "file:///changed.kt");
+		prev_changed.set("value", "v2"); // stale -- version is now 5
+		prev_ids.push(prev_changed);
+
+		params.set("previousResultIds", prev_ids);
+
+		Object* result = diagnostics::handle_workspace_diagnostic(&store, null, params);
+
+		Object* items = result.get("items")!!;
+		assert(items.is_array());
+		assert(items.get_len() == 2);
+
+		// Check each report -- one should be unchanged, one full
+		bool found_unchanged = false;
+		bool found_full = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* report = items.get_at(i);
+			String uri = report.get_string("uri")!!;
+			String rk = report.get_string("kind")!!;
+			if (uri == "file:///unchanged.kt") {
+				assert(rk == "unchanged", "unchanged.kt should have kind 'unchanged'");
+				found_unchanged = true;
+			} else if (uri == "file:///changed.kt") {
+				assert(rk == "full", "changed.kt should have kind 'full'");
+				found_full = true;
+				// Full report should have items
+				Object* report_items = report.get("items")!!;
+				assert(report_items.is_indexable());
+			}
+		}
+		assert(found_unchanged, "should have report for unchanged.kt");
+		assert(found_full, "should have report for changed.kt");
 	};
 }

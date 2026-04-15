@@ -22,6 +22,7 @@ import kls::lsp::folding_range;
 import kls::lsp::selection_range;
 import kls::lsp::formatting;
 import kls::lsp::code_actions;
+import kls::lsp::diagnostics;
 import kls::lsp::progress;
 import kls::workspace;
 import kls::deps::classpath;
@@ -271,6 +272,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
+		case "textDocument/diagnostic":
+			if (params != null) {
+				Object* result = diagnostics::handle_document_diagnostic(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
 		case "textDocument/semanticTokens/full":
 			if (params != null) {
 				Object* result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params);
@@ -303,6 +312,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "workspace/symbol":
 			if (params != null) {
 				Object* result = workspace_symbols::handle_workspace_symbol(&self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "workspace/diagnostic":
+			if (params != null) {
+				Object* result = diagnostics::handle_workspace_diagnostic(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");

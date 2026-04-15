@@ -641,3 +641,132 @@ fn void publish_diagnostics(DocumentStore* store, String uri, WorkspaceIndex* wo
 	json_rpc::send_notification("textDocument/publishDiagnostics", params);
 	io::eprintfn("[kls] Published diagnostics for %s", uri);
 }
+
+// ── Pull diagnostics (LSP 3.17) ──────────────────────────────────
+
+/**
+ * Build a version-based result ID for a document.
+ * Format: "v<version>" (e.g., "v3").
+ * Changes whenever the document version increments.
+ */
+fn String build_result_id(int version) {
+	DString id;
+	id.tinit();
+	id.appendf("v%d", version);
+	return id.str_view();
+}
+
+/**
+ * Handle textDocument/diagnostic request (pull model).
+ *
+ * Returns a DocumentDiagnosticReport:
+ *   - { kind: "full", resultId: "...", items: [...] }  when diagnostics need recomputing
+ *   - { kind: "unchanged", resultId: "..." }           when previousResultId matches
+ *
+ * If the document is not found (not open), returns a full report with empty items.
+ */
+fn Object* handle_document_diagnostic(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	String uri = params.get("textDocument")!!.get_string("uri")!!;
+
+	Object* result = object::new_obj(tmem);
+
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) {
+		// Document not in store -- return empty full report
+		result.set("kind", "full");
+		Object* items = object::new_obj(tmem);
+		result.set("items", items);
+		return result;
+	}
+
+	String current_result_id = build_result_id(doc.version);
+
+	// Check if client already has the current diagnostics
+	if (try prev_id = params.get_string("previousResultId")) {
+		if (prev_id == current_result_id) {
+			result.set("kind", "unchanged");
+			result.set("resultId", current_result_id);
+			return result;
+		}
+	}
+
+	// Compute fresh diagnostics
+	ParseResult* ast = store.get_ast(uri) ?? null;
+	Object* diagnostics = build_diagnostics_array(doc.content, ast, workspace);
+
+	result.set("kind", "full");
+	result.set("resultId", current_result_id);
+	result.set("items", diagnostics);
+	return result;
+}
+
+/**
+ * Handle workspace/diagnostic request (pull model).
+ *
+ * Returns a WorkspaceDiagnosticReport:
+ *   { items: [ WorkspaceDocumentDiagnosticReport, ... ] }
+ *
+ * Each item is either:
+ *   - { kind: "full", uri, version, resultId, items: [...] }
+ *   - { kind: "unchanged", uri, version, resultId }
+ *
+ * The previousResultIds parameter maps URIs to their last-known result IDs.
+ */
+fn Object* handle_workspace_diagnostic(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	// Build a lookup of previous result IDs from the client
+	// previousResultIds: [{ uri: "...", value: "..." }, ...]
+	String[256] prev_uris;
+	String[256] prev_values;
+	usz prev_count = 0;
+
+	if (try prev_ids = params.get("previousResultIds")) {
+		for (sz i = 0; i < prev_ids.get_len() && prev_count < 256; i++) {
+			Object* entry = prev_ids.get_at(i);
+			String entry_uri = entry.get_string("uri") ?? "";
+			String entry_val = entry.get_string("value") ?? "";
+			if (entry_uri.len > 0) {
+				prev_uris[prev_count] = entry_uri;
+				prev_values[prev_count] = entry_val;
+				prev_count++;
+			}
+		}
+	}
+
+	Object* items = object::new_obj(tmem);
+
+	// Iterate all open documents in the store
+	foreach (&doc : store.docs.tvalues()) {
+		Object* report = object::new_obj(tmem);
+		report.set("uri", doc.uri);
+		report.set("version", doc.version);
+
+		String current_result_id = build_result_id(doc.version);
+
+		// Check if client already has current diagnostics for this URI
+		bool unchanged = false;
+		for (usz j = 0; j < prev_count; j++) {
+			if (prev_uris[j] == doc.uri && prev_values[j] == current_result_id) {
+				unchanged = true;
+				break;
+			}
+		}
+
+		if (unchanged) {
+			report.set("kind", "unchanged");
+			report.set("resultId", current_result_id);
+		} else {
+			ParseResult* ast = store.get_ast(doc.uri) ?? null;
+			Object* diagnostics = build_diagnostics_array(doc.content, ast, workspace);
+
+			report.set("kind", "full");
+			report.set("resultId", current_result_id);
+			report.set("items", diagnostics);
+		}
+
+		items.push(report);
+	}
+
+	Object* result = object::new_obj(tmem);
+	result.set("items", items);
+	return result;
+}
