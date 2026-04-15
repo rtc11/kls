@@ -85,12 +85,6 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Inlay hint support
 	caps.set("inlayHintProvider", true);
 
-	// Diagnostic pull support (LSP 3.17)
-	Object* diagnostic_opts = object::new_obj(tmem);
-	diagnostic_opts.set("interFileDependencies", true);
-	diagnostic_opts.set("workspaceDiagnostics", true);
-	caps.set("diagnosticProvider", diagnostic_opts);
-
 	// Workspace capabilities
 	Object* workspace_caps = object::new_obj(tmem);
 	Object* file_operations = object::new_obj(tmem);
