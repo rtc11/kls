@@ -1581,3 +1581,289 @@ fn void smart_cast_no_null_check_no_narrowing() @test {
 		}
 	};
 }
+
+// ── Generic type argument propagation tests ────────────────────────
+
+fn void generic_list_first_returns_element_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val names: List<String> = listOf("a", "b")
+				val first = names.first()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "first");
+		if (idx > 0 && ti.has_type[idx]) {
+			assert(ti.node_types[idx].name == "String",
+				"List<String>.first() should return String, got '%s'", ti.node_types[idx].name);
+			assert(!ti.node_types[idx].nullable,
+				"List<String>.first() should not be nullable");
+		}
+	};
+}
+
+fn void generic_list_firstOrNull_returns_nullable_element() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<Int> = listOf(1, 2)
+				val maybe = items.firstOrNull()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "maybe");
+		if (idx > 0 && ti.has_type[idx]) {
+			assert(ti.node_types[idx].name == "Int",
+				"List<Int>.firstOrNull() should return Int?, got '%s'", ti.node_types[idx].name);
+			assert(ti.node_types[idx].nullable,
+				"firstOrNull() should be nullable");
+		}
+	};
+}
+
+fn void generic_list_filter_preserves_type_args() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val names: List<String> = listOf("a", "b")
+				val filtered = names.filter()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "filtered");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "filter() should return GENERIC");
+			assert(t.name == "List", "filter() should return List, got '%s'", t.name);
+			assert(t.type_arg_count == 1, "filter() should have 1 type arg");
+			assert(t.type_arg_names[0] == "String",
+				"List<String>.filter() should return List<String>, got List<%s>", t.type_arg_names[0]);
+		}
+	};
+}
+
+fn void generic_list_sorted_preserves_type_args() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val nums: List<Int> = listOf(3, 1, 2)
+				val sorted = nums.sorted()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "sorted");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "sorted() should return GENERIC");
+			assert(t.name == "List", "sorted() should return List");
+			assert(t.type_arg_count == 1 && t.type_arg_names[0] == "Int",
+				"List<Int>.sorted() should return List<Int>");
+		}
+	};
+}
+
+fn void generic_chain_filter_first() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val names: List<String> = listOf("alice", "bob")
+				val result = names.filter().first()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "result");
+		if (idx > 0 && ti.has_type[idx]) {
+			assert(ti.node_types[idx].name == "String",
+				"List<String>.filter().first() should return String, got '%s'", ti.node_types[idx].name);
+		}
+	};
+}
+
+fn void generic_set_preserves_type_args() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a", "b", "a")
+				val unique = items.toSet()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "unique");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "toSet() should return GENERIC");
+			assert(t.name == "Set", "toSet() should return Set");
+			assert(t.type_arg_count == 1 && t.type_arg_names[0] == "String",
+				"List<String>.toSet() should return Set<String>");
+		}
+	};
+}
+
+fn void generic_map_keys_returns_set_of_key_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val m: Map<String, Int> = mapOf()
+				val keys = m.keys
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "keys");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "keys should return GENERIC");
+			assert(t.name == "Set", "keys should return Set, got '%s'", t.name);
+			assert(t.type_arg_count == 1 && t.type_arg_names[0] == "String",
+				"Map<String, Int>.keys should return Set<String>");
+		}
+	};
+}
+
+fn void generic_map_values_returns_collection_of_value_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val m: Map<String, Int> = mapOf()
+				val vals = m.values
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "vals");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "values should return GENERIC");
+			assert(t.name == "Collection", "values should return Collection, got '%s'", t.name);
+			assert(t.type_arg_count == 1 && t.type_arg_names[0] == "Int",
+				"Map<String, Int>.values should return Collection<Int>");
+		}
+	};
+}
+
+fn void generic_map_get_returns_nullable_value_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val m: Map<String, Int> = mapOf()
+				val v = m.get()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "v");
+		if (idx > 0 && ti.has_type[idx]) {
+			assert(ti.node_types[idx].name == "Int",
+				"Map<String, Int>.get() should return Int?, got '%s'", ti.node_types[idx].name);
+			assert(ti.node_types[idx].nullable,
+				"Map.get() should be nullable");
+		}
+	};
+}
+
+fn void generic_map_filter_preserves_kv() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val m: Map<String, Int> = mapOf()
+				val filtered = m.filter()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "filtered");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "filter() should return GENERIC");
+			assert(t.name == "Map", "filter() should return Map");
+			assert(t.type_arg_count == 2, "Map filter should have 2 type args");
+			assert(t.type_arg_names[0] == "String" && t.type_arg_names[1] == "Int",
+				"Map<String, Int>.filter() should return Map<String, Int>");
+		}
+	};
+}
+
+fn void generic_also_preserves_type_args() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a")
+				val same = items.also()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "same");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "also() should return GENERIC");
+			assert(t.name == "List", "also() should return List");
+			assert(t.type_arg_count == 1 && t.type_arg_names[0] == "String",
+				"List<String>.also() should return List<String>");
+		}
+	};
+}
+
+fn void generic_index_returns_element_type() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<String> = listOf("a", "b")
+				val item = items[0]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "item");
+		if (idx > 0 && ti.has_type[idx]) {
+			assert(ti.node_types[idx].name == "String",
+				"List<String>[0] should return String, got '%s'", ti.node_types[idx].name);
+		}
+	};
+}
+
+fn void generic_listof_infer_type_arg() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val names = listOf("alice", "bob")
+				val first = names.first()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "first");
+		if (idx > 0 && ti.has_type[idx]) {
+			assert(ti.node_types[idx].name == "String",
+				"listOf(\"a\", \"b\").first() should return String, got '%s'", ti.node_types[idx].name);
+		}
+	};
+}
+
+fn void generic_sequence_preserves_type_args() @test {
+	@pool() {
+		String src =
+			`fun test() {
+				val items: List<Int> = listOf(1, 2, 3)
+				val seq = items.asSequence()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "seq");
+		if (idx > 0 && ti.has_type[idx]) {
+			TypeRef t = ti.node_types[idx];
+			assert(t.kind == GENERIC, "asSequence() should return GENERIC");
+			assert(t.name == "Sequence", "asSequence() should return Sequence");
+			assert(t.type_arg_count == 1 && t.type_arg_names[0] == "Int",
+				"List<Int>.asSequence() should return Sequence<Int>");
+		}
+	};
+}

@@ -1090,6 +1090,94 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 	return resolve_member_type(receiver_type, node.name);
 }
 
+// ── Generic type argument propagation helpers ──────────────────────
+
+/**
+ * Extract the element type from a generic collection receiver.
+ * For List<String>.first() -> String, List<String>.firstOrNull() -> String?
+ * Falls back to UNKNOWN if receiver has no type arguments.
+ */
+fn TypeRef extract_element_type(TypeRef receiver, bool nullable) {
+	if (receiver.type_arg_count > 0) {
+		TypeRef result = { .kind = SIMPLE, .name = receiver.type_arg_names[0] };
+		result.nullable = nullable || receiver.type_arg_nullable[0];
+		return result;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Create a generic type with the receiver's type arguments preserved.
+ * For List<String>.filter(...) -> List<String> (not bare List).
+ */
+fn TypeRef make_generic_with_receiver_args(String container_name, TypeRef receiver) {
+	TypeRef result = { .kind = GENERIC, .name = container_name };
+	if (receiver.type_arg_count > 0) {
+		result.type_arg_count = 1;
+		result.type_arg_names[0] = receiver.type_arg_names[0];
+		result.type_arg_nullable[0] = receiver.type_arg_nullable[0];
+	}
+	return result;
+}
+
+/**
+ * Extract Map's key type as Set<K>.
+ * For Map<String, Int>.keys -> Set<String>.
+ */
+fn TypeRef extract_map_key_as_set(TypeRef receiver) {
+	TypeRef result = { .kind = GENERIC, .name = "Set" };
+	if (receiver.type_arg_count > 0) {
+		result.type_arg_count = 1;
+		result.type_arg_names[0] = receiver.type_arg_names[0];
+		result.type_arg_nullable[0] = receiver.type_arg_nullable[0];
+	}
+	return result;
+}
+
+/**
+ * Extract Map's value type as Collection<V>.
+ * For Map<String, Int>.values -> Collection<Int>.
+ */
+fn TypeRef extract_map_value_as_collection(TypeRef receiver) {
+	TypeRef result = { .kind = GENERIC, .name = "Collection" };
+	if (receiver.type_arg_count > 1) {
+		result.type_arg_count = 1;
+		result.type_arg_names[0] = receiver.type_arg_names[1];
+		result.type_arg_nullable[0] = receiver.type_arg_nullable[1];
+	}
+	return result;
+}
+
+/**
+ * Extract Map's value type V (or V? if nullable).
+ * For Map<String, Int>.get("key") -> Int?
+ * For Map<String, Int>.getValue("key") -> Int
+ */
+fn TypeRef extract_map_value_type(TypeRef receiver, bool nullable) {
+	if (receiver.type_arg_count > 1) {
+		TypeRef result = { .kind = SIMPLE, .name = receiver.type_arg_names[1] };
+		result.nullable = nullable || receiver.type_arg_nullable[1];
+		return result;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Create a Map type preserving the receiver's K, V type arguments.
+ * For Map<String, Int>.filter(...) -> Map<String, Int>.
+ */
+fn TypeRef make_map_with_receiver_args(TypeRef receiver) {
+	TypeRef result = { .kind = GENERIC, .name = "Map" };
+	if (receiver.type_arg_count >= 2) {
+		result.type_arg_count = 2;
+		result.type_arg_names[0] = receiver.type_arg_names[0];
+		result.type_arg_names[1] = receiver.type_arg_names[1];
+		result.type_arg_nullable[0] = receiver.type_arg_nullable[0];
+		result.type_arg_nullable[1] = receiver.type_arg_nullable[1];
+	}
+	return result;
+}
+
 /**
  * Resolve the type of a member access on a known type.
  */
@@ -1185,24 +1273,53 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 		if (member_name == "joinToString" || member_name == "toString") return TYPE_STRING;
 		if (member_name == "hashCode") return TYPE_INT;
 		if (member_name == "equals") return TYPE_BOOLEAN;
+
+		// Members that return the element type T
+		if (member_name == "first" || member_name == "last" ||
+		    member_name == "single" || member_name == "get" ||
+		    member_name == "elementAt" || member_name == "random" ||
+		    member_name == "reduce" || member_name == "min" || member_name == "max" ||
+		    member_name == "minOrNull" || member_name == "maxOrNull" ||
+		    member_name == "sum") {
+			return extract_element_type(receiver, false);
+		}
+		if (member_name == "firstOrNull" || member_name == "lastOrNull" ||
+		    member_name == "singleOrNull" || member_name == "getOrNull" ||
+		    member_name == "elementAtOrNull" || member_name == "randomOrNull" ||
+		    member_name == "find" || member_name == "findLast" ||
+		    member_name == "reduceOrNull" || member_name == "maxByOrNull" ||
+		    member_name == "minByOrNull") {
+			return extract_element_type(receiver, true);
+		}
+
+		// Members that return the same collection type with preserved type args
 		if (member_name == "filter" || member_name == "filterNot" || member_name == "filterNotNull" ||
 		    member_name == "sorted" || member_name == "sortedDescending" ||
 		    member_name == "sortedBy" || member_name == "sortedByDescending" ||
 		    member_name == "reversed" || member_name == "shuffled" ||
 		    member_name == "distinct" || member_name == "take" || member_name == "drop" ||
 		    member_name == "flatten" || member_name == "toList" || member_name == "toMutableList" ||
-		    member_name == "map" || member_name == "flatMap" || member_name == "mapNotNull" ||
 		    member_name == "zip") {
+			return make_generic_with_receiver_args("List", receiver);
+		}
+		if (member_name == "map" || member_name == "flatMap" || member_name == "mapNotNull") {
+			// map/flatMap transform the element type — we can't know the result type
+			// without analyzing the lambda, so return bare List
 			return { .kind = GENERIC, .name = "List" };
 		}
 		if (member_name == "toSet" || member_name == "toMutableSet") {
-			return { .kind = GENERIC, .name = "Set" };
+			return make_generic_with_receiver_args("Set", receiver);
 		}
 		if (member_name == "associate" || member_name == "associateBy" ||
 		    member_name == "associateWith" || member_name == "groupBy") {
 			return { .kind = GENERIC, .name = "Map" };
 		}
-		if (member_name == "asSequence") return { .kind = GENERIC, .name = "Sequence" };
+		if (member_name == "asSequence") {
+			return make_generic_with_receiver_args("Sequence", receiver);
+		}
+		if (member_name == "iterator") {
+			return make_generic_with_receiver_args("Iterator", receiver);
+		}
 	}
 
 	// Map members
@@ -1213,13 +1330,25 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 		    member_name == "any" || member_name == "all" || member_name == "none") {
 			return TYPE_BOOLEAN;
 		}
-		if (member_name == "keys") return { .kind = GENERIC, .name = "Set" };
-		if (member_name == "values") return { .kind = GENERIC, .name = "Collection" };
+		if (member_name == "keys") {
+			return extract_map_key_as_set(receiver);
+		}
+		if (member_name == "values") {
+			return extract_map_value_as_collection(receiver);
+		}
 		if (member_name == "entries") return { .kind = GENERIC, .name = "Set" };
+		if (member_name == "get" || member_name == "getOrDefault" || member_name == "remove") {
+			return extract_map_value_type(receiver, true);
+		}
+		if (member_name == "getValue" || member_name == "getOrPut") {
+			return extract_map_value_type(receiver, false);
+		}
 		if (member_name == "toList") return { .kind = GENERIC, .name = "List" };
 		if (member_name == "filter" || member_name == "filterKeys" || member_name == "filterValues" ||
-		    member_name == "map" || member_name == "mapKeys" || member_name == "mapValues" ||
 		    member_name == "toMutableMap") {
+			return make_map_with_receiver_args(receiver);
+		}
+		if (member_name == "map" || member_name == "mapKeys" || member_name == "mapValues") {
 			return { .kind = GENERIC, .name = "Map" };
 		}
 		if (member_name == "toString") return TYPE_STRING;
