@@ -22,6 +22,7 @@ import kls::lsp::folding_range;
 import kls::lsp::selection_range;
 import kls::lsp::formatting;
 import kls::lsp::code_actions;
+import kls::lsp::inlay_hints;
 import kls::lsp::diagnostics;
 import kls::lsp::progress;
 import kls::workspace;
@@ -283,6 +284,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/semanticTokens/full":
 			if (params != null) {
 				Object* result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/inlayHint":
+			if (params != null) {
+				Object* result = inlay_hints::handle_inlay_hints(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");

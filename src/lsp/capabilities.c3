@@ -82,6 +82,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	code_action_opts.set("codeActionKinds", code_action_kinds);
 	caps.set("codeActionProvider", code_action_opts);
 
+	// Inlay hint support
+	caps.set("inlayHintProvider", true);
+
 	// Diagnostic pull support (LSP 3.17)
 	Object* diagnostic_opts = object::new_obj(tmem);
 	diagnostic_opts.set("interFileDependencies", true);
