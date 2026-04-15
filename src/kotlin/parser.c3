@@ -1230,9 +1230,35 @@ fn void Parser.parse_if_expr(Parser* self) {
 	self.advance(); // consume 'if'
 	uint children_start = self.result.node_count;
 
-	// Condition: (expr)
+	// Condition: (expr) -- try to parse the expression inside parens as
+	// an AST child for smart casts and type inference. Fall back to
+	// skip_balanced_parens if expression parsing can't consume the
+	// full condition (e.g. due to < and > ambiguity with generics).
 	if (self.at(LPAREN)) {
-		self.skip_balanced_parens();
+		// Save parser state for rollback
+		Lexer save_lexer = self.lexer;
+		Token save_current = self.current;
+		Token save_previous = self.previous;
+		uint save_node_count = self.result.node_count;
+		usz save_error_count = self.result.error_count;
+
+		self.advance(); // consume '('
+		if (!self.at(RPAREN) && !self.at_eof()) {
+			self.parse_expression(0);
+		}
+
+		if (self.at(RPAREN)) {
+			// Expression parsing consumed the condition correctly
+			self.advance(); // consume ')'
+		} else {
+			// Rollback and fall back to skipping
+			self.lexer = save_lexer;
+			self.current = save_current;
+			self.previous = save_previous;
+			self.result.node_count = save_node_count;
+			self.result.error_count = save_error_count;
+			self.skip_balanced_parens();
+		}
 	}
 
 	// Then branch: block or single statement

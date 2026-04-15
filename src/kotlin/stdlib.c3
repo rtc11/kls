@@ -76,6 +76,49 @@ fn usz lookup_all_by_name(String name, StdlibSymbol*[] out_buf) {
 }
 
 /**
+ * Find all stdlib symbols with the given receiver type name.
+ * Also matches "Any" receiver symbols (available on all types)
+ * and "Iterable" for Collection-like types.
+ */
+fn usz lookup_by_receiver(String receiver_type, StdlibSymbol*[] out_buf) {
+	if (out_buf.len == 0 || receiver_type.len == 0) return 0;
+
+	usz count = 0;
+	foreach (i, &sym : STDLIB_SYMBOLS) {
+		if (count >= out_buf.len) break;
+		if (sym.receiver.len == 0) continue;
+
+		if (sym.receiver == receiver_type ||
+			sym.receiver == "Any" ||
+			sym.receiver == "Any?") {
+			out_buf[count] = sym;
+			count++;
+			continue;
+		}
+
+		// Match Iterable receiver for collection types
+		if (sym.receiver == "Iterable" || sym.receiver == "Iterable<T>") {
+			if (receiver_type == "List" || receiver_type == "MutableList" ||
+				receiver_type == "Set" || receiver_type == "MutableSet" ||
+				receiver_type == "Collection" || receiver_type == "Sequence") {
+				out_buf[count] = sym;
+				count++;
+				continue;
+			}
+		}
+
+		// Match Array receiver
+		if (sym.receiver == "Array" || sym.receiver == "Array<T>") {
+			if (receiver_type == "Array") {
+				out_buf[count] = sym;
+				count++;
+			}
+		}
+	}
+	return count;
+}
+
+/**
  * Return the total number of bundled stdlib symbols.
  */
 fn usz symbol_count() {

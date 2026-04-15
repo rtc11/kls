@@ -8,6 +8,9 @@ import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::kotlin::parser;
+import kls::kotlin::types;
+import kls::kotlin::symbols;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::source_nav;
@@ -61,6 +64,16 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// Find definition using scope-aware AST search
 	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
 		return build_location_from_node(uri, node);
+	}
+
+	// ── Dot-member navigation ────────────────────────────────────
+	// If the token is a member of a DOT_EXPR, resolve the receiver type
+	// and search for the member declaration in the receiver class.
+	TypeInfo* ti = store.get_types(uri) ?? null;
+	if (ti != null) {
+		if (try result = find_dot_member_definition(pr, ti, store, workspace, tok, uri)) {
+			return result;
+		}
 	}
 
 	// ── Cross-file fallback via workspace index ──────────────────
@@ -255,6 +268,141 @@ fn bool is_call_context_ast(ParseResult* pr, uint offset) {
 		}
 	}
 	return false;
+}
+
+// ── Dot-member definition lookup ──────────────────────────────────
+
+faultdef NOT_DOT_MEMBER;
+
+/**
+ * Check if the token is a member of a DOT_EXPR, resolve the receiver
+ * type, and find the member declaration in the receiver class.
+ */
+fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentStore* store,
+		WorkspaceIndex* workspace, Token tok, String current_uri) {
+	// Find the DOT_EXPR that has this token as its member name
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != DOT_EXPR) continue;
+		if (n.name != tok.text) continue;
+		if (n.name_line != tok.line || n.name_col != tok.col) continue;
+
+		// Found the DOT_EXPR - resolve receiver type from first child
+		TypeRef receiver_type = types::TYPE_UNKNOWN;
+
+		uint dot_idx = i;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == dot_idx) {
+				// First child = receiver
+				if (ti.has_type[j]) {
+					receiver_type = ti.node_types[j];
+				} else if (pr.nodes[j].kind == NAME_EXPR) {
+					// Try to find the receiver's declaration type
+					String recv_name = pr.nodes[j].name;
+					for (uint k = 0; k < pr.node_count; k++) {
+						if (ast::is_declaration(pr.nodes[k].kind) &&
+							pr.nodes[k].name == recv_name) {
+							if (ti.has_type[k]) {
+								receiver_type = ti.node_types[k];
+							} else if (pr.nodes[k].type_text.len > 0) {
+								receiver_type = types::parse_type_text(pr.nodes[k].type_text);
+							}
+							break;
+						}
+					}
+				}
+				break;
+			}
+		}
+
+		if (receiver_type.kind == UNKNOWN) return NOT_DOT_MEMBER~;
+
+		String type_name = receiver_type.name;
+		String member_name = tok.text;
+
+		// Search for the member declaration in the type's class declaration
+		// First, search same-file AST for class with this type name
+		if (try result = find_member_in_class_ast(pr, type_name, member_name, current_uri)) {
+			return result;
+		}
+
+		// Search workspace for the type's class and its members
+		if (workspace != null) {
+			if (try result = find_member_in_workspace_class(workspace, store, type_name, member_name)) {
+				return result;
+			}
+		}
+
+		break;
+	}
+
+	return NOT_DOT_MEMBER~;
+}
+
+/**
+ * Search for a member declaration inside a class in the same-file AST.
+ */
+fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String member_name, String uri) {
+	// Find the class declaration
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if ((n.kind == CLASS_DECL || n.kind == INTERFACE_DECL || n.kind == OBJECT_DECL) &&
+			n.name == class_name) {
+			// Search children for the member
+			for (uint j = 0; j < pr.node_count; j++) {
+				AstNode* child = &pr.nodes[j];
+				if (child.parent != i) continue;
+				if (!ast::is_declaration(child.kind)) continue;
+				if (child.name != member_name) continue;
+				return build_location_from_node(uri, child);
+			}
+		}
+	}
+
+	return NOT_DOT_MEMBER~;
+}
+
+/**
+ * Search the workspace index for a class and find a member declaration
+ * by parsing the class's source file.
+ */
+fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentStore* store,
+		String class_name, String member_name) {
+	// Look up the class in the workspace index
+	if (try indices = workspace.lookup_by_name(class_name)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+				sym.kind != SymbolKind.OBJECT) continue;
+
+			// Try to parse the file and find the member
+			String content;
+			char[] disk_data;
+
+			if (try doc = store.get(sym.uri)) {
+				content = doc.content;
+			} else {
+				String file_path = workspace::uri_to_path(sym.uri);
+				if (try d = std::io::file::load(tmem, file_path)) {
+					disk_data = d;
+					content = (String)disk_data;
+				} else {
+					continue;
+				}
+			}
+
+			ParseResult* pr = mem::new(ParseResult);
+			defer mem::free(pr);
+			parser::parse(content, pr);
+
+			// Find the class, then its member
+			if (try result = find_member_in_class_ast(pr, class_name, member_name, sym.uri)) {
+				return result;
+			}
+		}
+	}
+
+	return NOT_DOT_MEMBER~;
 }
 
 // ── Cross-file definition lookup ──────────────────────────────────

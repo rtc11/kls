@@ -3,13 +3,15 @@ module kls::document;
 import std::collections;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
+import kls::kotlin::types;
 
 struct Document {
 	String uri;
 	String language_id;
 	int version;
 	String content;
-	ParseResult* cached_ast;  // Lazily populated, heap-allocated
+	ParseResult* cached_ast;    // Lazily populated, heap-allocated
+	TypeInfo* cached_types;     // Lazily populated, heap-allocated (parallel to cached_ast)
 }
 
 struct DocumentStore {
@@ -29,6 +31,9 @@ fn void DocumentStore.free(DocumentStore* self) {
 				doc.cached_ast.free_errors();
 				mem::free(doc.cached_ast);
 			}
+			if (doc.cached_types != null) {
+				mem::free(doc.cached_types);
+			}
 			mem::free(doc.uri.ptr);
 			mem::free(doc.language_id.ptr);
 			mem::free(doc.content.ptr);
@@ -44,6 +49,9 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 			old.cached_ast.free_errors();
 			mem::free(old.cached_ast);
 		}
+		if (old.cached_types != null) {
+			mem::free(old.cached_types);
+		}
 		mem::free(old.uri.ptr);
 		mem::free(old.language_id.ptr);
 		mem::free(old.content.ptr);
@@ -54,6 +62,7 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 		.version = version,
 		.content = content.copy(mem),
 		.cached_ast = null,
+		.cached_types = null,
 	};
 	// HashMap copies keys internally (COPY_KEYS), so pass uri directly
 	self.docs.set(uri, doc);
@@ -61,11 +70,15 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 
 fn void DocumentStore.update(DocumentStore* self, String uri, int version, String content) {
 	if (try doc = self.docs.get_ref(uri)) {
-		// Invalidate cached AST before replacing content
+		// Invalidate cached AST and types before replacing content
 		if (doc.cached_ast != null) {
 			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);
 			doc.cached_ast = null;
+		}
+		if (doc.cached_types != null) {
+			mem::free(doc.cached_types);
+			doc.cached_types = null;
 		}
 		// Free old content before replacing
 		mem::free(doc.content.ptr);
@@ -82,11 +95,15 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 		uint start_offset, uint end_offset, String new_text) {
 	if (try doc = self.docs.get_ref(uri)) {
-		// Invalidate cached AST
+		// Invalidate cached AST and types
 		if (doc.cached_ast != null) {
 			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);
 			doc.cached_ast = null;
+		}
+		if (doc.cached_types != null) {
+			mem::free(doc.cached_types);
+			doc.cached_types = null;
 		}
 
 		String old = doc.content;
@@ -155,11 +172,14 @@ fn long position_to_byte_offset(String content, uint line, uint character) {
 }
 
 fn void DocumentStore.close(DocumentStore* self, String uri) {
-	// Free document strings and cached AST before HashMap.remove() frees the entry
+	// Free document strings and cached AST/types before HashMap.remove() frees the entry
 	if (try doc = self.docs.get_ref(uri)) {
 		if (doc.cached_ast != null) {
 			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);
+		}
+		if (doc.cached_types != null) {
+			mem::free(doc.cached_types);
 		}
 		mem::free(doc.uri.ptr);
 		mem::free(doc.language_id.ptr);
@@ -187,4 +207,26 @@ fn ParseResult*? DocumentStore.get_ast(DocumentStore* self, String uri) {
 	}
 
 	return doc.cached_ast;
+}
+
+/**
+ * Get a cached TypeInfo for a document, resolving lazily on first access.
+ * Requires get_ast() to have been called first (or calls it internally).
+ * The returned pointer is owned by the Document and must NOT be freed by the caller.
+ * Returns a fault if the document is not found.
+ */
+fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
+	Document* doc = self.docs.get_ref(uri)!;
+
+	if (doc.cached_types == null) {
+		// Ensure AST is available first
+		if (doc.cached_ast == null) {
+			doc.cached_ast = mem::new(ParseResult);
+			parser::parse(doc.content, doc.cached_ast);
+		}
+		doc.cached_types = mem::new(TypeInfo);
+		types::resolve_types(doc.cached_ast, doc.cached_types);
+	}
+
+	return doc.cached_types;
 }

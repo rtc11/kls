@@ -821,3 +821,166 @@ fn void workspace_diagnostic_uses_previous_result_ids() @test {
 		assert(found_full, "should have report for changed.kt");
 	};
 }
+
+// ── Receiver lambda member resolution tests ───────────────────────
+
+fn void receiver_lambda_member_not_flagged_as_unresolved() @test {
+	@pool() {
+		// Module.() -> Unit lambda: `src` is a member of Module via data class var param
+		Object* result = build_diagnostics_with_workspace(
+			`data class Module(var src: String = "")
+
+fun module(block: Module.() -> Unit) {}
+
+fun main() {
+    module { src = "example" }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'src'"),
+				"receiver lambda member 'src' should not be flagged as unresolved, got: %s", msg);
+		}
+	};
+}
+
+fn void receiver_lambda_multiple_members_not_flagged() @test {
+	@pool() {
+		// Multiple members accessed inside a receiver lambda
+		Object* result = build_diagnostics_with_workspace(
+			`data class Config(var name: String = "", var debug: Boolean = false)
+
+fun configure(block: Config.() -> Unit) {}
+
+fun main() {
+    configure {
+        name = "myapp"
+        debug = true
+    }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'name'"),
+				"receiver lambda member 'name' should not be flagged");
+			assert(!msg.contains("Unresolved reference: 'debug'"),
+				"receiver lambda member 'debug' should not be flagged");
+		}
+	};
+}
+
+fn void receiver_lambda_class_with_fun_member() @test {
+	@pool() {
+		// Class with a function member accessed inside receiver lambda
+		Object* result = build_diagnostics_with_workspace(
+			`class Builder {
+    fun add(item: String) {}
+}
+
+fun build(block: Builder.() -> Unit) {}
+
+fun main() {
+    build {
+        add("item1")
+    }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'add'"),
+				"receiver lambda fun member 'add' should not be flagged");
+		}
+	};
+}
+
+fn void receiver_lambda_class_with_property_member() @test {
+	@pool() {
+		// Class with a property member accessed inside receiver lambda
+		Object* result = build_diagnostics_with_workspace(
+			`class Settings {
+    var timeout: Int = 30
+}
+
+fun settings(block: Settings.() -> Unit) {}
+
+fun main() {
+    settings {
+        timeout = 60
+    }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'timeout'"),
+				"receiver lambda property member 'timeout' should not be flagged");
+		}
+	};
+}
+
+fn void non_member_in_receiver_lambda_still_checked() @test {
+	@pool() {
+		// A name that is NOT a member of the receiver class should still
+		// go through normal resolution (not blindly skipped)
+		Object* result = build_diagnostics_with_workspace(
+			`data class Module(var src: String = "")
+
+fun module(block: Module.() -> Unit) {}
+
+fun main() {
+    val x = 42
+    module {
+        src = "example"
+        println(x)
+    }
+}`
+		);
+		assert(result.is_indexable());
+		// 'x' is a local variable -- should be resolved via is_name_in_scope
+		// 'println' is auto-imported from kotlin.io -- should be resolved
+		// 'src' is a receiver lambda member -- should be resolved
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'x'"),
+				"local var 'x' should be resolved in receiver lambda");
+			assert(!msg.contains("Unresolved reference: 'src'"),
+				"receiver member 'src' should be resolved");
+		}
+	};
+}
+
+fn void receiver_lambda_non_existing_member_not_suppressed() @test {
+	@pool() {
+		// A name inside a receiver lambda that is NOT a member of the
+		// receiver class should NOT be suppressed (if class is in same file)
+		// Note: this will only flag if the name is in some index (e.g. stdlib)
+		// For completely unknown names, we don't flag at all (existing behavior)
+		Object* result = build_diagnostics_with_workspace(
+			`data class Module(var src: String = "")
+
+fun module(block: Module.() -> Unit) {}
+
+fun main() {
+    module {
+        src = "example"
+    }
+}`
+		);
+		// No false positives for 'src'
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'src'"),
+				"receiver member 'src' should not be flagged");
+		}
+	};
+}

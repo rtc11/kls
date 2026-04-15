@@ -10,6 +10,9 @@ import kls::kotlin::token;
 import kls::kotlin::symbols;
 import kls::kotlin::stdlib;
 import kls::kotlin::jdk_symbols;
+import kls::kotlin::ast;
+import kls::kotlin::parser;
+import kls::kotlin::types;
 import kls::workspace;
 import kls::deps::jar_index;
 
@@ -66,11 +69,24 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	String prefix = get_prefix_at_position(doc.content, line, character);
 
+	// Check if we're in a dot-completion context (after . or ?.)
+	bool is_dot_context = is_dot_completion_context(doc.content, line, character, prefix);
+
 	// Build completion items
 	Object* items = object::new_obj(tmem);
 
+	if (is_dot_context) {
+		// Dot-completion: resolve receiver type and offer members
+		add_dot_completions(items, store, uri, doc.content, line, character, prefix);
+	}
+
+	// Always add general completions (keywords, identifiers, etc.)
+	// In dot context these still help since the member lookup may not cover everything
+
 	// Add keyword completions
-	add_keyword_completions(items, prefix);
+	if (!is_dot_context) {
+		add_keyword_completions(items, prefix);
+	}
 
 	// Add identifier completions from the document
 	add_identifier_completions(items, doc.content, prefix);
@@ -213,6 +229,223 @@ fn Object* build_empty_completion_list() {
 	result.set("isIncomplete", false);
 	result.set("items", items);
 	return result;
+}
+
+// ── Dot-completion ────────────────────────────────────────────────
+
+/**
+ * Check if the cursor is in a dot-completion context (right after . or ?.)
+ * by looking at what precedes the prefix in the source.
+ */
+fn bool is_dot_completion_context(String content, uint line, uint character, String prefix) {
+	long byte_offset = hover::position_to_offset(content, line, character);
+	if (byte_offset <= 0) return false;
+
+	// Move back past the prefix to find what's before it
+	usz pos = (usz)byte_offset - prefix.len;
+	if (pos == 0) return false;
+
+	// Check for dot or safe-call dot
+	if (content[pos - 1] == '.') {
+		// Could be plain dot or end of ?. safe-call
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * Find the receiver identifier name before a dot at the given position.
+ * Scans backward from the dot to find the identifier text.
+ */
+fn String find_receiver_name(String content, uint line, uint character, String prefix) {
+	long byte_offset = hover::position_to_offset(content, line, character);
+	if (byte_offset <= 0) return "";
+
+	// Move back past the prefix and the dot
+	usz pos = (usz)byte_offset - prefix.len;
+	if (pos == 0) return "";
+
+	// Skip over the dot
+	if (pos > 0 && content[pos - 1] == '.') {
+		pos--;
+		// Also skip ? for safe-call ?.
+		if (pos > 0 && content[pos - 1] == '?') {
+			pos--;
+		}
+	} else {
+		return "";
+	}
+
+	// Now scan backward to find the receiver identifier
+	usz end = pos;
+	while (pos > 0 && lexer::is_ident_part(content[pos - 1])) {
+		pos--;
+	}
+
+	if (pos == end) return "";
+	if (!lexer::is_ident_start(content[pos])) return "";
+
+	return content[pos:end - pos];
+}
+
+/**
+ * Add dot-completion items by resolving the receiver type and looking
+ * up available members. Falls back to stdlib receiver members.
+ */
+fn void add_dot_completions(Object* items, DocumentStore* store, String uri, String content,
+		uint line, uint character, String prefix) {
+	String receiver_name = find_receiver_name(content, line, character, prefix);
+	if (receiver_name.len == 0) return;
+
+	// Try to resolve the receiver type from the AST + TypeInfo
+	TypeRef receiver_type = types::TYPE_UNKNOWN;
+
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	TypeInfo* ti = store.get_types(uri) ?? null;
+
+	if (pr != null && ti != null) {
+		receiver_type = resolve_receiver_type(pr, ti, receiver_name, line, character);
+	}
+
+	// If we couldn't resolve via AST, try to infer from the name
+	// (e.g., receiver is a class name -> offer static members)
+	if (receiver_type.kind == UNKNOWN) {
+		// Try literal type heuristic based on the receiver text
+		receiver_type = guess_receiver_type(content, receiver_name, line, character);
+	}
+
+	if (receiver_type.kind == UNKNOWN) return;
+
+	// Look up members for this type
+	MemberInfo[128] members;
+	usz member_count = types::lookup_members(&receiver_type, members[..]);
+
+	for (usz i = 0; i < member_count; i++) {
+		MemberInfo* m = &members[i];
+
+		// Filter by prefix if one exists
+		if (prefix.len > 0 && !m.name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && m.name == prefix) continue;
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", m.name);
+		item.set("kind", m.kind);
+		item.set("detail", m.detail);
+
+		// Add documentation with signature
+		if (m.signature.len > 0) {
+			Object* doc_obj = object::new_obj(tmem);
+			doc_obj.set("kind", "markdown");
+			DString doc_val;
+			doc_val.tinit();
+			doc_val.appendf("```kotlin\n%s\n```", m.signature);
+			doc_obj.set("value", doc_val.str_view());
+			item.set("documentation", doc_obj);
+		}
+
+		items.push(item);
+	}
+
+	// Also add receiver-specific stdlib completions
+	add_stdlib_receiver_completions(items, &receiver_type, prefix);
+}
+
+/**
+ * Resolve the type of a receiver identifier by searching the AST
+ * for declarations and expression nodes with that name.
+ */
+fn TypeRef resolve_receiver_type(ParseResult* pr, TypeInfo* ti, String name, uint line, uint character) {
+	// First, search for a declaration with this name (scope-aware: innermost first)
+	// Simplified: just find any declaration with this name and return its type
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name != name) continue;
+
+		if (ast::is_declaration(n.kind)) {
+			if (ti.has_type[i]) {
+				return ti.node_types[i];
+			}
+			// Fall back to type_text
+			if (n.type_text.len > 0) {
+				return types::parse_type_text(n.type_text);
+			}
+		}
+
+		// Also check NAME_EXPR nodes
+		if (n.kind == NAME_EXPR && ti.has_type[i]) {
+			return ti.node_types[i];
+		}
+	}
+
+	return types::TYPE_UNKNOWN;
+}
+
+/**
+ * Try to guess the receiver type by looking at a string literal or other
+ * contextual clues near the cursor.
+ */
+fn TypeRef guess_receiver_type(String content, String receiver_name, uint line, uint character) {
+	// For now, just try well-known receiver names
+	if (receiver_name == "this") {
+		// Can't resolve 'this' without class context
+		return types::TYPE_UNKNOWN;
+	}
+
+	return types::TYPE_UNKNOWN;
+}
+
+/**
+ * Add stdlib extension function completions that are available on
+ * the given receiver type.
+ */
+fn void add_stdlib_receiver_completions(Object* items, TypeRef* receiver_type, String prefix) {
+	if (receiver_type.kind == UNKNOWN) return;
+
+	String type_name = receiver_type.name;
+	if (type_name.len == 0) return;
+
+	// Look up stdlib symbols with matching receiver
+	StdlibSymbol*[64] matches;
+	usz count = stdlib::lookup_by_receiver(type_name, &matches);
+
+	for (usz i = 0; i < count; i++) {
+		StdlibSymbol* sym = matches[i];
+
+		if (prefix.len > 0 && !sym.name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && sym.name == prefix) continue;
+
+		// Check for duplicates with already-added items
+		bool already_present = false;
+		for (usz j = 0; j < items.get_len(); j++) {
+			Object* existing = items.get_at(j);
+			if (try label = existing.get_string("label")) {
+				if (label == sym.name) {
+					already_present = true;
+					break;
+				}
+			}
+		}
+		if (already_present) continue;
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", sym.name);
+		item.set("kind", stdlib_kind_to_completion_kind(sym.kind));
+		item.set("detail", sym.package_name);
+
+		Object* doc_obj = object::new_obj(tmem);
+		doc_obj.set("kind", "markdown");
+		DString doc_val;
+		doc_val.tinit();
+		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+		if (sym.doc.len > 0) {
+			doc_val.appendf("\n\n%s", sym.doc);
+		}
+		doc_obj.set("value", doc_val.str_view());
+		item.set("documentation", doc_obj);
+
+		items.push(item);
+	}
 }
 
 // ── Workspace completions ─────────────────────────────────────────

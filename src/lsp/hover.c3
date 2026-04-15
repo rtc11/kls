@@ -11,6 +11,7 @@ import kls::kotlin::token;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
 import kls::kotlin::stdlib;
+import kls::kotlin::types;
 import kls::workspace;
 import kls::deps::jar_index;
 
@@ -47,8 +48,9 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
 	// For identifiers, try AST-based lookup for rich signatures
 	if (tok.kind == IDENTIFIER) {
 		ParseResult* pr = store.get_ast(uri) ?? null;
+		TypeInfo* ti = store.get_types(uri) ?? null;
 		if (pr != null) {
-			if (try desc = describe_identifier_from_ast(pr, doc.content, tok)) {
+			if (try desc = describe_identifier_from_ast(pr, ti, doc.content, tok)) {
 				description = desc;
 				found_description = true;
 			}
@@ -114,14 +116,16 @@ fn Object* handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object*
 
 /**
  * Try to find a declaration matching the identifier token in the AST
- * and return a rich signature description.
+ * and return a rich signature description. Also checks for inferred
+ * types from TypeInfo when explicit type annotations are missing.
  */
-fn String? describe_identifier_from_ast(ParseResult* pr, String source, Token tok) {
+fn String? describe_identifier_from_ast(ParseResult* pr, TypeInfo* ti, String source, Token tok) {
 	if (pr.node_count == 0) return NO_DESCRIPTION~;
 
 	// Search all declarations for one matching this identifier name
 	String target = tok.text;
 	AstNode* best = null;
+	uint best_idx = 0;
 
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
@@ -131,19 +135,144 @@ fn String? describe_identifier_from_ast(ParseResult* pr, String source, Token to
 		// Prefer the first match
 		if (best == null) {
 			best = n;
+			best_idx = i;
 		}
 	}
 
-	if (best == null) return NO_DESCRIPTION~;
+	if (best != null) {
+		return build_signature(best, pr, source, ti, best_idx);
+	}
 
-	return build_signature(best, pr, source);
+	// No declaration found - try to show inferred type for expression identifiers
+	if (ti != null) {
+		if (try desc = describe_expression_type(pr, ti, tok)) {
+			return desc;
+		}
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Try to find an expression AST node at the token position and return
+ * a description with its inferred type from TypeInfo.
+ * Also handles dot-expression members (e.g. str.length -> show member info).
+ */
+fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok) {
+	// First, check if this token is the member name of a DOT_EXPR
+	if (try desc = describe_dot_member(pr, ti, tok)) {
+		return desc;
+	}
+
+	// Find the NAME_EXPR or other expression node that matches this token
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind == NAME_EXPR && n.name == tok.text &&
+			n.name_line == tok.line && n.name_col == tok.col) {
+			if (ti.has_type[i]) {
+				String type_str = types::format_type(&ti.node_types[i]);
+				if (type_str.len > 0) {
+					DString ds;
+					ds.tinit();
+					ds.appendf("```kotlin\n%s: %s\n```", tok.text, type_str);
+					return ds.str_view();
+				}
+			}
+			break;
+		}
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Check if the token at the cursor is a member name in a DOT_EXPR,
+ * resolve the receiver type, and show member signature information.
+ */
+fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok) {
+	// Find a DOT_EXPR node that has this token as its member name
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != DOT_EXPR) continue;
+		if (n.name != tok.text) continue;
+		if (n.name_line != tok.line || n.name_col != tok.col) continue;
+
+		// Found the DOT_EXPR - resolve receiver type from first child
+		TypeRef receiver_type = types::TYPE_UNKNOWN;
+
+		// The receiver is the first child of this DOT_EXPR
+		uint dot_idx = i;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == dot_idx) {
+				// First child = receiver
+				if (ti.has_type[j]) {
+					receiver_type = ti.node_types[j];
+				}
+				break;
+			}
+		}
+
+		if (receiver_type.kind == UNKNOWN) return NO_DESCRIPTION~;
+
+		// Look up this member in the receiver type's member table
+		MemberInfo[128] members;
+		usz count = types::lookup_members(&receiver_type, members[..]);
+
+		for (usz m = 0; m < count; m++) {
+			if (members[m].name == tok.text) {
+				DString ds;
+				ds.tinit();
+				ds.appendf("```kotlin\n%s\n```", members[m].signature);
+				String receiver_str = types::format_type(&receiver_type);
+				if (receiver_str.len > 0) {
+					ds.appendf("\n\n*Member of %s*", receiver_str);
+				}
+				return ds.str_view();
+			}
+		}
+
+		// Check stdlib receiver extensions
+		StdlibSymbol*[16] stdlib_matches;
+		usz stdlib_count = stdlib::lookup_by_receiver(receiver_type.name, &stdlib_matches);
+		for (usz m = 0; m < stdlib_count; m++) {
+			if (stdlib_matches[m].name == tok.text) {
+				DString ds;
+				ds.tinit();
+				ds.appendf("```kotlin\n%s\n```", stdlib_matches[m].signature);
+				if (stdlib_matches[m].package_name.len > 0) {
+					ds.appendf("\n\n*%s*", stdlib_matches[m].package_name);
+				}
+				if (stdlib_matches[m].doc.len > 0) {
+					ds.appendf("\n\n%s", stdlib_matches[m].doc);
+				}
+				return ds.str_view();
+			}
+		}
+
+		// If we found the DOT_EXPR but couldn't resolve the member,
+		// at least show the inferred type of the whole expression
+		if (ti.has_type[i]) {
+			String type_str = types::format_type(&ti.node_types[i]);
+			if (type_str.len > 0) {
+				DString ds;
+				ds.tinit();
+				ds.appendf("```kotlin\n%s: %s\n```", tok.text, type_str);
+				return ds.str_view();
+			}
+		}
+
+		break;
+	}
+
+	return NO_DESCRIPTION~;
 }
 
 /**
  * Build a markdown signature string from an AST declaration node.
  * If source is provided, also appends the KDoc/comment documentation.
+ * If type_info is provided, uses inferred types when type_text is empty.
  */
-fn String build_signature(AstNode* node, ParseResult* pr, String source = "") {
+fn String build_signature(AstNode* node, ParseResult* pr, String source = "", TypeInfo* type_info = null, uint node_idx = 0) {
 	DString ds;
 	ds.tinit();
 
@@ -161,8 +290,8 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "") {
 			bool first = true;
 			for (uint i = 0; i < pr.node_count; i++) {
 				AstNode* child = &pr.nodes[i];
-				uint node_idx = ast::node_index(pr, node);
-				if (child.parent != node_idx) continue;
+				uint n_idx = ast::node_index(pr, node);
+				if (child.parent != n_idx) continue;
 				if (child.kind != PARAM) continue;
 
 				if (!first) {
@@ -177,6 +306,11 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "") {
 			ds.appendf(")");
 			if (node.type_text.len > 0) {
 				ds.appendf(": %s", node.type_text);
+			} else if (type_info != null && type_info.has_type[node_idx]) {
+				String inferred = types::format_type(&type_info.node_types[node_idx]);
+				if (inferred.len > 0) {
+					ds.appendf(": %s", inferred);
+				}
 			}
 
 		case CLASS_DECL:
@@ -197,6 +331,11 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "") {
 			ds.appendf("%s %s", prop_keyword, node.name);
 			if (node.type_text.len > 0) {
 				ds.appendf(": %s", node.type_text);
+			} else if (type_info != null && type_info.has_type[node_idx]) {
+				String inferred = types::format_type(&type_info.node_types[node_idx]);
+				if (inferred.len > 0) {
+					ds.appendf(": %s /* inferred */", inferred);
+				}
 			}
 
 		case TYPEALIAS_DECL:
@@ -210,8 +349,8 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "") {
 			bool first = true;
 			for (uint i = 0; i < pr.node_count; i++) {
 				AstNode* child = &pr.nodes[i];
-				uint node_idx = ast::node_index(pr, node);
-				if (child.parent != node_idx) continue;
+				uint n_idx = ast::node_index(pr, node);
+				if (child.parent != n_idx) continue;
 				if (child.kind != PARAM) continue;
 
 				if (!first) {

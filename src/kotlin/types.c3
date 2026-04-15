@@ -1,0 +1,1628 @@
+module kls::kotlin::types;
+
+import kls::kotlin::ast;
+import kls::kotlin::token;
+import kls::kotlin::lexer;
+import std::core::string;
+
+// ── Type representation ────────────────────────────────────────────
+
+enum TypeKind : int {
+	UNKNOWN,          // unresolved / error type
+	SIMPLE,           // e.g. Int, String, MyClass
+	FUNCTION,         // (A, B) -> C  or  suspend (A) -> B
+	GENERIC,          // Name<T1, T2>  e.g. List<Int>
+	UNIT,             // Unit (void-equivalent)
+	NOTHING,          // Nothing (bottom type)
+}
+
+const usz MAX_TYPE_ARGS = 8;
+
+/**
+ * A type reference. Type arguments are stored as simple name strings
+ * (not nested TypeRefs) to keep the struct non-recursive and fixed-size.
+ * The full_text field preserves the original source text for display.
+ */
+struct TypeRef {
+	TypeKind kind;
+	String name;              // simple name: "Int", "List", "MyClass"
+	String full_text;         // original text (for display): "List<Int>?"
+	bool nullable;
+	bool is_suspend;          // for function types: suspend (...) -> T
+
+	// For GENERIC: simple type argument names
+	usz type_arg_count;
+	String[MAX_TYPE_ARGS] type_arg_names;   // e.g. ["Int"], ["String", "Any"]
+	bool[MAX_TYPE_ARGS] type_arg_nullable;  // nullable flags per arg
+
+	// For FUNCTION: parameter and return types as names
+	usz param_type_count;
+	String[MAX_TYPE_ARGS] param_type_names; // max 8 params for display
+	String return_type_name;                // e.g. "String", "Unit"
+	String receiver_type_name;              // for extension fn types: e.g. "Int"
+}
+
+// ── Well-known types ───────────────────────────────────────────────
+
+const TypeRef TYPE_UNKNOWN = { .kind = UNKNOWN, .name = "" };
+const TypeRef TYPE_UNIT    = { .kind = UNIT, .name = "Unit" };
+const TypeRef TYPE_NOTHING = { .kind = NOTHING, .name = "Nothing" };
+const TypeRef TYPE_INT     = { .kind = SIMPLE, .name = "Int" };
+const TypeRef TYPE_LONG    = { .kind = SIMPLE, .name = "Long" };
+const TypeRef TYPE_FLOAT   = { .kind = SIMPLE, .name = "Float" };
+const TypeRef TYPE_DOUBLE  = { .kind = SIMPLE, .name = "Double" };
+const TypeRef TYPE_BOOLEAN = { .kind = SIMPLE, .name = "Boolean" };
+const TypeRef TYPE_CHAR    = { .kind = SIMPLE, .name = "Char" };
+const TypeRef TYPE_STRING  = { .kind = SIMPLE, .name = "String" };
+const TypeRef TYPE_BYTE    = { .kind = SIMPLE, .name = "Byte" };
+const TypeRef TYPE_SHORT   = { .kind = SIMPLE, .name = "Short" };
+const TypeRef TYPE_ANY     = { .kind = SIMPLE, .name = "Any" };
+
+const TypeRef TYPE_NOTHING_NULLABLE = { .kind = SIMPLE, .name = "Nothing", .nullable = true };
+
+// ── Per-file type info cache ───────────────────────────────────────
+
+struct TypeInfo {
+	TypeRef[ast::MAX_NODES] node_types;  // parallel to ParseResult.nodes
+	bool[ast::MAX_NODES] has_type;       // whether node_types[i] is populated
+}
+
+// ── Type text parser ───────────────────────────────────────────────
+
+/**
+ * Parse a type annotation text (e.g. "List<Int>?", "(Int) -> String")
+ * into a structured TypeRef. Uses the lexer to tokenize the type text.
+ */
+fn TypeRef parse_type_text(String text) {
+	if (text.len == 0) return TYPE_UNKNOWN;
+
+	TypeParser tp = { .source = text, .lexer = lexer::init(text) };
+	tp.advance(); // prime first token
+
+	TypeRef result = tp.parse_type();
+	if (result.full_text.len == 0) {
+		result.full_text = text;
+	}
+	return result;
+}
+
+// ── Type parser (internal) ─────────────────────────────────────────
+
+struct TypeParser {
+	String source;
+	Lexer lexer;
+	Token current;
+	Token previous;
+}
+
+fn void TypeParser.advance(TypeParser* self) {
+	self.previous = self.current;
+	self.current = self.lexer.next();
+}
+
+fn bool TypeParser.at(TypeParser* self, TokenKind kind) {
+	return self.current.kind == kind;
+}
+
+fn bool TypeParser.at_eof(TypeParser* self) {
+	return self.current.kind == EOF;
+}
+
+fn bool TypeParser.eat(TypeParser* self, TokenKind kind) {
+	if (self.current.kind == kind) {
+		self.advance();
+		return true;
+	}
+	return false;
+}
+
+fn bool TypeParser.at_identifier(TypeParser* self) {
+	return self.current.kind.is_identifier_or_soft_keyword();
+}
+
+/**
+ * Parse a full type reference: simple, generic, nullable, function, suspend.
+ */
+fn TypeRef TypeParser.parse_type(TypeParser* self) {
+	// Handle suspend function types: suspend (A) -> B
+	if (self.at(KW_SUSPEND)) {
+		self.advance();
+		TypeRef ft = self.parse_type();
+		ft.is_suspend = true;
+		ft.full_text = self.source;
+		return ft;
+	}
+
+	// Handle function types starting with '(': (A, B) -> C
+	if (self.at(LPAREN)) {
+		return self.parse_function_or_paren_type();
+	}
+
+	// Simple or generic type: Name, Name<T>, com.example.Type
+	if (self.at_identifier() || self.at(KW_DYNAMIC)) {
+		return self.parse_simple_or_generic_type();
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Parse (A, B) -> C (function type) or just (Type) (parenthesized type).
+ */
+fn TypeRef TypeParser.parse_function_or_paren_type(TypeParser* self) {
+	self.advance(); // consume '('
+
+	// Collect parameter type names
+	TypeRef result;
+	result.kind = FUNCTION;
+	result.param_type_count = 0;
+
+	while (!self.at(RPAREN) && !self.at_eof()) {
+		if (result.param_type_count >= MAX_TYPE_ARGS) break;
+		TypeRef param = self.parse_type();
+		result.param_type_names[result.param_type_count] = format_type(&param);
+		result.param_type_count++;
+		if (!self.eat(COMMA)) break;
+	}
+
+	self.eat(RPAREN);
+
+	// Check for arrow: -> ReturnType
+	if (self.eat(ARROW)) {
+		TypeRef ret = self.parse_type();
+		result.return_type_name = format_type(&ret);
+		result.name = "Function";
+		result.full_text = self.source;
+
+		// Nullable function type: ((A) -> B)?
+		while (self.eat(QUEST)) {
+			result.nullable = true;
+		}
+		return result;
+	}
+
+	// Not a function type -- parenthesized single type
+	if (result.param_type_count == 1) {
+		// Reconstruct a simple type from the param name
+		TypeRef inner;
+		inner.kind = SIMPLE;
+		inner.name = result.param_type_names[0];
+		// Check for nullable after parens
+		while (self.eat(QUEST)) {
+			inner.nullable = true;
+		}
+		inner.full_text = self.source;
+		return inner;
+	}
+
+	// Multiple types in parens without arrow -- unusual, treat as unknown
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Parse a simple type (Name), dotted type (com.example.Type),
+ * generic type (List<Int>), with optional nullable suffix (?).
+ * Also handles receiver function types: Type.(A) -> B
+ */
+fn TypeRef TypeParser.parse_simple_or_generic_type(TypeParser* self) {
+	TypeRef result;
+	result.kind = SIMPLE;
+
+	// Collect dotted name: com.example.Type
+	DString name_buf;
+	name_buf.tinit();
+	name_buf.appendf("%s", self.current.text);
+	self.advance();
+
+	while (self.eat(DOT)) {
+		if (self.at_identifier()) {
+			name_buf.appendf(".%s", self.current.text);
+			self.advance();
+		} else if (self.at(LPAREN)) {
+			// Receiver function type: Type.(A) -> B
+			String receiver_name = name_buf.str_view().tcopy();
+
+			TypeRef ft = self.parse_function_or_paren_type();
+			ft.receiver_type_name = receiver_name;
+			ft.full_text = self.source;
+			return ft;
+		} else {
+			break;
+		}
+	}
+
+	result.name = name_buf.str_view().tcopy();
+
+	// Generic arguments: <T, R>
+	if (self.at(LANGLE)) {
+		self.advance(); // consume '<'
+		result.kind = GENERIC;
+		result.type_arg_count = 0;
+
+		while (!self.at(RANGLE) && !self.at_eof()) {
+			if (result.type_arg_count >= MAX_TYPE_ARGS) {
+				// Skip remaining
+				self.skip_angle_contents();
+				break;
+			}
+
+			// Handle variance annotations: in T, out T
+			if (self.eat(KW_IN) || self.eat(KW_OUT)) {
+				// skip variance, parse the type
+			}
+
+			// Handle star projection: *
+			if (self.eat(MULT)) {
+				result.type_arg_names[result.type_arg_count] = "*";
+				result.type_arg_count++;
+				if (!self.eat(COMMA)) break;
+				continue;
+			}
+
+			TypeRef arg = self.parse_type();
+			result.type_arg_names[result.type_arg_count] = format_type(&arg);
+			result.type_arg_nullable[result.type_arg_count] = arg.nullable;
+			result.type_arg_count++;
+			if (!self.eat(COMMA)) break;
+		}
+		self.eat(RANGLE);
+	}
+
+	// Nullable: Type?, List<Int>?
+	while (self.eat(QUEST)) {
+		result.nullable = true;
+	}
+
+	// Check for receiver function type: Type<G>.(A) -> B
+	if (self.eat(DOT)) {
+		if (self.at(LPAREN)) {
+			String receiver_name = format_type(&result);
+			TypeRef ft = self.parse_function_or_paren_type();
+			ft.receiver_type_name = receiver_name;
+			ft.full_text = self.source;
+			return ft;
+		}
+	}
+
+	result.full_text = self.source;
+	return result;
+}
+
+/**
+ * Skip contents inside angle brackets (for overflow).
+ */
+fn void TypeParser.skip_angle_contents(TypeParser* self) {
+	int depth = 1;
+	while (depth > 0 && !self.at_eof()) {
+		if (self.at(LANGLE)) depth++;
+		if (self.at(RANGLE)) {
+			depth--;
+			if (depth == 0) return;
+		}
+		self.advance();
+	}
+}
+
+// ── Type formatting ────────────────────────────────────────────────
+
+/**
+ * Format a TypeRef as a human-readable Kotlin type string.
+ * Uses temp allocator.
+ */
+fn String format_type(TypeRef* t) {
+	if (t.kind == UNKNOWN) return "";
+	if (t.kind == UNIT) return t.nullable ? "Unit?" : "Unit";
+	if (t.kind == NOTHING) return t.nullable ? "Nothing?" : "Nothing";
+
+	DString ds;
+	ds.tinit();
+	format_type_into(&ds, t);
+	return ds.str_view();
+}
+
+fn void format_type_into(DString* ds, TypeRef* t) {
+	switch (t.kind) {
+		case UNKNOWN:
+			return;
+
+		case UNIT:
+			ds.appendf("Unit");
+
+		case NOTHING:
+			ds.appendf("Nothing");
+
+		case SIMPLE:
+			ds.appendf("%s", t.name);
+
+		case GENERIC:
+			ds.appendf("%s<", t.name);
+			for (usz i = 0; i < t.type_arg_count; i++) {
+				if (i > 0) ds.appendf(", ");
+				ds.appendf("%s", t.type_arg_names[i]);
+				if (t.type_arg_nullable[i]) ds.appendf("?");
+			}
+			ds.appendf(">");
+
+		case FUNCTION:
+			if (t.is_suspend) {
+				ds.appendf("suspend ");
+			}
+			if (t.receiver_type_name.len > 0) {
+				ds.appendf("%s.", t.receiver_type_name);
+			}
+			ds.appendf("(");
+			for (usz i = 0; i < t.param_type_count; i++) {
+				if (i > 0) ds.appendf(", ");
+				ds.appendf("%s", t.param_type_names[i]);
+			}
+			ds.appendf(") -> ");
+			if (t.return_type_name.len > 0) {
+				ds.appendf("%s", t.return_type_name);
+			} else {
+				ds.appendf("Unit");
+			}
+	}
+
+	if (t.nullable) {
+		ds.appendf("?");
+	}
+}
+
+// ── Literal type inference ─────────────────────────────────────────
+
+/**
+ * Infer the type of a literal expression node from its token kind
+ * and text content.
+ */
+fn TypeRef infer_literal_type(AstNode* node) {
+	if (node.kind != LITERAL_EXPR) return TYPE_UNKNOWN;
+
+	String text = node.extra_text;
+	if (text.len == 0) return TYPE_UNKNOWN;
+
+	// Check for boolean
+	if (text == "true" || text == "false") return TYPE_BOOLEAN;
+
+	// Check for null
+	if (text == "null") return TYPE_NOTHING_NULLABLE;
+
+	// Check for character literal: 'x'
+	if (text.len >= 2 && text[0] == '\'') return TYPE_CHAR;
+
+	// Check for numeric literal
+	return infer_numeric_type(text);
+}
+
+/**
+ * Infer numeric type from literal text.
+ */
+fn TypeRef infer_numeric_type(String text) {
+	if (text.len == 0) return TYPE_UNKNOWN;
+
+	// Check suffixes first (case-insensitive)
+	char last = text[text.len - 1];
+	if (text.len >= 2) {
+		char second_last = text[text.len - 2];
+
+		// uL / UL suffix -> ULong
+		if ((last == 'L' || last == 'l') && (second_last == 'u' || second_last == 'U')) {
+			return { .kind = SIMPLE, .name = "ULong" };
+		}
+	}
+
+	// L suffix -> Long
+	if (last == 'L' || last == 'l') return TYPE_LONG;
+
+	// u/U suffix -> UInt
+	if (last == 'u' || last == 'U') {
+		return { .kind = SIMPLE, .name = "UInt" };
+	}
+
+	// f/F suffix -> Float
+	if (last == 'f' || last == 'F') return TYPE_FLOAT;
+
+	// Contains decimal point or exponent -> Double
+	for (usz i = 0; i < text.len; i++) {
+		if (text[i] == '.' || text[i] == 'e' || text[i] == 'E') {
+			return TYPE_DOUBLE;
+		}
+	}
+
+	// Default integer -> Int
+	return TYPE_INT;
+}
+
+// ── Type resolution pass ───────────────────────────────────────────
+
+/**
+ * Resolve types for all nodes in a ParseResult.
+ * Walks the AST and populates TypeInfo with resolved types.
+ */
+fn void resolve_types(ParseResult* pr, TypeInfo* info) {
+	if (pr.node_count == 0) return;
+
+	// Clear type info
+	for (uint i = 0; i < pr.node_count; i++) {
+		info.has_type[i] = false;
+	}
+
+	// Phase 1: Resolve explicit type annotations on declarations
+	resolve_declaration_types(pr, info);
+
+	// Phase 2: Infer types from literal expressions
+	resolve_literal_types(pr, info);
+
+	// Phase 3: Infer types from initializers (val x = 42 -> Int)
+	resolve_initializer_types(pr, info);
+
+	// Phase 4: Propagate types through expressions
+	resolve_expression_types(pr, info);
+
+	// Phase 5: Re-run initializer inference for declarations whose
+	// initializer expressions were resolved in Phase 4
+	resolve_initializer_types(pr, info);
+}
+
+/**
+ * Phase 1: Resolve types from explicit annotations on declarations.
+ */
+fn void resolve_declaration_types(ParseResult* pr, TypeInfo* info) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+
+		switch (node.kind) {
+			case FUN_DECL:
+				if (node.type_text.len > 0) {
+					info.node_types[i] = parse_type_text(node.type_text);
+					info.has_type[i] = true;
+				}
+
+			case PROPERTY_DECL:
+				if (node.type_text.len > 0) {
+					info.node_types[i] = parse_type_text(node.type_text);
+					info.has_type[i] = true;
+				}
+
+			case PARAM:
+				if (node.type_text.len > 0) {
+					info.node_types[i] = parse_type_text(node.type_text);
+					info.has_type[i] = true;
+				}
+
+			case TYPE_PARAM:
+				if (node.type_text.len > 0) {
+					info.node_types[i] = parse_type_text(node.type_text);
+					info.has_type[i] = true;
+				}
+
+			case TYPEALIAS_DECL:
+				if (node.type_text.len > 0) {
+					info.node_types[i] = parse_type_text(node.type_text);
+					info.has_type[i] = true;
+				}
+
+			case CLASS_DECL:
+				if (node.name.len > 0) {
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.has_type[i] = true;
+				}
+
+			case INTERFACE_DECL:
+				if (node.name.len > 0) {
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.has_type[i] = true;
+				}
+
+			case OBJECT_DECL:
+				if (node.name.len > 0) {
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.has_type[i] = true;
+				}
+
+			case COMPANION_OBJECT_DECL:
+				if (node.name.len > 0) {
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.has_type[i] = true;
+				}
+
+			case ENUM_ENTRY:
+				if (node.parent != ast::NO_PARENT && node.parent < pr.node_count) {
+					AstNode* parent = &pr.nodes[node.parent];
+					if (parent.kind == CLASS_DECL && parent.name.len > 0) {
+						info.node_types[i] = { .kind = SIMPLE, .name = parent.name };
+						info.has_type[i] = true;
+					}
+				}
+
+			case TYPE_CHECK_EXPR:
+				info.node_types[i] = TYPE_BOOLEAN;
+				info.has_type[i] = true;
+
+			case TYPE_CAST_EXPR:
+				if (node.type_text.len > 0) {
+					TypeRef cast_type = parse_type_text(node.type_text);
+					if (node.extra_text == "as?") {
+						cast_type.nullable = true;
+					}
+					info.node_types[i] = cast_type;
+					info.has_type[i] = true;
+				}
+
+			default:
+				break;
+		}
+	}
+}
+
+/**
+ * Phase 2: Resolve types for literal expressions.
+ */
+fn void resolve_literal_types(ParseResult* pr, TypeInfo* info) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+
+		switch (node.kind) {
+			case LITERAL_EXPR:
+				TypeRef t = infer_literal_type(node);
+				if (t.kind != UNKNOWN) {
+					info.node_types[i] = t;
+					info.has_type[i] = true;
+				}
+
+			case STRING_TEMPLATE_EXPR:
+				info.node_types[i] = TYPE_STRING;
+				info.has_type[i] = true;
+
+			case THIS_EXPR:
+				if (try encl = find_enclosing_class(pr, i)) {
+					if (encl.name.len > 0) {
+						info.node_types[i] = { .kind = SIMPLE, .name = encl.name };
+						info.has_type[i] = true;
+					}
+				}
+
+			case SUPER_EXPR:
+				if (try encl = find_enclosing_class(pr, i)) {
+					if (try sup = ast::find_child(pr, encl, TYPE_REF)) {
+						if (sup.name.len > 0) {
+							info.node_types[i] = { .kind = SIMPLE, .name = sup.name };
+							info.has_type[i] = true;
+						}
+					}
+				}
+
+			default:
+				break;
+		}
+	}
+}
+
+/**
+ * Phase 3: Infer types from initializer expressions for properties
+ * and expression-body functions without explicit type annotations.
+ */
+fn void resolve_initializer_types(ParseResult* pr, TypeInfo* info) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+
+		if (node.kind != PROPERTY_DECL && node.kind != FUN_DECL) continue;
+		if (info.has_type[i]) continue; // already has explicit type
+
+		// Find the first expression child (the initializer)
+		TypeRef inferred = TYPE_UNKNOWN;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.kind == PARAM || child.kind == TYPE_PARAM ||
+				child.kind == BLOCK || child.kind == TYPE_REF) continue;
+
+			// This is an expression child -- use its type
+			if (info.has_type[j]) {
+				inferred = info.node_types[j];
+				break;
+			}
+			break; // only check first expression child
+		}
+
+		if (inferred.kind != UNKNOWN) {
+			info.node_types[i] = inferred;
+			info.has_type[i] = true;
+		}
+	}
+}
+
+/**
+ * Phase 4: Propagate types through expression nodes.
+ */
+fn void resolve_expression_types(ParseResult* pr, TypeInfo* info) {
+	// Multiple passes to propagate types through chains
+	for (int pass = 0; pass < 3; pass++) {
+		for (uint i = 0; i < pr.node_count; i++) {
+			if (info.has_type[i]) continue;
+
+			AstNode* node = &pr.nodes[i];
+			TypeRef resolved = resolve_single_expression(pr, info, i, node);
+
+			if (resolved.kind != UNKNOWN) {
+				info.node_types[i] = resolved;
+				info.has_type[i] = true;
+			}
+		}
+	}
+}
+
+/**
+ * Try to resolve the type of a single expression node.
+ */
+fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	switch (node.kind) {
+		case NAME_EXPR:
+			return resolve_name_expr_type(pr, info, idx, node);
+
+		case CALL_EXPR:
+			return resolve_call_expr_type(pr, info, idx, node);
+
+		case DOT_EXPR:
+			return resolve_dot_expr_type(pr, info, idx, node);
+
+		case BINARY_EXPR:
+			return resolve_binary_expr_type(pr, info, idx, node);
+
+		case PREFIX_EXPR:
+			return resolve_prefix_expr_type(pr, info, idx, node);
+
+		case POSTFIX_EXPR:
+			return resolve_postfix_expr_type(pr, info, idx, node);
+
+		case PAREN_EXPR:
+			return resolve_paren_expr_type(pr, info, idx, node);
+
+		case IF_EXPR:
+			return resolve_if_expr_type(pr, info, idx, node);
+
+		case WHEN_EXPR:
+			return resolve_when_expr_type(pr, info, idx, node);
+
+		case INDEX_EXPR:
+			return resolve_index_expr_type(pr, info, idx, node);
+
+		case TYPE_CHECK_EXPR:
+			return TYPE_BOOLEAN;  // x is Type -> Boolean
+
+		case TYPE_CAST_EXPR:
+			// x as Type -> Type, x as? Type -> Type?
+			if (node.type_text.len > 0) {
+				TypeRef cast_type = parse_type_text(node.type_text);
+				if (node.extra_text == "as?") {
+					cast_type.nullable = true;
+				}
+				return cast_type;
+			}
+			return TYPE_UNKNOWN;
+
+		case ASSIGNMENT_EXPR:
+			return TYPE_UNIT;
+
+		default:
+			return TYPE_UNKNOWN;
+	}
+}
+
+// ── Name expression resolution ─────────────────────────────────────
+
+fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	if (node.name.len == 0) return TYPE_UNKNOWN;
+
+	// Check for smart cast: if this NAME_EXPR is inside the then-branch
+	// of an `if (x is Type)`, narrow the type to Type.
+	TypeRef smart_cast = check_smart_cast(pr, info, idx, node.name);
+	if (smart_cast.kind != UNKNOWN) return smart_cast;
+
+	uint scope_idx = find_innermost_scope(pr, idx);
+
+	uint current = scope_idx;
+	while (true) {
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* candidate = &pr.nodes[j];
+			if (candidate.parent != current) continue;
+			if (!is_typed_declaration(candidate.kind)) continue;
+			if (candidate.name != node.name) continue;
+
+			if (info.has_type[j]) {
+				return info.node_types[j];
+			}
+			return TYPE_UNKNOWN;
+		}
+
+		AstNode* scope = &pr.nodes[current];
+		if (current == 0 || scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Check if a NAME_EXPR with the given name is inside the then-branch
+ * of an `if (name is Type)` check, and if so, return the narrowed type.
+ */
+fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, String name) {
+	// Walk up the parent chain looking for an IF_EXPR
+	uint current = name_idx;
+	while (current != 0 && pr.nodes[current].parent != ast::NO_PARENT) {
+		uint parent_idx = pr.nodes[current].parent;
+		AstNode* parent = &pr.nodes[parent_idx];
+
+		if (parent.kind == IF_EXPR) {
+			// Determine which child of the IF_EXPR we're in:
+			// child 0 = condition, child 1 = then-branch, child 2 = else-branch
+			uint child_pos = 0;
+			for (uint j = 0; j < pr.node_count; j++) {
+				if (pr.nodes[j].parent == parent_idx) {
+					if (j == current) break;
+					child_pos++;
+				}
+			}
+
+			// We're in the then-branch (child 1) or a descendant of it
+			if (child_pos == 1) {
+				// Check condition (first child of IF_EXPR) for `x is Type`
+				TypeRef narrowed = find_is_check_in_condition(pr, parent_idx, name);
+				if (narrowed.kind != UNKNOWN) return narrowed;
+			}
+		}
+
+		current = parent_idx;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Search the condition (first child) of an IF_EXPR for a type check
+ * `name is Type` and return the checked type.
+ */
+fn TypeRef find_is_check_in_condition(ParseResult* pr, uint if_idx, String name) {
+	// Find the first child of the IF_EXPR (the condition)
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != if_idx) continue;
+
+		AstNode* cond = &pr.nodes[j];
+
+		// Direct is-check: x is Type
+		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "is") {
+			if (try checked = get_is_check_variable_name(pr, j)) {
+				if (checked == name && cond.type_text.len > 0) {
+					return parse_type_text(cond.type_text);
+				}
+			}
+		}
+
+		// Check for && conjunction: x is Type && ...
+		if (cond.kind == BINARY_EXPR && cond.extra_text == "&&") {
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				if (pr.nodes[k].kind == TYPE_CHECK_EXPR && pr.nodes[k].extra_text == "is") {
+					if (try checked = get_is_check_variable_name(pr, k)) {
+						if (checked == name && pr.nodes[k].type_text.len > 0) {
+							return parse_type_text(pr.nodes[k].type_text);
+						}
+					}
+				}
+			}
+		}
+
+		break; // Only check first child (the condition)
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Get the variable name being checked in a TYPE_CHECK_EXPR.
+ * Returns the name if the first child is a simple NAME_EXPR.
+ */
+fn String? get_is_check_variable_name(ParseResult* pr, uint check_idx) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == check_idx && pr.nodes[j].kind == NAME_EXPR) {
+			if (pr.nodes[j].name.len > 0) {
+				return pr.nodes[j].name;
+			}
+		}
+	}
+	return ast::NOT_FOUND~;
+}
+
+// ── Call expression resolution ─────────────────────────────────────
+
+fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	if (node.name.len == 0) return TYPE_UNKNOWN;
+
+	// Check for well-known constructor/factory calls
+	TypeRef known = resolve_known_call(node.name);
+	if (known.kind != UNKNOWN) {
+		// Try to infer type arguments from call arguments
+		if (known.kind == GENERIC && known.type_arg_count == 0) {
+			known = infer_generic_args_from_call(pr, info, idx, known);
+		}
+		return known;
+	}
+
+	// Search for a FUN_DECL matching this name
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* candidate = &pr.nodes[j];
+		if (candidate.kind != FUN_DECL) continue;
+		if (candidate.name != node.name) continue;
+
+		if (info.has_type[j]) {
+			return info.node_types[j];
+		}
+		return TYPE_UNKNOWN;
+	}
+
+	// Check if it's a constructor call (name matches a class)
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* candidate = &pr.nodes[j];
+		if (candidate.kind != CLASS_DECL && candidate.kind != OBJECT_DECL) continue;
+		if (candidate.name != node.name) continue;
+
+		return { .kind = SIMPLE, .name = candidate.name };
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Infer generic type arguments from the arguments of a call expression.
+ * For collection factories like listOf(1, 2), infers List<Int>.
+ * For mapOf("a" to 1), infers Map<String, Int>.
+ */
+fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint call_idx, TypeRef base) {
+	// Find the first argument expression child of this CALL_EXPR
+	TypeRef first_arg_type = TYPE_UNKNOWN;
+	TypeRef second_arg_type = TYPE_UNKNOWN;
+	uint arg_count = 0;
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != call_idx) continue;
+		// Skip the callee NAME_EXPR (usually the first child)
+		if (child.kind == NAME_EXPR && child.name == pr.nodes[call_idx].name) continue;
+		// Skip lambda arguments
+		if (child.kind == LAMBDA_EXPR) continue;
+
+		if (info.has_type[j]) {
+			if (arg_count == 0) {
+				first_arg_type = info.node_types[j];
+			} else if (arg_count == 1) {
+				second_arg_type = info.node_types[j];
+			}
+		}
+		arg_count++;
+	}
+
+	// For single-element collections, use first arg type
+	if (first_arg_type.kind != UNKNOWN) {
+		String container = base.name;
+
+		// For Map, the arg is typically a Pair (from `to` infix)
+		if (container == "Map" && first_arg_type.name == "Pair") {
+			// Map<K, V> - we don't have the Pair type args resolved yet
+			// Just return Map as-is
+			return base;
+		}
+
+		// For single-type-param collections: List<T>, Set<T>, Array<T>, etc.
+		if (container == "List" || container == "Set" || container == "Array" ||
+			container == "Sequence" || container == "MutableList" || container == "MutableSet") {
+			base.type_arg_count = 1;
+			base.type_arg_names[0] = first_arg_type.name;
+			base.type_arg_nullable[0] = first_arg_type.nullable;
+			return base;
+		}
+	}
+
+	return base;
+}
+
+/**
+ * Resolve well-known stdlib factory/constructor calls.
+ */
+fn TypeRef resolve_known_call(String name) {
+	if (name == "listOf" || name == "mutableListOf" || name == "arrayListOf" || name == "emptyList") {
+		return { .kind = GENERIC, .name = "List" };
+	}
+	if (name == "setOf" || name == "mutableSetOf" || name == "hashSetOf" || name == "linkedSetOf" || name == "emptySet") {
+		return { .kind = GENERIC, .name = "Set" };
+	}
+	if (name == "mapOf" || name == "mutableMapOf" || name == "hashMapOf" || name == "linkedMapOf" || name == "emptyMap") {
+		return { .kind = GENERIC, .name = "Map" };
+	}
+	if (name == "arrayOf" || name == "emptyArray") {
+		return { .kind = GENERIC, .name = "Array" };
+	}
+	if (name == "sequenceOf" || name == "emptySequence") {
+		return { .kind = GENERIC, .name = "Sequence" };
+	}
+	if (name == "Pair") return { .kind = GENERIC, .name = "Pair" };
+	if (name == "Triple") return { .kind = GENERIC, .name = "Triple" };
+	if (name == "intArrayOf") return { .kind = SIMPLE, .name = "IntArray" };
+	if (name == "longArrayOf") return { .kind = SIMPLE, .name = "LongArray" };
+	if (name == "floatArrayOf") return { .kind = SIMPLE, .name = "FloatArray" };
+	if (name == "doubleArrayOf") return { .kind = SIMPLE, .name = "DoubleArray" };
+	if (name == "booleanArrayOf") return { .kind = SIMPLE, .name = "BooleanArray" };
+	if (name == "charArrayOf") return { .kind = SIMPLE, .name = "CharArray" };
+	if (name == "byteArrayOf") return { .kind = SIMPLE, .name = "ByteArray" };
+	if (name == "shortArrayOf") return { .kind = SIMPLE, .name = "ShortArray" };
+	if (name == "buildString" || name == "StringBuilder") return TYPE_STRING;
+	if (name == "error" || name == "TODO") return TYPE_NOTHING;
+	if (name == "require" || name == "check" || name == "assert") return TYPE_UNIT;
+	if (name == "println" || name == "print") return TYPE_UNIT;
+
+	return TYPE_UNKNOWN;
+}
+
+// ── Dot expression resolution ──────────────────────────────────────
+
+fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	if (node.name.len == 0) return TYPE_UNKNOWN;
+
+	// Find receiver (first child)
+	TypeRef receiver_type = TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx) {
+			if (info.has_type[j]) {
+				receiver_type = info.node_types[j];
+			}
+			break;
+		}
+	}
+
+	if (receiver_type.kind == UNKNOWN) return TYPE_UNKNOWN;
+
+	return resolve_member_type(receiver_type, node.name);
+}
+
+/**
+ * Resolve the type of a member access on a known type.
+ */
+fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
+	String type_name = receiver.name;
+
+	// String members
+	if (type_name == "String") {
+		if (member_name == "length") return TYPE_INT;
+		if (member_name == "isEmpty" || member_name == "isNotEmpty" ||
+		    member_name == "isBlank" || member_name == "isNotBlank" ||
+		    member_name == "startsWith" || member_name == "endsWith" ||
+		    member_name == "contains" || member_name == "matches" ||
+		    member_name == "any" || member_name == "all" || member_name == "none") {
+			return TYPE_BOOLEAN;
+		}
+		if (member_name == "first" || member_name == "last" || member_name == "get") {
+			return TYPE_CHAR;
+		}
+		if (member_name == "trim" || member_name == "trimStart" || member_name == "trimEnd" ||
+		    member_name == "lowercase" || member_name == "uppercase" ||
+		    member_name == "reversed" || member_name == "replace" ||
+		    member_name == "removePrefix" || member_name == "removeSuffix" ||
+		    member_name == "substring" || member_name == "take" || member_name == "takeLast" ||
+		    member_name == "drop" || member_name == "dropLast" || member_name == "repeat" ||
+		    member_name == "padStart" || member_name == "padEnd" || member_name == "plus" ||
+		    member_name == "toString") {
+			return TYPE_STRING;
+		}
+		if (member_name == "indexOf" || member_name == "lastIndexOf" ||
+		    member_name == "compareTo" || member_name == "hashCode" || member_name == "count") {
+			return TYPE_INT;
+		}
+		if (member_name == "toInt") return TYPE_INT;
+		if (member_name == "toLong") return TYPE_LONG;
+		if (member_name == "toFloat") return TYPE_FLOAT;
+		if (member_name == "toDouble") return TYPE_DOUBLE;
+		if (member_name == "toBoolean") return TYPE_BOOLEAN;
+		if (member_name == "split" || member_name == "lines") {
+			return { .kind = GENERIC, .name = "List", .type_arg_count = 1, .type_arg_names = { [0] = "String" } };
+		}
+		if (member_name == "toList") {
+			return { .kind = GENERIC, .name = "List", .type_arg_count = 1, .type_arg_names = { [0] = "Char" } };
+		}
+		if (member_name == "toRegex") return { .kind = SIMPLE, .name = "Regex" };
+		if (member_name == "toByteArray") return { .kind = SIMPLE, .name = "ByteArray" };
+		if (member_name == "toCharArray") return { .kind = SIMPLE, .name = "CharArray" };
+	}
+
+	// Numeric type members
+	if (type_name == "Int" || type_name == "Long" || type_name == "Float" ||
+	    type_name == "Double" || type_name == "Short" || type_name == "Byte") {
+		if (member_name == "toInt") return TYPE_INT;
+		if (member_name == "toLong") return TYPE_LONG;
+		if (member_name == "toFloat") return TYPE_FLOAT;
+		if (member_name == "toDouble") return TYPE_DOUBLE;
+		if (member_name == "toByte") return TYPE_BYTE;
+		if (member_name == "toShort") return TYPE_SHORT;
+		if (member_name == "toChar") return TYPE_CHAR;
+		if (member_name == "toString") return TYPE_STRING;
+		if (member_name == "compareTo" || member_name == "hashCode") return TYPE_INT;
+		if (member_name == "equals") return TYPE_BOOLEAN;
+		if (member_name == "plus" || member_name == "minus" || member_name == "times" ||
+		    member_name == "div" || member_name == "rem" || member_name == "inc" ||
+		    member_name == "dec" || member_name == "unaryMinus" || member_name == "unaryPlus" ||
+		    member_name == "coerceIn" || member_name == "coerceAtLeast" || member_name == "coerceAtMost") {
+			return { .kind = SIMPLE, .name = type_name };
+		}
+		if (member_name == "rangeTo") return { .kind = SIMPLE, .name = "IntRange" };
+	}
+
+	// Boolean members
+	if (type_name == "Boolean") {
+		if (member_name == "and" || member_name == "or" || member_name == "xor" || member_name == "not") {
+			return TYPE_BOOLEAN;
+		}
+		if (member_name == "compareTo") return TYPE_INT;
+		if (member_name == "toString") return TYPE_STRING;
+		if (member_name == "equals") return TYPE_BOOLEAN;
+	}
+
+	// Collection members
+	if (type_name == "List" || type_name == "Set" || type_name == "Collection" ||
+	    type_name == "MutableList" || type_name == "MutableSet" || type_name == "MutableCollection" ||
+	    type_name == "Iterable" || type_name == "Sequence") {
+		if (member_name == "size" || member_name == "count" ||
+		    member_name == "indexOf" || member_name == "lastIndexOf") return TYPE_INT;
+		if (member_name == "isEmpty" || member_name == "isNotEmpty" ||
+		    member_name == "any" || member_name == "all" || member_name == "none" ||
+		    member_name == "contains" || member_name == "containsAll") {
+			return TYPE_BOOLEAN;
+		}
+		if (member_name == "joinToString" || member_name == "toString") return TYPE_STRING;
+		if (member_name == "hashCode") return TYPE_INT;
+		if (member_name == "equals") return TYPE_BOOLEAN;
+		if (member_name == "filter" || member_name == "filterNot" || member_name == "filterNotNull" ||
+		    member_name == "sorted" || member_name == "sortedDescending" ||
+		    member_name == "sortedBy" || member_name == "sortedByDescending" ||
+		    member_name == "reversed" || member_name == "shuffled" ||
+		    member_name == "distinct" || member_name == "take" || member_name == "drop" ||
+		    member_name == "flatten" || member_name == "toList" || member_name == "toMutableList" ||
+		    member_name == "map" || member_name == "flatMap" || member_name == "mapNotNull" ||
+		    member_name == "zip") {
+			return { .kind = GENERIC, .name = "List" };
+		}
+		if (member_name == "toSet" || member_name == "toMutableSet") {
+			return { .kind = GENERIC, .name = "Set" };
+		}
+		if (member_name == "associate" || member_name == "associateBy" ||
+		    member_name == "associateWith" || member_name == "groupBy") {
+			return { .kind = GENERIC, .name = "Map" };
+		}
+		if (member_name == "asSequence") return { .kind = GENERIC, .name = "Sequence" };
+	}
+
+	// Map members
+	if (type_name == "Map" || type_name == "MutableMap" || type_name == "HashMap" || type_name == "LinkedHashMap") {
+		if (member_name == "size" || member_name == "count") return TYPE_INT;
+		if (member_name == "isEmpty" || member_name == "isNotEmpty" ||
+		    member_name == "containsKey" || member_name == "containsValue" ||
+		    member_name == "any" || member_name == "all" || member_name == "none") {
+			return TYPE_BOOLEAN;
+		}
+		if (member_name == "keys") return { .kind = GENERIC, .name = "Set" };
+		if (member_name == "values") return { .kind = GENERIC, .name = "Collection" };
+		if (member_name == "entries") return { .kind = GENERIC, .name = "Set" };
+		if (member_name == "toList") return { .kind = GENERIC, .name = "List" };
+		if (member_name == "filter" || member_name == "filterKeys" || member_name == "filterValues" ||
+		    member_name == "map" || member_name == "mapKeys" || member_name == "mapValues" ||
+		    member_name == "toMutableMap") {
+			return { .kind = GENERIC, .name = "Map" };
+		}
+		if (member_name == "toString") return TYPE_STRING;
+		if (member_name == "hashCode") return TYPE_INT;
+		if (member_name == "equals") return TYPE_BOOLEAN;
+	}
+
+	// Any members (available on all types)
+	if (member_name == "toString") return TYPE_STRING;
+	if (member_name == "hashCode") return TYPE_INT;
+	if (member_name == "equals") return TYPE_BOOLEAN;
+
+	// Scope functions: also/apply return receiver type
+	if (member_name == "also" || member_name == "apply") {
+		return receiver;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+// ── Binary expression resolution ───────────────────────────────────
+
+fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	String op = node.extra_text;
+
+	if (op == "==" || op == "!=" || op == "===" || op == "!==" ||
+	    op == "<" || op == ">" || op == "<=" || op == ">=" ||
+	    op == "&&" || op == "||" || op == "in" || op == "!in") {
+		return TYPE_BOOLEAN;
+	}
+
+	if (op == "..") return { .kind = SIMPLE, .name = "IntRange" };
+
+	// Elvis: T? ?: T -> non-nullable T
+	if (op == "?:") {
+		uint child_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx) {
+				child_count++;
+				if (child_count == 2 && info.has_type[j]) {
+					return info.node_types[j];
+				}
+			}
+		}
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				TypeRef left_type = info.node_types[j];
+				left_type.nullable = false;
+				return left_type;
+			}
+		}
+		return TYPE_UNKNOWN;
+	}
+
+	// Arithmetic
+	if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				TypeRef left_type = info.node_types[j];
+				if (op == "+" && left_type.name == "String") return TYPE_STRING;
+				return left_type;
+			}
+		}
+	}
+
+	// Infix function calls
+	if (op == "to") return { .kind = GENERIC, .name = "Pair" };
+	if (op == "until" || op == "downTo") return { .kind = SIMPLE, .name = "IntRange" };
+
+	return TYPE_UNKNOWN;
+}
+
+// ── Prefix expression resolution ───────────────────────────────────
+
+fn TypeRef resolve_prefix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	String op = node.extra_text;
+
+	if (op == "!") return TYPE_BOOLEAN;
+
+	if (op == "-" || op == "+" || op == "++" || op == "--") {
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				return info.node_types[j];
+			}
+		}
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+// ── Postfix expression resolution ──────────────────────────────────
+
+fn TypeRef resolve_postfix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	String op = node.extra_text;
+
+	if (op == "!!") {
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				TypeRef inner = info.node_types[j];
+				inner.nullable = false;
+				return inner;
+			}
+		}
+	}
+
+	if (op == "++" || op == "--") {
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				return info.node_types[j];
+			}
+		}
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+// ── Parenthesized / if / when / index expression resolution ────────
+
+fn TypeRef resolve_paren_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			return info.node_types[j];
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
+fn TypeRef resolve_if_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	// Collect typed children of IF_EXPR.
+	// The condition may or may not be present as a child (depends on parser).
+	// The then/else branches are the last 2 children (or last 1 if no else).
+	// Strategy: if there are 3 typed children, skip the first (condition).
+	// If there are 2 typed children, compute common_type of both.
+	// If only 1, return it directly.
+
+	// First, count total children and collect typed ones
+	uint child_count = 0;
+	uint[8] typed_children;
+	uint typed_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx) {
+			child_count++;
+			if (info.has_type[j] && typed_count < 8) {
+				typed_children[typed_count] = j;
+				typed_count++;
+			}
+		}
+	}
+
+	if (typed_count == 0) return TYPE_UNKNOWN;
+
+	// If we have 3+ children, the first is the condition -- skip it.
+	// If we have exactly 2 children with types and 3+ total children,
+	// the condition was typed too; skip it.
+	uint start = 0;
+	if (child_count >= 3 && typed_count >= 2) {
+		// Skip the condition (first typed child)
+		start = 1;
+	}
+
+	TypeRef result = TYPE_UNKNOWN;
+	for (uint k = start; k < typed_count; k++) {
+		TypeRef t = info.node_types[typed_children[k]];
+		if (result.kind == UNKNOWN) {
+			result = t;
+		} else {
+			result = common_type(result, t);
+		}
+	}
+	return result;
+}
+
+fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	TypeRef result = TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			if (result.kind == UNKNOWN) {
+				result = info.node_types[j];
+			} else {
+				result = common_type(result, info.node_types[j]);
+			}
+		}
+	}
+	return result;
+}
+
+fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			TypeRef receiver = info.node_types[j];
+			if (receiver.name == "String") return TYPE_CHAR;
+			if (receiver.kind == GENERIC && receiver.type_arg_count > 0) {
+				return { .kind = SIMPLE, .name = receiver.type_arg_names[0] };
+			}
+			break;
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
+// ── Helper: common supertype ───────────────────────────────────────
+
+fn TypeRef common_type(TypeRef a, TypeRef b) {
+	if (a.kind == UNKNOWN) return b;
+	if (b.kind == UNKNOWN) return a;
+	if (a.kind == NOTHING) return b;
+	if (b.kind == NOTHING) return a;
+
+	if (a.name == b.name) {
+		TypeRef result = a;
+		result.nullable = a.nullable || b.nullable;
+		return result;
+	}
+
+	if (is_numeric_type(a) && is_numeric_type(b)) {
+		return promote_numeric(a, b);
+	}
+
+	TypeRef any_type = TYPE_ANY;
+	any_type.nullable = a.nullable || b.nullable;
+	return any_type;
+}
+
+fn bool is_numeric_type(TypeRef t) {
+	return t.name == "Int" || t.name == "Long" || t.name == "Float" ||
+	       t.name == "Double" || t.name == "Short" || t.name == "Byte";
+}
+
+fn TypeRef promote_numeric(TypeRef a, TypeRef b) {
+	int rank_a = numeric_rank(a);
+	int rank_b = numeric_rank(b);
+	return rank_a >= rank_b ? a : b;
+}
+
+fn int numeric_rank(TypeRef t) {
+	if (t.name == "Double") return 6;
+	if (t.name == "Float") return 5;
+	if (t.name == "Long") return 4;
+	if (t.name == "Int") return 3;
+	if (t.name == "Short") return 2;
+	if (t.name == "Byte") return 1;
+	return 0;
+}
+
+// ── Scope helpers ──────────────────────────────────────────────────
+
+fn uint find_innermost_scope(ParseResult* pr, uint node_idx) {
+	AstNode* node = &pr.nodes[node_idx];
+	uint offset = node.start_offset;
+
+	uint scope_idx = 0;
+	for (uint i = 1; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!is_scope_kind(n.kind)) continue;
+		if (offset >= n.start_offset && offset < n.end_offset) {
+			scope_idx = i;
+		}
+	}
+	return scope_idx;
+}
+
+fn bool is_scope_kind(NodeKind kind) {
+	switch (kind) {
+		case FILE:
+		case CLASS_DECL:
+		case INTERFACE_DECL:
+		case OBJECT_DECL:
+		case COMPANION_OBJECT_DECL:
+		case FUN_DECL:
+		case BLOCK:
+		case FOR_STMT:
+		case CATCH_CLAUSE:
+		case LAMBDA_EXPR:
+			return true;
+		default:
+			return false;
+	}
+}
+
+fn bool is_typed_declaration(NodeKind kind) {
+	switch (kind) {
+		case PROPERTY_DECL:
+		case FUN_DECL:
+		case CLASS_DECL:
+		case INTERFACE_DECL:
+		case OBJECT_DECL:
+		case COMPANION_OBJECT_DECL:
+		case PARAM:
+		case TYPEALIAS_DECL:
+		case ENUM_ENTRY:
+			return true;
+		default:
+			return false;
+	}
+}
+
+fn AstNode*? find_enclosing_class(ParseResult* pr, uint node_idx) {
+	uint current = node_idx;
+	while (current != ast::NO_PARENT && current < pr.node_count) {
+		AstNode* n = &pr.nodes[current];
+		if (n.kind == CLASS_DECL || n.kind == INTERFACE_DECL ||
+		    n.kind == OBJECT_DECL || n.kind == COMPANION_OBJECT_DECL) {
+			return n;
+		}
+		current = n.parent;
+	}
+	return ast::NOT_FOUND~;
+}
+
+// ── Member info for completion ─────────────────────────────────────
+
+const usz MAX_MEMBERS = 128;
+
+struct MemberInfo {
+	String name;
+	String signature;
+	String detail;
+	int kind;      // LSP CompletionItemKind
+}
+
+/**
+ * Look up members available on a type.
+ * Fills out_buf with member info and returns count.
+ */
+fn usz lookup_members(TypeRef* type_ref, MemberInfo[] out_buf) {
+	if (type_ref.kind == UNKNOWN || out_buf.len == 0) return 0;
+
+	String type_name = type_ref.name;
+	usz count = 0;
+
+	if (type_name == "String") {
+		count = add_string_members(out_buf, count);
+	} else if (type_name == "Int" || type_name == "Long" || type_name == "Float" ||
+	         type_name == "Double" || type_name == "Short" || type_name == "Byte") {
+		count = add_number_members(out_buf, count, type_name);
+	} else if (type_name == "Boolean") {
+		count = add_boolean_members(out_buf, count);
+	} else if (type_name == "List" || type_name == "MutableList" ||
+	         type_name == "Set" || type_name == "MutableSet" ||
+	         type_name == "Collection" || type_name == "MutableCollection" ||
+	         type_name == "Iterable" || type_name == "Sequence") {
+		count = add_collection_members(out_buf, count, type_name);
+	} else if (type_name == "Map" || type_name == "MutableMap" ||
+	         type_name == "HashMap" || type_name == "LinkedHashMap") {
+		count = add_map_members(out_buf, count, type_name);
+	}
+
+	count = add_any_members(out_buf, count);
+	count = add_scope_function_members(out_buf, count);
+
+	return count;
+}
+
+fn usz add_member(MemberInfo[] buf, usz count, String name, String sig, String detail, int kind) {
+	if (count >= buf.len) return count;
+	buf[count] = { .name = name, .signature = sig, .detail = detail, .kind = kind };
+	return count + 1;
+}
+
+fn usz add_any_members(MemberInfo[] buf, usz count) {
+	count = add_member(buf, count, "toString", "fun toString(): String", "String", 2);
+	count = add_member(buf, count, "hashCode", "fun hashCode(): Int", "Int", 2);
+	count = add_member(buf, count, "equals", "fun equals(other: Any?): Boolean", "Boolean", 2);
+	return count;
+}
+
+fn usz add_scope_function_members(MemberInfo[] buf, usz count) {
+	count = add_member(buf, count, "let", "fun <T, R> T.let(block: (T) -> R): R", "R", 2);
+	count = add_member(buf, count, "run", "fun <T, R> T.run(block: T.() -> R): R", "R", 2);
+	count = add_member(buf, count, "also", "fun <T> T.also(block: (T) -> Unit): T", "T", 2);
+	count = add_member(buf, count, "apply", "fun <T> T.apply(block: T.() -> Unit): T", "T", 2);
+	count = add_member(buf, count, "takeIf", "fun <T> T.takeIf(predicate: (T) -> Boolean): T?", "T?", 2);
+	count = add_member(buf, count, "takeUnless", "fun <T> T.takeUnless(predicate: (T) -> Boolean): T?", "T?", 2);
+	return count;
+}
+
+fn usz add_string_members(MemberInfo[] buf, usz count) {
+	count = add_member(buf, count, "length", "val length: Int", "Int", 10);
+	count = add_member(buf, count, "isEmpty", "fun isEmpty(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "isNotEmpty", "fun isNotEmpty(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "isBlank", "fun isBlank(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "isNotBlank", "fun isNotBlank(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "substring", "fun substring(startIndex: Int): String", "String", 2);
+	count = add_member(buf, count, "contains", "fun contains(other: CharSequence): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "startsWith", "fun startsWith(prefix: String): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "endsWith", "fun endsWith(suffix: String): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "indexOf", "fun indexOf(string: String): Int", "Int", 2);
+	count = add_member(buf, count, "lastIndexOf", "fun lastIndexOf(string: String): Int", "Int", 2);
+	count = add_member(buf, count, "replace", "fun replace(oldValue: String, newValue: String): String", "String", 2);
+	count = add_member(buf, count, "trim", "fun trim(): String", "String", 2);
+	count = add_member(buf, count, "lowercase", "fun lowercase(): String", "String", 2);
+	count = add_member(buf, count, "uppercase", "fun uppercase(): String", "String", 2);
+	count = add_member(buf, count, "split", "fun split(delimiter: String): List<String>", "List<String>", 2);
+	count = add_member(buf, count, "lines", "fun lines(): List<String>", "List<String>", 2);
+	count = add_member(buf, count, "toInt", "fun toInt(): Int", "Int", 2);
+	count = add_member(buf, count, "toLong", "fun toLong(): Long", "Long", 2);
+	count = add_member(buf, count, "toDouble", "fun toDouble(): Double", "Double", 2);
+	count = add_member(buf, count, "toBoolean", "fun toBoolean(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "reversed", "fun reversed(): String", "String", 2);
+	count = add_member(buf, count, "take", "fun take(n: Int): String", "String", 2);
+	count = add_member(buf, count, "drop", "fun drop(n: Int): String", "String", 2);
+	count = add_member(buf, count, "first", "fun first(): Char", "Char", 2);
+	count = add_member(buf, count, "last", "fun last(): Char", "Char", 2);
+	count = add_member(buf, count, "count", "fun count(): Int", "Int", 2);
+	count = add_member(buf, count, "repeat", "fun repeat(n: Int): String", "String", 2);
+	count = add_member(buf, count, "toRegex", "fun toRegex(): Regex", "Regex", 2);
+	count = add_member(buf, count, "toByteArray", "fun toByteArray(): ByteArray", "ByteArray", 2);
+	count = add_member(buf, count, "toCharArray", "fun toCharArray(): CharArray", "CharArray", 2);
+	return count;
+}
+
+fn usz add_number_members(MemberInfo[] buf, usz count, String type_name) {
+	count = add_member(buf, count, "toInt", "fun toInt(): Int", "Int", 2);
+	count = add_member(buf, count, "toLong", "fun toLong(): Long", "Long", 2);
+	count = add_member(buf, count, "toFloat", "fun toFloat(): Float", "Float", 2);
+	count = add_member(buf, count, "toDouble", "fun toDouble(): Double", "Double", 2);
+	count = add_member(buf, count, "toByte", "fun toByte(): Byte", "Byte", 2);
+	count = add_member(buf, count, "toShort", "fun toShort(): Short", "Short", 2);
+	count = add_member(buf, count, "toChar", "fun toChar(): Char", "Char", 2);
+	count = add_member(buf, count, "compareTo", string::tformat("fun compareTo(other: %s): Int", type_name), "Int", 2);
+	count = add_member(buf, count, "plus", string::tformat("operator fun plus(other: %s): %s", type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "minus", string::tformat("operator fun minus(other: %s): %s", type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "times", string::tformat("operator fun times(other: %s): %s", type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "div", string::tformat("operator fun div(other: %s): %s", type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "rem", string::tformat("operator fun rem(other: %s): %s", type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "inc", string::tformat("operator fun inc(): %s", type_name), type_name, 2);
+	count = add_member(buf, count, "dec", string::tformat("operator fun dec(): %s", type_name), type_name, 2);
+	count = add_member(buf, count, "rangeTo", string::tformat("operator fun rangeTo(other: %s): IntRange", type_name), "IntRange", 2);
+	count = add_member(buf, count, "coerceIn", string::tformat("fun coerceIn(min: %s, max: %s): %s", type_name, type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "coerceAtLeast", string::tformat("fun coerceAtLeast(min: %s): %s", type_name, type_name), type_name, 2);
+	count = add_member(buf, count, "coerceAtMost", string::tformat("fun coerceAtMost(max: %s): %s", type_name, type_name), type_name, 2);
+	return count;
+}
+
+fn usz add_boolean_members(MemberInfo[] buf, usz count) {
+	count = add_member(buf, count, "and", "infix fun and(other: Boolean): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "or", "infix fun or(other: Boolean): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "xor", "infix fun xor(other: Boolean): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "not", "fun not(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "compareTo", "fun compareTo(other: Boolean): Int", "Int", 2);
+	return count;
+}
+
+fn usz add_collection_members(MemberInfo[] buf, usz count, String type_name) {
+	count = add_member(buf, count, "size", "val size: Int", "Int", 10);
+	count = add_member(buf, count, "isEmpty", "fun isEmpty(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "isNotEmpty", "fun isNotEmpty(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "contains", "fun contains(element: T): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "first", "fun first(): T", "T", 2);
+	count = add_member(buf, count, "last", "fun last(): T", "T", 2);
+	count = add_member(buf, count, "firstOrNull", "fun firstOrNull(): T?", "T?", 2);
+	count = add_member(buf, count, "lastOrNull", "fun lastOrNull(): T?", "T?", 2);
+	count = add_member(buf, count, "find", "fun find(predicate: (T) -> Boolean): T?", "T?", 2);
+	count = add_member(buf, count, "indexOf", "fun indexOf(element: T): Int", "Int", 2);
+	count = add_member(buf, count, "count", "fun count(): Int", "Int", 2);
+	count = add_member(buf, count, "any", "fun any(predicate: (T) -> Boolean): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "all", "fun all(predicate: (T) -> Boolean): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "none", "fun none(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "filter", "fun filter(predicate: (T) -> Boolean): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "map", "fun <R> map(transform: (T) -> R): List<R>", "List<R>", 2);
+	count = add_member(buf, count, "flatMap", "fun <R> flatMap(transform: (T) -> Iterable<R>): List<R>", "List<R>", 2);
+	count = add_member(buf, count, "forEach", "fun forEach(action: (T) -> Unit)", "Unit", 2);
+	count = add_member(buf, count, "sorted", "fun sorted(): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "sortedBy", "fun <R> sortedBy(selector: (T) -> R?): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "reversed", "fun reversed(): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "distinct", "fun distinct(): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "take", "fun take(n: Int): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "drop", "fun drop(n: Int): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "joinToString", "fun joinToString(separator: CharSequence): String", "String", 2);
+	count = add_member(buf, count, "toList", "fun toList(): List<T>", "List<T>", 2);
+	count = add_member(buf, count, "toMutableList", "fun toMutableList(): MutableList<T>", "MutableList<T>", 2);
+	count = add_member(buf, count, "toSet", "fun toSet(): Set<T>", "Set<T>", 2);
+	count = add_member(buf, count, "asSequence", "fun asSequence(): Sequence<T>", "Sequence<T>", 2);
+	count = add_member(buf, count, "sumOf", "fun sumOf(selector: (T) -> Int): Int", "Int", 2);
+
+	if (type_name == "MutableList" || type_name == "MutableSet" || type_name == "MutableCollection") {
+		count = add_member(buf, count, "add", "fun add(element: T): Boolean", "Boolean", 2);
+		count = add_member(buf, count, "remove", "fun remove(element: T): Boolean", "Boolean", 2);
+		count = add_member(buf, count, "clear", "fun clear()", "Unit", 2);
+	}
+	if (type_name == "List" || type_name == "MutableList") {
+		count = add_member(buf, count, "get", "operator fun get(index: Int): T", "T", 2);
+		count = add_member(buf, count, "subList", "fun subList(fromIndex: Int, toIndex: Int): List<T>", "List<T>", 2);
+	}
+	return count;
+}
+
+fn usz add_map_members(MemberInfo[] buf, usz count, String type_name) {
+	count = add_member(buf, count, "size", "val size: Int", "Int", 10);
+	count = add_member(buf, count, "isEmpty", "fun isEmpty(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "isNotEmpty", "fun isNotEmpty(): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "containsKey", "fun containsKey(key: K): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "containsValue", "fun containsValue(value: V): Boolean", "Boolean", 2);
+	count = add_member(buf, count, "get", "operator fun get(key: K): V?", "V?", 2);
+	count = add_member(buf, count, "getOrDefault", "fun getOrDefault(key: K, defaultValue: V): V", "V", 2);
+	count = add_member(buf, count, "keys", "val keys: Set<K>", "Set<K>", 10);
+	count = add_member(buf, count, "values", "val values: Collection<V>", "Collection<V>", 10);
+	count = add_member(buf, count, "entries", "val entries: Set<Map.Entry<K, V>>", "Set<Map.Entry<K, V>>", 10);
+	count = add_member(buf, count, "filter", "fun filter(predicate: (Map.Entry<K, V>) -> Boolean): Map<K, V>", "Map<K, V>", 2);
+	count = add_member(buf, count, "map", "fun <R> map(transform: (Map.Entry<K, V>) -> R): List<R>", "List<R>", 2);
+	count = add_member(buf, count, "forEach", "fun forEach(action: (K, V) -> Unit)", "Unit", 2);
+	count = add_member(buf, count, "toList", "fun toList(): List<Pair<K, V>>", "List<Pair<K, V>>", 2);
+	count = add_member(buf, count, "toMutableMap", "fun toMutableMap(): MutableMap<K, V>", "MutableMap<K, V>", 2);
+	count = add_member(buf, count, "count", "fun count(): Int", "Int", 2);
+
+	if (type_name == "MutableMap" || type_name == "HashMap" || type_name == "LinkedHashMap") {
+		count = add_member(buf, count, "put", "fun put(key: K, value: V): V?", "V?", 2);
+		count = add_member(buf, count, "remove", "fun remove(key: K): V?", "V?", 2);
+		count = add_member(buf, count, "clear", "fun clear()", "Unit", 2);
+		count = add_member(buf, count, "getOrPut", "fun getOrPut(key: K, defaultValue: () -> V): V", "V", 2);
+	}
+	return count;
+}

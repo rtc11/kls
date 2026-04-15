@@ -9,6 +9,8 @@ import kls::kotlin::token;
 import kls::kotlin::ast;
 import kls::kotlin::stdlib;
 import kls::kotlin::jdk_symbols;
+import kls::kotlin::types;
+import kls::kotlin::symbols;
 import kls::workspace;
 import kls::deps::jar_index;
 
@@ -502,6 +504,339 @@ fn usz find_import_candidates(String name, WorkspaceIndex* workspace,
 	return count;
 }
 
+// ── Receiver lambda member resolution ────────────────────────────
+// When a NAME_EXPR is inside a receiver lambda (e.g., Module.() -> Unit),
+// the name may refer to a member of the receiver type. We must not flag
+// these as unresolved references.
+
+/**
+ * Find the nearest LAMBDA_EXPR ancestor of a node.
+ * Returns the index of the LAMBDA_EXPR, or ast::NO_PARENT if not inside a lambda.
+ */
+fn uint find_lambda_ancestor(ParseResult* ast, uint node_idx) {
+	uint current = node_idx;
+	while (current != ast::NO_PARENT) {
+		AstNode* n = &ast.nodes[current];
+		if (n.kind == LAMBDA_EXPR && current != node_idx) {
+			return current;
+		}
+		current = n.parent;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Find the CALL_EXPR parent of a LAMBDA_EXPR.
+ * Trailing lambdas are direct children of CALL_EXPR.
+ * Returns the CALL_EXPR index, or ast::NO_PARENT if not found.
+ */
+fn uint find_call_parent_of_lambda(ParseResult* ast, uint lambda_idx) {
+	AstNode* lambda = &ast.nodes[lambda_idx];
+	if (lambda.parent == ast::NO_PARENT) return ast::NO_PARENT;
+
+	AstNode* parent = &ast.nodes[lambda.parent];
+	if (parent.kind == CALL_EXPR) {
+		return lambda.parent;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Given a CALL_EXPR, find the receiver type name for the trailing lambda parameter.
+ * Looks up the called function in the same file's AST, checking each parameter
+ * for a function type with a receiver (e.g., Module.() -> Unit).
+ *
+ * Also handles Kotlin scope functions: apply, run, with, also, let.
+ * For these, the receiver type comes from the call's receiver expression
+ * or first argument.
+ *
+ * Returns the receiver type name (e.g., "Module"), or "" if none found.
+ */
+fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, WorkspaceIndex* workspace) {
+	AstNode* call = &ast.nodes[call_idx];
+
+	// Get the callee name. For simple calls, the CALL_EXPR has NAME_EXPR children
+	// or the name comes from a DOT_EXPR parent.
+	String callee_name = "";
+
+	// Check if CALL_EXPR has a NAME_EXPR child (direct function call)
+	for (uint i = 0; i < ast.node_count; i++) {
+		if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == NAME_EXPR) {
+			callee_name = ast.nodes[i].name;
+			break;
+		}
+	}
+
+	// If call is a member of a DOT_EXPR (e.g., nob.module { ... }),
+	// the callee is the DOT_EXPR's name field
+	if (callee_name.len == 0 && call.parent != ast::NO_PARENT) {
+		AstNode* parent = &ast.nodes[call.parent];
+		if (parent.kind == DOT_EXPR && parent.name.len > 0) {
+			callee_name = parent.name;
+		}
+	}
+
+	if (callee_name.len == 0) return "";
+
+	// ── Handle Kotlin scope functions ─────────────────────────────
+	// apply/run: receiver.apply { ... } → receiver type is the "this" type
+	// with: with(receiver) { ... } → first arg type is "this" type
+	// also/let: don't use receiver lambdas (they use `it`, not `this`)
+	if (callee_name == "apply" || callee_name == "run") {
+		// For receiver.apply { ... }, find the receiver's type.
+		// The CALL_EXPR is a child of DOT_EXPR; the DOT_EXPR's first child
+		// is the receiver expression. We need to find what class that is.
+		if (call.parent != ast::NO_PARENT) {
+			AstNode* dot_parent = &ast.nodes[call.parent];
+			if (dot_parent.kind == DOT_EXPR) {
+				// Find the receiver child of the DOT_EXPR (NAME_EXPR)
+				for (uint i = 0; i < ast.node_count; i++) {
+					if (ast.nodes[i].parent == call.parent && ast.nodes[i].kind == NAME_EXPR) {
+						String recv_name = ast.nodes[i].name;
+						// Look up what type this variable is
+						String recv_type = find_variable_type_name(ast, call.parent, recv_name);
+						if (recv_type.len > 0) return recv_type;
+						// If we can't resolve the variable type, try using the name directly
+						// as a class name (e.g., Foo.apply { ... })
+						if (is_class_name(ast, recv_name, workspace)) return recv_name;
+						break;
+					}
+				}
+			}
+		}
+		return "";
+	}
+
+	if (callee_name == "with") {
+		// with(receiver) { ... } → first arg to with() is the receiver object
+		// We'd need to resolve the first argument's type, which is complex.
+		// For now, skip -- "with" is less common in DSL patterns.
+		return "";
+	}
+
+	// ── Look up the function in the same file ─────────────────────
+	// Search for FUN_DECL nodes with matching name
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name != callee_name) continue;
+
+		// Found a matching function. Scan its PARAM children for a function type
+		// with a receiver.
+		String recv = find_receiver_param_type(ast, i);
+		if (recv.len > 0) return recv;
+	}
+
+	// ── Look up in workspace index ────────────────────────────────
+	if (workspace != null) {
+		if (try indices = workspace.lookup_by_name(callee_name)) {
+			for (usz j = 0; j < indices.len(); j++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(j));
+				if (sym.kind != symbols::SymbolKind.FUNCTION) continue;
+				// We need the function's source to examine parameters.
+				// For workspace symbols we don't have the parameter types stored.
+				// Fall through to check if the name might be a class with an extension function.
+			}
+		}
+	}
+
+	return "";
+}
+
+/**
+ * Scan the PARAM children of a FUN_DECL for a function type parameter
+ * that has a receiver (e.g., "Module.() -> Unit").
+ * Returns the receiver type name, or "" if none found.
+ */
+fn String find_receiver_param_type(ParseResult* ast, uint fun_idx) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.parent != fun_idx) continue;
+		if (n.kind != PARAM) continue;
+		if (n.type_text.len == 0) continue;
+
+		// Parse the type text and check for a receiver
+		TypeRef tref = types::parse_type_text(n.type_text);
+		if (tref.kind == FUNCTION && tref.receiver_type_name.len > 0) {
+			return tref.receiver_type_name;
+		}
+	}
+	return "";
+}
+
+/**
+ * Try to find the type name of a variable by looking at its declaration
+ * in the same file. Searches for PROPERTY_DECL or PARAM with matching name
+ * that has a type_text.
+ */
+fn String find_variable_type_name(ParseResult* ast, uint scope_idx, String var_name) {
+	// Walk parent scopes from scope_idx up to FILE looking for declarations
+	uint current = scope_idx;
+	while (current != ast::NO_PARENT) {
+		for (uint i = 0; i < ast.node_count; i++) {
+			AstNode* n = &ast.nodes[i];
+			if (n.parent != current) continue;
+			if (n.name != var_name) continue;
+			if (n.kind == PROPERTY_DECL || n.kind == PARAM) {
+				if (n.type_text.len > 0) {
+					return n.type_text;
+				}
+			}
+		}
+		AstNode* scope = &ast.nodes[current];
+		current = scope.parent;
+	}
+	return "";
+}
+
+/**
+ * Check if a name refers to a class/interface/object declaration
+ * in the same file or in the workspace.
+ */
+fn bool is_class_name(ParseResult* ast, String name, WorkspaceIndex* workspace) {
+	// Check same-file AST
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.name != name) continue;
+		if (n.kind == CLASS_DECL || n.kind == INTERFACE_DECL || n.kind == OBJECT_DECL) {
+			return true;
+		}
+	}
+
+	// Check workspace
+	if (workspace != null) {
+		if (try indices = workspace.lookup_by_name(name)) {
+			for (usz j = 0; j < indices.len(); j++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(j));
+				if (sym.kind == symbols::SymbolKind.CLASS ||
+					sym.kind == symbols::SymbolKind.INTERFACE ||
+					sym.kind == symbols::SymbolKind.OBJECT) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Check if a name is a member of a given class (by class name).
+ * Searches the same-file AST for a CLASS_DECL/INTERFACE_DECL/OBJECT_DECL
+ * with matching name, then checks its children for the member name.
+ *
+ * For data classes, constructor parameters with var/val (PARAM with
+ * MOD_VAR or MOD_FINAL) are also members.
+ */
+fn bool is_member_of_class(ParseResult* ast, String class_name, String member_name, WorkspaceIndex* workspace) {
+	// Search same-file AST
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.name != class_name) continue;
+		if (n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) continue;
+
+		// Check direct children for matching member declarations
+		for (uint j = 0; j < ast.node_count; j++) {
+			AstNode* child = &ast.nodes[j];
+			if (child.parent != i) continue;
+			if (child.name != member_name) continue;
+
+			// FUN_DECL, PROPERTY_DECL are direct members
+			if (child.kind == FUN_DECL || child.kind == PROPERTY_DECL) return true;
+
+			// PARAM with MOD_VAR or MOD_FINAL (data class constructor params)
+			if (child.kind == PARAM) {
+				if ((child.mod_flags & ast::MOD_VAR) != 0 || (child.mod_flags & ast::MOD_FINAL) != 0) {
+					return true;
+				}
+			}
+
+			// ENUM_ENTRY, nested classes
+			if (child.kind == ENUM_ENTRY || child.kind == CLASS_DECL ||
+				child.kind == INTERFACE_DECL || child.kind == OBJECT_DECL) {
+				return true;
+			}
+		}
+
+		// Also check COMPANION_OBJECT_DECL children (companion members)
+		for (uint j = 0; j < ast.node_count; j++) {
+			AstNode* child = &ast.nodes[j];
+			if (child.parent != i) continue;
+			if (child.kind != COMPANION_OBJECT_DECL) continue;
+
+			// Check children of the companion object
+			for (uint k = 0; k < ast.node_count; k++) {
+				AstNode* comp_child = &ast.nodes[k];
+				if (comp_child.parent != j) continue;
+				if (comp_child.name != member_name) continue;
+				if (comp_child.kind == FUN_DECL || comp_child.kind == PROPERTY_DECL) return true;
+			}
+		}
+	}
+
+	// Search workspace for the class in other files
+	if (workspace != null) {
+		if (try indices = workspace.lookup_by_name(member_name)) {
+			for (usz j = 0; j < indices.len(); j++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(j));
+				// Workspace symbols don't have a class_name field directly,
+				// but we could check the file URI and package to match.
+				// For now, just check if the name exists in the workspace at all.
+				// This is a conservative approach -- we err on the side of not flagging.
+			}
+		}
+	}
+
+	// If the class is not found in the same file, we can't verify members.
+	// Be conservative: assume it COULD be a member to avoid false positives.
+	// Only return false if we found the class but the member wasn't in it.
+	bool class_found_in_ast = false;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.name == class_name &&
+			(n.kind == CLASS_DECL || n.kind == INTERFACE_DECL || n.kind == OBJECT_DECL)) {
+			class_found_in_ast = true;
+			break;
+		}
+	}
+
+	// Class not in this file -- be conservative, assume member exists
+	if (!class_found_in_ast) return true;
+
+	// Class was found but member was not -- it's not a member
+	return false;
+}
+
+/**
+ * Check if a NAME_EXPR is inside a receiver lambda and refers to a member
+ * of the receiver type.
+ *
+ * Walk the parent chain to find a LAMBDA_EXPR, then its CALL_EXPR parent,
+ * then resolve the called function's receiver lambda parameter type,
+ * then check if the name is a member of that receiver class.
+ */
+fn bool is_receiver_lambda_member(ParseResult* ast, uint node_idx, String name, WorkspaceIndex* workspace) {
+	// Walk up through potentially nested lambdas
+	uint current = node_idx;
+	while (true) {
+		uint lambda_idx = find_lambda_ancestor(ast, current);
+		if (lambda_idx == ast::NO_PARENT) return false;
+
+		uint call_idx = find_call_parent_of_lambda(ast, lambda_idx);
+		if (call_idx != ast::NO_PARENT) {
+			String receiver_type = find_receiver_type_for_call(ast, call_idx, workspace);
+			if (receiver_type.len > 0) {
+				if (is_member_of_class(ast, receiver_type, name, workspace)) {
+					return true;
+				}
+			}
+		}
+
+		// Try the next outer lambda (for nested receiver lambdas)
+		current = lambda_idx;
+	}
+}
+
 /**
  * Scan AST for NAME_EXPR nodes whose identifiers are not resolvable in
  * the current scope or via imports, but ARE found in stdlib/deps/workspace.
@@ -526,6 +861,11 @@ fn void add_unresolved_reference_diagnostics(Object* diagnostics, String content
 
 		// Skip if this is a member access (part of a dot chain)
 		if (is_dot_member(ast, i)) continue;
+
+		// Skip if this name is inside a receiver lambda and refers to a
+		// member of the receiver type (e.g., `src` inside Module.() -> Unit)
+		// This check is per-occurrence (not cached) because it's position-dependent.
+		if (is_receiver_lambda_member(ast, i, name, workspace)) continue;
 
 		// Check the dedup cache
 		bool already_checked = false;
