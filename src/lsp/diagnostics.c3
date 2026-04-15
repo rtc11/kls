@@ -555,24 +555,17 @@ fn uint find_call_parent_of_lambda(ParseResult* ast, uint lambda_idx) {
 fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, WorkspaceIndex* workspace) {
 	AstNode* call = &ast.nodes[call_idx];
 
-	// Get the callee name. For simple calls, the CALL_EXPR has NAME_EXPR children
-	// or the name comes from a DOT_EXPR parent.
-	String callee_name = "";
+	// Get the callee name. The parser copies the callee name into CALL_EXPR.name
+	// for both simple calls (foo()) and member calls (obj.foo()).
+	String callee_name = call.name;
 
-	// Check if CALL_EXPR has a NAME_EXPR child (direct function call)
-	for (uint i = 0; i < ast.node_count; i++) {
-		if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == NAME_EXPR) {
-			callee_name = ast.nodes[i].name;
-			break;
-		}
-	}
-
-	// If call is a member of a DOT_EXPR (e.g., nob.module { ... }),
-	// the callee is the DOT_EXPR's name field
-	if (callee_name.len == 0 && call.parent != ast::NO_PARENT) {
-		AstNode* parent = &ast.nodes[call.parent];
-		if (parent.kind == DOT_EXPR && parent.name.len > 0) {
-			callee_name = parent.name;
+	// Fallback: if CALL_EXPR.name is empty, check for a NAME_EXPR child
+	if (callee_name.len == 0) {
+		for (uint i = 0; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == NAME_EXPR) {
+				callee_name = ast.nodes[i].name;
+				break;
+			}
 		}
 	}
 
@@ -584,17 +577,18 @@ fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, Workspace
 	// also/let: don't use receiver lambdas (they use `it`, not `this`)
 	if (callee_name == "apply" || callee_name == "run") {
 		// For receiver.apply { ... }, find the receiver's type.
-		// The CALL_EXPR is a child of DOT_EXPR; the DOT_EXPR's first child
+		// The CALL_EXPR wraps DOT_EXPR as a child; DOT_EXPR's first child
 		// is the receiver expression. We need to find what class that is.
-		if (call.parent != ast::NO_PARENT) {
-			AstNode* dot_parent = &ast.nodes[call.parent];
-			if (dot_parent.kind == DOT_EXPR) {
-				// Find the receiver child of the DOT_EXPR (NAME_EXPR)
-				for (uint i = 0; i < ast.node_count; i++) {
-					if (ast.nodes[i].parent == call.parent && ast.nodes[i].kind == NAME_EXPR) {
-						String recv_name = ast.nodes[i].name;
+		// Find DOT_EXPR child of CALL_EXPR
+		for (uint i = 0; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == DOT_EXPR) {
+				uint dot_idx = i;
+				// Find NAME_EXPR child of DOT_EXPR (the receiver)
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == dot_idx && ast.nodes[j].kind == NAME_EXPR) {
+						String recv_name = ast.nodes[j].name;
 						// Look up what type this variable is
-						String recv_type = find_variable_type_name(ast, call.parent, recv_name);
+						String recv_type = find_variable_type_name(ast, call_idx, recv_name);
 						if (recv_type.len > 0) return recv_type;
 						// If we can't resolve the variable type, try using the name directly
 						// as a class name (e.g., Foo.apply { ... })
@@ -602,6 +596,7 @@ fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, Workspace
 						break;
 					}
 				}
+				break;
 			}
 		}
 		return "";

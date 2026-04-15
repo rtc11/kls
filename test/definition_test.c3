@@ -683,3 +683,133 @@ fn void definition_local_var_in_member_chain() @test {
 		assert(line == 1, "expected line 1 for 'items' decl, got %d", line);
 	};
 }
+
+// ── Receiver lambda member definition ─────────────────────────────
+
+fn void definition_of_receiver_lambda_member_data_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// src at line 6 inside the lambda should go to the data class param at line 0
+		String content =
+`data class Module(var src: String = "", var name: String = "")
+fun module(block: Module.() -> Unit) {}
+fun main() {
+    module {
+        name = "example"
+        src = "src/main"
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "src" at line 5, col 8
+		Object* params = make_params("file:///test.kt", 5, 8);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected Location for receiver lambda member 'src'");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		// Should go to 'src' in data class Module at line 0
+		assert(line == 0, "expected line 0 for Module.src, got %d", line);
+	};
+}
+
+fn void definition_of_receiver_lambda_member_via_dot_call() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Member function in a class, called via dot expression
+		String content =
+`data class Config(var timeout: Int = 30, var debug: Boolean = false)
+class Builder {
+    fun configure(block: Config.() -> Unit) {}
+}
+fun main() {
+    val b = Builder()
+    b.configure {
+        timeout = 60
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "timeout" at line 7, col 8
+		Object* params = make_params("file:///test.kt", 7, 8);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected Location for receiver lambda member 'timeout'");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to 'timeout' in data class Config at line 0
+		assert(line == 0, "expected line 0 for Config.timeout, got %d", line);
+	};
+}
+
+fn void definition_of_receiver_lambda_fun_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`class Builder {
+    fun add(item: String) {}
+}
+fun build(block: Builder.() -> Unit) {}
+fun main() {
+    build {
+        add("item1")
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "add" at line 6, col 8
+		Object* params = make_params("file:///test.kt", 6, 8);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected Location for receiver lambda member 'add'");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to 'add' in class Builder at line 1
+		assert(line == 1, "expected line 1 for Builder.add, got %d", line);
+	};
+}
+
+fn void definition_of_receiver_lambda_local_shadows_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Local 'src' declared inside the lambda should shadow the receiver member
+		String content =
+`data class Module(var src: String = "")
+fun module(block: Module.() -> Unit) {}
+fun main() {
+    module {
+        val src = "local"
+        println(src)
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "src" at line 5 in "println(src)"
+		// The "src" there should go to the local "val src" at line 4, not Module.src
+		Object* params = make_params("file:///test.kt", 5, 16);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected Location for local 'src'");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to 'val src' at line 4 (local shadows receiver member)
+		assert(line == 4, "expected line 4 for local src, got %d", line);
+	};
+}

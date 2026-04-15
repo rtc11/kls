@@ -61,6 +61,18 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// Detect call context: prefer AST-based detection, fall back to lexer
 	bool is_call = is_call_context_ast(pr, tok.offset) || is_call_context(doc.content, tok);
 
+	// ── Receiver lambda member navigation ────────────────────────
+	// If the cursor is inside a receiver lambda (e.g., Module.() -> Unit),
+	// and the name is NOT declared locally inside the lambda, it likely
+	// refers to a member of the receiver class. Check this BEFORE the
+	// global fallback to avoid matching same-named declarations in
+	// unrelated scopes. Kotlin priority: local-in-lambda > receiver > outer.
+	if (!is_declared_in_lambda_scope(pr, target_name, tok.offset)) {
+		if (try result = find_receiver_lambda_member_definition(pr, workspace, target_name, tok.offset, uri)) {
+			return result;
+		}
+	}
+
 	// Find definition using scope-aware AST search
 	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
 		return build_location_from_node(uri, node);
@@ -341,6 +353,8 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 
 /**
  * Search for a member declaration inside a class in the same-file AST.
+ * Checks declarations (fun, property, nested class, etc.) and data class
+ * constructor parameters with var/val flags (PARAM with MOD_VAR/MOD_FINAL).
  */
 fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String member_name, String uri) {
 	// Find the class declaration
@@ -352,9 +366,19 @@ fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String 
 			for (uint j = 0; j < pr.node_count; j++) {
 				AstNode* child = &pr.nodes[j];
 				if (child.parent != i) continue;
-				if (!ast::is_declaration(child.kind)) continue;
 				if (child.name != member_name) continue;
-				return build_location_from_node(uri, child);
+
+				// Standard declarations (fun, property, nested class, etc.)
+				if (ast::is_declaration(child.kind)) {
+					return build_location_from_node(uri, child);
+				}
+
+				// Data class constructor params with var/val
+				if (child.kind == PARAM) {
+					if ((child.mod_flags & ast::MOD_VAR) != 0 || (child.mod_flags & ast::MOD_FINAL) != 0) {
+						return build_location_from_node(uri, child);
+					}
+				}
 			}
 		}
 	}
@@ -403,6 +427,165 @@ fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentSt
 	}
 
 	return NOT_DOT_MEMBER~;
+}
+
+// ── Receiver lambda member definition lookup ──────────────────────
+
+faultdef NOT_RECEIVER_MEMBER;
+
+/**
+ * Check if a name is declared locally within the innermost LAMBDA_EXPR
+ * scope containing the cursor. This is used to determine if a name
+ * should resolve to a lambda-local declaration rather than a receiver
+ * member. In Kotlin, locals inside a lambda shadow receiver members.
+ */
+fn bool is_declared_in_lambda_scope(ParseResult* pr, String name, uint cursor_offset) {
+	// Find the innermost lambda containing the cursor
+	uint lambda_idx = ast::NO_PARENT;
+	for (uint i = 1; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != LAMBDA_EXPR) continue;
+		if (cursor_offset >= n.start_offset && cursor_offset < n.end_offset) {
+			lambda_idx = i;
+		}
+	}
+	if (lambda_idx == ast::NO_PARENT) return false;
+
+	// Check direct children of this lambda for matching declarations
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.parent != lambda_idx) continue;
+		if (n.name != name) continue;
+		if (is_definition_target(n.kind)) return true;
+	}
+
+	// Also check nested blocks inside the lambda (but NOT nested lambdas)
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != BLOCK) continue;
+		if (n.parent != lambda_idx) continue;
+
+		// Check children of this block
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.name != name) continue;
+			if (is_definition_target(child.kind)) return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * If the cursor is inside a receiver lambda, resolve the receiver type
+ * and find the member declaration in the receiver class.
+ *
+ * For example, in `nob.module { src = "example" }` where `module` takes
+ * `Module.() -> Unit`, navigating from `src` should go to Module's `src`
+ * property, not to some other `src` in the file.
+ */
+fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
+		String target_name, uint cursor_offset, String current_uri) {
+	// Find the NAME_EXPR at the cursor position
+	uint name_node_idx = ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != NAME_EXPR) continue;
+		if (n.name != target_name) continue;
+		if (cursor_offset >= n.name_offset && cursor_offset < n.name_offset + n.name_len) {
+			name_node_idx = i;
+			break;
+		}
+	}
+	if (name_node_idx == ast::NO_PARENT) return NOT_RECEIVER_MEMBER~;
+
+	// Walk up through lambdas to find a receiver type
+	uint current = name_node_idx;
+	while (true) {
+		uint lambda_idx = find_lambda_ancestor_def(pr, current);
+		if (lambda_idx == ast::NO_PARENT) return NOT_RECEIVER_MEMBER~;
+
+		uint call_idx = find_call_parent_of_lambda_def(pr, lambda_idx);
+		if (call_idx != ast::NO_PARENT) {
+			String receiver_type = find_receiver_type_for_call_def(pr, call_idx);
+			if (receiver_type.len > 0) {
+				// Found a receiver type -- look for the member in that class
+				if (try result = find_member_in_class_ast(pr, receiver_type, target_name, current_uri)) {
+					return result;
+				}
+				// Try workspace
+				if (workspace != null) {
+					if (try result = find_member_in_workspace_class(workspace, null, receiver_type, target_name)) {
+						return result;
+					}
+				}
+			}
+		}
+
+		// Try the next outer lambda
+		current = lambda_idx;
+	}
+}
+
+/**
+ * Find the nearest LAMBDA_EXPR ancestor of a node.
+ */
+fn uint find_lambda_ancestor_def(ParseResult* pr, uint node_idx) {
+	uint current = node_idx;
+	while (current != ast::NO_PARENT) {
+		AstNode* n = &pr.nodes[current];
+		if (n.kind == LAMBDA_EXPR && current != node_idx) {
+			return current;
+		}
+		current = n.parent;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Find the CALL_EXPR parent of a LAMBDA_EXPR (trailing lambdas are direct children).
+ */
+fn uint find_call_parent_of_lambda_def(ParseResult* pr, uint lambda_idx) {
+	AstNode* lambda = &pr.nodes[lambda_idx];
+	if (lambda.parent == ast::NO_PARENT) return ast::NO_PARENT;
+	AstNode* parent = &pr.nodes[lambda.parent];
+	if (parent.kind == CALL_EXPR) return lambda.parent;
+	return ast::NO_PARENT;
+}
+
+/**
+ * Given a CALL_EXPR, find the receiver type from the called function's
+ * parameter with a receiver function type (e.g., Module.() -> Unit).
+ * Searches the same-file AST for the function declaration.
+ */
+fn String find_receiver_type_for_call_def(ParseResult* pr, uint call_idx) {
+	AstNode* call = &pr.nodes[call_idx];
+	String callee_name = call.name;
+
+	if (callee_name.len == 0) return "";
+
+	// Search all FUN_DECL nodes with matching name
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name != callee_name) continue;
+
+		// Scan PARAM children for a function type with receiver
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* p = &pr.nodes[j];
+			if (p.parent != i) continue;
+			if (p.kind != PARAM) continue;
+			if (p.type_text.len == 0) continue;
+
+			TypeRef tref = types::parse_type_text(p.type_text);
+			if (tref.kind == FUNCTION && tref.receiver_type_name.len > 0) {
+				return tref.receiver_type_name;
+			}
+		}
+	}
+
+	return "";
 }
 
 // ── Cross-file definition lookup ──────────────────────────────────

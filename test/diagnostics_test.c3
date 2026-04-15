@@ -984,3 +984,34 @@ fun main() {
 		}
 	};
 }
+
+fn void receiver_lambda_member_via_dot_call() @test {
+	@pool() {
+		// Realistic pattern: class has a member function with receiver lambda
+		// and the call is via a dot expression (obj.method { ... })
+		Object* result = build_diagnostics_with_workspace(
+			`data class Module(var src: String = "", var name: String = "")
+
+class Builder {
+    fun module(block: Module.() -> Unit) {}
+}
+
+fun main() {
+    val b = Builder()
+    b.module {
+        name = "example"
+        src = "src/main"
+    }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'src'"),
+				"receiver lambda member 'src' via dot call should not be flagged, got: %s", msg);
+			assert(!msg.contains("Unresolved reference: 'name'"),
+				"receiver lambda member 'name' via dot call should not be flagged, got: %s", msg);
+		}
+	};
+}
