@@ -134,11 +134,13 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			progress::create("kls-indexing");
 			progress::begin("kls-indexing", "Kotlin Language Server", 0);
 
-			progress::report("kls-indexing", "Scanning workspace...", 20);
-			self.workspace.scan_workspace();
-
-			progress::report("kls-indexing", "Resolving classpath...", 40);
+			// Resolve classpath first so module source roots are available
+			// for scan_workspace() to use and for index_file() to assign module_name
+			progress::report("kls-indexing", "Resolving classpath...", 20);
 			classpath::resolve_classpath(&self.workspace.classpath, self.workspace.root_path);
+
+			progress::report("kls-indexing", "Scanning workspace...", 40);
+			self.workspace.scan_workspace();
 
 			progress::report("kls-indexing", "Indexing dependencies...", 60);
 			self.workspace.dep_index.index_classpath(&self.workspace.classpath);
@@ -392,7 +394,11 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 		workspace.classpath.init();
 		classpath::resolve_classpath(&workspace.classpath, workspace.root_path);
 
-		progress::report("kls-reindex", "Re-indexing dependencies...", 50);
+		// Re-scan workspace with updated module source roots
+		progress::report("kls-reindex", "Re-scanning workspace...", 40);
+		workspace.scan_workspace();
+
+		progress::report("kls-reindex", "Re-indexing dependencies...", 60);
 		workspace.dep_index.free();
 		workspace.dep_index.init();
 		workspace.dep_index.index_classpath(&workspace.classpath);

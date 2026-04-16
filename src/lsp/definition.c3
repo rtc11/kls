@@ -830,6 +830,9 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		// Skip symbols from the current file (already checked via AST)
 		if (sym.uri == current_uri) continue;
 
+		// Skip symbols not reachable via module dependency graph
+		if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
+
 		if (first_match == null) {
 			first_match = sym;
 		}

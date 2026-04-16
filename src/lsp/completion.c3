@@ -886,6 +886,9 @@ fn void add_workspace_completions(Object* items, WorkspaceIndex* workspace, Stri
 		// Skip symbols from current document
 		if (sym.uri == current_uri) continue;
 
+		// Skip symbols not reachable via module dependency graph
+		if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
+
 		// Check import visibility
 		String visible_name = workspace::is_symbol_visible(sym, &imports, sym.name);
 		bool is_imported = visible_name.len > 0;

@@ -51,6 +51,7 @@ struct MemberDecl {
 struct WorkspaceFile {
 	String uri;            // heap-copied
 	String package_name;   // heap-copied
+	String module_name;    // heap-copied Gradle module name (e.g. ":core"), "" if single-project
 	usz symbol_start;      // index into symbols list
 	usz symbol_count;      // number of symbols from this file
 }
@@ -100,6 +101,7 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		foreach (&entry : self.files.tvalues()) {
 			if (entry.uri.len > 0) mem::free(entry.uri.ptr);
 			if (entry.package_name.len > 0) mem::free(entry.package_name.ptr);
+			if (entry.module_name.len > 0) mem::free(entry.module_name.ptr);
 		}
 	};
 	self.files.free();
@@ -319,6 +321,16 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 	// Remove old symbols for this file if re-indexing
 	self.remove_file(uri);
 
+	// Determine which Gradle module this file belongs to
+	String module_name = "";
+	if (self.classpath.module_count > 0) {
+		String file_path = uri_to_path(uri);
+		GradleModule* mod = self.classpath.find_module_for_path(file_path);
+		if (mod != null) {
+			module_name = mod.name;
+		}
+	}
+
 	// Scan package name
 	String pkg = scan_package(content);
 	String pkg_copy = "";
@@ -383,6 +395,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 	WorkspaceFile wf = {
 		.uri = uri.copy(mem),
 		.package_name = pkg_copy,
+		.module_name = module_name.len > 0 ? module_name.copy(mem) : "",
 		.symbol_start = start,
 		.symbol_count = count,
 	};
@@ -434,6 +447,7 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 	// Free file entry strings
 	if (wf.uri.len > 0) mem::free(wf.uri.ptr);
 	if (wf.package_name.len > 0) mem::free(wf.package_name.ptr);
+	if (wf.module_name.len > 0) mem::free(wf.module_name.ptr);
 	self.files.remove(uri);
 
 	// #11: Compact the symbols list by shifting remaining symbols down
@@ -556,6 +570,9 @@ faultdef SCAN_ERROR;
 
 /**
  * Scan the workspace root directory for .kt files and index them all.
+ * When Gradle modules are discovered (via classpath resolution), scans only
+ * the known source roots for each module. Otherwise falls back to a recursive
+ * directory walk from the workspace root.
  */
 fn void WorkspaceIndex.scan_workspace(WorkspaceIndex* self) {
 	if (self.root_path.len == 0) {
@@ -566,8 +583,24 @@ fn void WorkspaceIndex.scan_workspace(WorkspaceIndex* self) {
 	io::eprintfn("[kls] Scanning workspace: %s", self.root_path);
 	usz file_count = 0;
 
-	Path root = path::temp(self.root_path)!!;
-	scan_directory_recursive(self, root, &file_count);
+	if (self.classpath.module_count > 0) {
+		// Module-aware scan: iterate each module's source roots
+		for (usz i = 0; i < self.classpath.module_count; i++) {
+			GradleModule* m = &self.classpath.modules[i];
+			for (usz j = 0; j < m.src_root_count; j++) {
+				if (m.src_roots[j].len == 0) continue;
+				Path src = path::temp(m.src_roots[j])!!;
+				if (path::is_dir(src)) {
+					scan_directory_recursive(self, src, &file_count);
+				}
+			}
+		}
+	} else {
+		// Fallback: recursive walk from workspace root
+		Path root = path::temp(self.root_path)!!;
+		scan_directory_recursive(self, root, &file_count);
+	}
+
 	io::eprintfn("[kls] Indexed %d files, %d symbols", file_count, self.symbols.len());
 }
 
@@ -892,4 +925,40 @@ fn String get_import_package(String path) {
 		}
 	}
 	return "";
+}
+
+// ── Module-aware visibility ───────────────────────────────────────
+
+/**
+ * Get the module name for a file by URI.
+ * Returns empty string if no modules are known or the file is not in any module.
+ */
+fn String WorkspaceIndex.get_file_module(WorkspaceIndex* self, String uri) {
+	if (self.classpath.module_count == 0) return "";
+	WorkspaceFile* wf = self.files.get_ref(uri) ?? null;
+	if (wf == null) return "";
+	return wf.module_name;
+}
+
+/**
+ * Check if a symbol is visible from a given file, considering module boundaries.
+ * In a multi-module project, a symbol from module X is only visible to a file
+ * in module Y if Y depends on X (directly or transitively).
+ *
+ * Returns true if:
+ * - No modules are known (single-project mode — everything visible)
+ * - Either the symbol or requesting file has no module assignment (permissive)
+ * - The symbol and file are in the same module
+ * - The requesting file's module depends on the symbol's module
+ */
+fn bool WorkspaceIndex.is_module_visible(WorkspaceIndex* self, String sym_uri, String from_uri) {
+	if (self.classpath.module_count == 0) return true;
+
+	String from_module = self.get_file_module(from_uri);
+	String sym_module = self.get_file_module(sym_uri);
+
+	// If either has no module, be permissive (backward compat / files outside modules)
+	if (from_module.len == 0 || sym_module.len == 0) return true;
+
+	return self.classpath.module_depends_on(from_module, sym_module);
 }

@@ -1232,12 +1232,13 @@ fn String? describe_identifier_from_workspace(WorkspaceIndex* workspace, Documen
 	String target = tok.text;
 
 	if (try indices = workspace.lookup_by_name(target)) {
-		// Find best match (skip same-file symbols)
+		// Find best match (skip same-file symbols, check module visibility)
 		WorkspaceSymbol* best = null;
 		for (usz i = 0; i < indices.len(); i++) {
 			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
 			if (sym.name.len == 0) continue;
 			if (sym.uri == current_uri) continue;
+			if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
 			best = sym;
 			break;
 		}
