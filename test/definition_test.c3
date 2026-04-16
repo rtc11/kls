@@ -1141,3 +1141,42 @@ fn void definition_of_type_param_in_class() @test {
 		assert(col == 10, "expected col 10 (TYPE_PARAM T declaration), got %d", col);
 	};
 }
+
+// ── Prefer file-name-matching symbol over nested same-name symbol ──
+
+fn void definition_prefers_filename_matching_symbol() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index two files in package "models", both declaring "Simulering"
+		// ApiError.kt has a nested enum class Simulering (symbol scanner finds it)
+		ws.index_file("file:///models/ApiError.kt",
+			"package models\nval Simulering = 1");
+		// Simulering.kt has the top-level class Simulering
+		ws.index_file("file:///models/Simulering.kt",
+			"package models\ninterface Simulering");
+
+		// The file under test imports models.* and references Simulering
+		String content =
+`package abetal
+import models.*
+fun foo(s: Simulering) {}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "Simulering" at line 2, col 11 ("fun foo(s: Simulering) {}")
+		Object* params = make_params("file:///test.kt", 2, 11);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// Debug: check how many symbols are indexed
+		assert(result != null, "expected a Location result");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///models/Simulering.kt",
+			"expected Simulering.kt, got %s", uri);
+	};
+}

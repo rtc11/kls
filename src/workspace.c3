@@ -286,6 +286,14 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 				}
 			}
 
+			// Check if there's already a cached entry for this class name
+			// (can happen with duplicate class names across files)
+			if (try existing = self.member_cache.get_ref(class_name)) {
+				for (usz j = 0; j < existing.len(); j++) {
+					free_member_decl(&(*existing)[j]);
+				}
+				existing.free();
+			}
 			self.member_cache.set(class_name, members);
 			break; // Found the class node, done
 		}

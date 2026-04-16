@@ -822,6 +822,8 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 	WorkspaceSymbol* func_match = null;
 	WorkspaceSymbol* imported_match = null;
 	WorkspaceSymbol* imported_func_match = null;
+	WorkspaceSymbol* imported_file_match = null;      // imported + filename matches symbol name
+	WorkspaceSymbol* imported_file_func_match = null;  // same, for functions
 
 	for (usz i = 0; i < indices.len(); i++) {
 		WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
@@ -849,19 +851,30 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 			if (imported_func_match == null && sym.kind == FUNCTION) {
 				imported_func_match = sym;
 			}
+			// Prefer symbol whose file name matches the target name (Kotlin convention)
+			if (imported_file_match == null && uri_filename_matches(sym.uri, target_name)) {
+				imported_file_match = sym;
+			}
+			if (imported_file_func_match == null && sym.kind == FUNCTION && uri_filename_matches(sym.uri, target_name)) {
+				imported_file_func_match = sym;
+			}
 		}
 	}
 
-	// Prefer imported matches over non-imported
+	// Prefer file-name-matching > imported > any visible
 	WorkspaceSymbol* chosen = null;
 	if (is_call) {
-		if (imported_func_match != null) {
+		if (imported_file_func_match != null) {
+			chosen = imported_file_func_match;
+		} else if (imported_func_match != null) {
 			chosen = imported_func_match;
 		} else {
 			chosen = func_match;
 		}
 	} else {
-		if (imported_match != null) {
+		if (imported_file_match != null) {
+			chosen = imported_file_match;
+		} else if (imported_match != null) {
 			chosen = imported_match;
 		} else {
 			chosen = first_match;
@@ -894,4 +907,27 @@ fn Object* build_location_from_workspace_symbol(WorkspaceSymbol* sym) {
 	location.set("range", range);
 
 	return location;
+}
+
+/**
+ * Check if a file URI's basename (without .kt extension) matches a symbol name.
+ * E.g., "file:///path/to/Simulering.kt" matches "Simulering".
+ */
+fn bool uri_filename_matches(String uri, String name) {
+	// Find the last '/' to get the filename
+	usz last_slash = 0;
+	for (usz i = uri.len; i > 0; i--) {
+		if (uri[i - 1] == '/') {
+			last_slash = i;
+			break;
+		}
+	}
+	String filename = uri[last_slash..];
+	// Strip ".kt" suffix
+	if (filename.len > 3 && filename[filename.len - 3] == '.'
+		&& filename[filename.len - 2] == 'k' && filename[filename.len - 1] == 't') {
+		String stem = filename[:filename.len - 3];
+		return stem == name;
+	}
+	return false;
 }
