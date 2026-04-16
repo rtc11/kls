@@ -5,6 +5,7 @@ import std::io::file;
 import std::io::path;
 import std::os::env;
 import std::os::process;
+import kls::log;
 import std::compression::zip;
 import kls::deps::classfile;
 import kls::deps::jar_index;
@@ -42,7 +43,7 @@ fn String detect_java_home() {
 				jmods_path.tinit();
 				jmods_path.appendf("%s/jmods", java_home);
 				if (path::is_dir(path::temp(jmods_path.str_view())!!)) {
-					io::eprintfn("[kls] JDK detected from JAVA_HOME: %s", java_home);
+				log::info("[kls] JDK detected from JAVA_HOME: %s", java_home);
 					return java_home.copy(mem);
 				}
 			}
@@ -66,7 +67,7 @@ fn String detect_java_home() {
 					jmods_path.tinit();
 					jmods_path.appendf("%s/jmods", java_home);
 					if (path::is_dir(path::temp(jmods_path.str_view())!!)) {
-						io::eprintfn("[kls] JDK detected from /usr/libexec/java_home: %s", java_home);
+						log::info("[kls] JDK detected from /usr/libexec/java_home: %s", java_home);
 						return java_home.copy(mem);
 					}
 				}
@@ -92,14 +93,14 @@ fn String detect_java_home() {
 			jmods_path.appendf("%s/jmods", p);
 			if (try pp = path::temp(jmods_path.str_view())) {
 				if (path::is_dir(pp)) {
-					io::eprintfn("[kls] JDK detected at: %s", p);
+					log::info("[kls] JDK detected at: %s", p);
 					return p.copy(mem);
 				}
 			}
 		}
 	};
 
-	io::eprintfn("[kls] No JDK detected (set JAVA_HOME to enable JDK class indexing)");
+	log::info("[kls] No JDK detected (set JAVA_HOME to enable JDK class indexing)");
 	return "";
 }
 
@@ -128,13 +129,13 @@ fn void index_jdk(DependencyIndex* dep_index) {
 			if (file::is_file(path_str)) {
 				index_jmod(dep_index, path_str);
 			} else {
-				io::eprintfn("[kls]   JDK module not found: %s", mod_name);
+				log::debug("[kls]   JDK module not found: %s", mod_name);
 			}
 		};
 	}
 
 	usz total_after = dep_index.symbols.len();
-	io::eprintfn("[kls] JDK index: %d symbols from jmod files", (int)(total_after - total_before));
+	log::info("[kls] JDK index: %d symbols from jmod files", (int)(total_after - total_before));
 }
 
 // ── JMOD header stripping ─────────────────────────────────────────
@@ -220,7 +221,7 @@ fn void index_jmod(DependencyIndex* idx, String jmod_path) {
 	// Strategy: read the file, skip 4 bytes, write to temp, open as ZIP.
 	String zip_path = strip_jmod_header(jmod_path);
 	if (zip_path.len == 0) {
-		io::eprintfn("[kls]   Skipping jmod (strip header failed): %s", jmod_path);
+		log::warn("[kls]   Skipping jmod (strip header failed): %s", jmod_path);
 		return;
 	}
 	defer {
@@ -233,7 +234,7 @@ fn void index_jmod(DependencyIndex* idx, String jmod_path) {
 	if (try a = zip::open(tmem, zip_path, "r")) {
 		archive = a;
 	} else {
-		io::eprintfn("[kls]   Skipping jmod (zip open failed): %s", jmod_path);
+		log::warn("[kls]   Skipping jmod (zip open failed): %s", jmod_path);
 		return;
 	}
 	defer archive.close()!!;
@@ -278,7 +279,7 @@ fn void index_jmod(DependencyIndex* idx, String jmod_path) {
 		class_count++;
 	}
 
-	io::eprintfn("[kls]   Indexed jmod: %s (%d classes)", jmod_path, (int)class_count);
+	log::debug("[kls]   Indexed jmod: %s (%d classes)", jmod_path, (int)class_count);
 }
 
 /**

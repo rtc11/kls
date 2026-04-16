@@ -5,6 +5,7 @@ import std::collections;
 import std::compression::zip;
 import kls::deps::classfile;
 import kls::deps::classpath;
+import kls::log;
 
 // ── Dependency symbol kinds ────────────────────────────────────────
 
@@ -92,7 +93,7 @@ fn void DependencyIndex.free(DependencyIndex* self) {
  * iterates .class entries, parses each, and adds public API symbols.
  */
 fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp) {
-	io::eprintfn("[kls] Indexing %d JARs for dependency symbols...", (int)cp.jar_count);
+	log::info("[kls] Indexing %d JARs for dependency symbols...", (int)cp.jar_count);
 
 	for (usz i = 0; i < cp.jar_count; i++) {
 		@pool() {
@@ -100,7 +101,7 @@ fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp) {
 		};
 	}
 
-	io::eprintfn("[kls] Dependency index: %d symbols from %d JARs", (int)self.symbols.len(), (int)cp.jar_count);
+	log::info("[kls] Dependency index: %d symbols from %d JARs", (int)self.symbols.len(), (int)cp.jar_count);
 }
 
 /**
@@ -112,7 +113,7 @@ fn void DependencyIndex.index_jar(DependencyIndex* self, String jar_path) {
 	if (try a = zip::open(tmem, jar_path, "r")) {
 		archive = a;
 	} else {
-		io::eprintfn("[kls]   Skipping JAR (open failed): %s", jar_path);
+		log::warn("[kls]   Skipping JAR (open failed): %s", jar_path);
 		return;
 	}
 	defer archive.close()!!;
@@ -289,7 +290,7 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 	if (idx.symbols.len() >= MAX_DEP_SYMBOLS) {
 		// #15: Warn once when the dependency symbol limit is reached
 		if (!idx.limit_warned) {
-			io::eprintfn("[kls] Warning: dependency symbol limit reached (%d), some symbols may be missing", MAX_DEP_SYMBOLS);
+			log::warn("[kls] Warning: dependency symbol limit reached (%d), some symbols may be missing", MAX_DEP_SYMBOLS);
 			idx.limit_warned = true;
 		}
 		return;

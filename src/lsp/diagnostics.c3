@@ -13,6 +13,7 @@ import kls::kotlin::types;
 import kls::kotlin::symbols;
 import kls::workspace;
 import kls::deps::jar_index;
+import kls::log;
 
 /**
  * Run the lexer on content and return a JSON array of LSP Diagnostic
@@ -1056,5 +1057,5 @@ fn void publish_diagnostics(DocumentStore* store, String uri, WorkspaceIndex* wo
 	params.set("diagnostics", diagnostics);
 
 	json_rpc::send_notification("textDocument/publishDiagnostics", params);
-	io::eprintfn("[kls] Published diagnostics for %s", uri);
+	log::debug("[kls] Published diagnostics for %s", uri);
 }

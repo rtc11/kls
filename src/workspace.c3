@@ -316,7 +316,7 @@ fn void WorkspaceIndex.set_root(WorkspaceIndex* self, String uri) {
 
 	self.root_uri = uri.copy(mem);
 	self.root_path = uri_to_path(uri).copy(mem);
-	io::eprintfn("[kls] Workspace root: %s", self.root_path);
+	log::info("[kls] Workspace root: %s", self.root_path);
 }
 
 // ── File indexing ──────────────────────────────────────────────────
@@ -584,11 +584,11 @@ faultdef SCAN_ERROR;
  */
 fn void WorkspaceIndex.scan_workspace(WorkspaceIndex* self) {
 	if (self.root_path.len == 0) {
-		io::eprintfn("[kls] No workspace root set, skipping scan");
+		log::warn("[kls] No workspace root set, skipping scan");
 		return;
 	}
 
-	io::eprintfn("[kls] Scanning workspace: %s", self.root_path);
+	log::info("[kls] Scanning workspace: %s", self.root_path);
 	usz file_count = 0;
 
 	if (self.classpath.module_count > 0) {
@@ -609,7 +609,7 @@ fn void WorkspaceIndex.scan_workspace(WorkspaceIndex* self) {
 		scan_directory_recursive(self, root, &file_count);
 	}
 
-	io::eprintfn("[kls] Indexed %d files, %d symbols", file_count, self.symbols.len());
+	log::info("[kls] Indexed %d files, %d symbols", file_count, self.symbols.len());
 }
 
 fn void scan_directory_recursive(WorkspaceIndex* idx, Path dir, usz* file_count) {
@@ -651,7 +651,7 @@ fn void index_file_from_disk(WorkspaceIndex* idx, String file_path, usz* file_co
 	if (try d = file::load(mem, file_path)) {
 		data = d;
 	} else {
-		io::eprintfn("[kls] Failed to read: %s", file_path);
+		log::debug("[kls] Failed to read: %s", file_path);
 		return;
 	}
 	defer mem::free(data.ptr);

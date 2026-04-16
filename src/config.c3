@@ -2,6 +2,7 @@ module kls::config;
 
 import std::io;
 import std::collections::object;
+import kls::log;
 
 // ── Server configuration ──────────────────────────────────────────
 //
@@ -33,7 +34,7 @@ fn void apply_init_options(Object* opts) {
 	if (try val = opts.get("hoverDocsFromSource")) {
 		if (val.is_bool()) {
 			g_config.hover_docs_from_source = val.b;
-			io::eprintfn("[kls] config: hoverDocsFromSource = %s",
+			log::debug("[kls] config: hoverDocsFromSource = %s",
 				g_config.hover_docs_from_source ? "true" : "false");
 		}
 	}

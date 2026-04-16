@@ -3,6 +3,7 @@ module kls::deps::classpath;
 import std::io;
 import std::io::file;
 import std::io::path;
+import kls::log;
 import std::os::env;
 import std::os::process;
 import std::thread;
@@ -219,7 +220,7 @@ fn void resolve_classpath(Classpath* cp, String workspace_path, String progress_
 	active_progress_token = progress_token;
 	cp.build_system = detect_build_system(workspace_path);
 
-	io::eprintfn("[kls] Build system: %s", build_system_name(cp.build_system));
+	log::info("[kls] Build system: %s", build_system_name(cp.build_system));
 
 	switch (cp.build_system) {
 		case GRADLE:
@@ -227,11 +228,11 @@ fn void resolve_classpath(Classpath* cp, String workspace_path, String progress_
 		case MAVEN:
 			resolve_maven(cp, workspace_path);
 		case NONE:
-			io::eprintfn("[kls] No build system detected, using stdlib only");
+			log::info("[kls] No build system detected, using stdlib only");
 	}
 
 	cp.resolved = true;
-	io::eprintfn("[kls] Classpath resolved: %d JARs", (int)cp.jar_count);
+	log::info("[kls] Classpath resolved: %d JARs", (int)cp.jar_count);
 }
 
 fn String build_system_name(BuildSystem bs) {
@@ -266,7 +267,7 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 		// Write a temporary init script
 		String init_script = write_gradle_init_script();
 		if (init_script.len == 0) {
-			io::eprintfn("[kls] Failed to create Gradle init script");
+			log::err("[kls] Failed to create Gradle init script");
 			return;
 		}
 		defer {
@@ -278,12 +279,12 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 		if (try cwd = path::tcwd()) {
 			old_cwd = cwd;
 		} else {
-			io::eprintfn("[kls] Failed to get current directory");
+			log::err("[kls] Failed to get current directory");
 			return;
 		}
 
 		if (catch excuse = path::chdir(workspace_path)) {
-			io::eprintfn("[kls] Failed to chdir to workspace: %s", excuse);
+			log::err("[kls] Failed to chdir to workspace: %s", excuse);
 			return;
 		}
 
@@ -294,7 +295,7 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 		// Gradle configuration cache, which forbids Project access at
 		// task execution time.
 		if (output.len == 0 || !has_kls_output(output)) {
-			io::eprintfn("[kls] Retrying with --no-configuration-cache");
+			log::info("[kls] Retrying with --no-configuration-cache");
 			output = run_gradle_classpath(gradle_cmd, init_script, true);
 		}
 
@@ -315,10 +316,10 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_config_cache) {
 	String[] cmd;
 	if (no_config_cache) {
-		io::eprintfn("[kls] Running: %s -I %s klsClasspath -q --no-configuration-cache", gradle_cmd, init_script);
+		log::debug("[kls] Running: %s -I %s klsClasspath -q --no-configuration-cache", gradle_cmd, init_script);
 		cmd = { gradle_cmd, "-I", init_script, "klsClasspath", "-q", "--no-configuration-cache" };
 	} else {
-		io::eprintfn("[kls] Running: %s -I %s klsClasspath -q", gradle_cmd, init_script);
+		log::debug("[kls] Running: %s -I %s klsClasspath -q", gradle_cmd, init_script);
 		cmd = { gradle_cmd, "-I", init_script, "klsClasspath", "-q" };
 	}
 
@@ -327,7 +328,7 @@ fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_co
 
 	// If the preferred command failed, try the system gradle fallback
 	if (gradle_cmd != "gradle") {
-		io::eprintfn("[kls] Gradle command failed, trying with 'gradle' fallback");
+		log::info("[kls] Gradle command failed, trying with 'gradle' fallback");
 		if (no_config_cache) {
 			cmd = { "gradle", "-I", init_script, "klsClasspath", "-q", "--no-configuration-cache" };
 		} else {
@@ -335,7 +336,7 @@ fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_co
 		}
 		result = run_gradle_streaming(cmd);
 		if (result.len > 0) return result;
-		io::eprintfn("[kls] Gradle fallback also failed");
+		log::err("[kls] Gradle fallback also failed");
 	}
 	return "";
 }
@@ -436,7 +437,7 @@ fn void report_gradle_progress(String line) {
 	if (line.len == 0) return;
 
 	// Log all Gradle stderr to KLS log
-	io::eprintfn("[kls] gradle: %s", line);
+	log::debug("[kls] gradle: %s", line);
 
 	// Extract meaningful messages for the progress bar
 	String message = "";
@@ -564,7 +565,7 @@ fn String write_gradle_init_script() {
 `;
 
 	if (catch excuse = write_string_to_file(script_path, script_content)) {
-		io::eprintfn("[kls] Failed to write init script: %s", excuse);
+		log::err("[kls] Failed to write init script: %s", excuse);
 		return "";
 	}
 
@@ -651,10 +652,10 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 	}
 
 	if (cp.module_count > 0) {
-		io::eprintfn("[kls] Discovered %d Gradle modules", (int)cp.module_count);
+		log::info("[kls] Discovered %d Gradle modules", (int)cp.module_count);
 		for (usz i = 0; i < cp.module_count; i++) {
 			GradleModule* m = &cp.modules[i];
-			io::eprintfn("[kls]   %s: %d src roots, %d deps, %d JARs",
+			log::debug("[kls]   %s: %d src roots, %d deps, %d JARs",
 				m.name, (int)m.src_root_count, (int)m.dep_module_count, (int)m.jar_count);
 		}
 	}
@@ -668,19 +669,19 @@ fn void parse_gradle_output(Classpath* cp, String output) {
  */
 fn void resolve_maven(Classpath* cp, String workspace_path) {
 	@pool() {
-		io::eprintfn("[kls] Running: mvn dependency:build-classpath -q");
+		log::debug("[kls] Running: mvn dependency:build-classpath -q");
 
 		// Change to workspace directory
 		Path old_cwd;
 		if (try cwd = path::tcwd()) {
 			old_cwd = cwd;
 		} else {
-			io::eprintfn("[kls] Failed to get current directory");
+			log::err("[kls] Failed to get current directory");
 			return;
 		}
 
 		if (catch excuse = path::chdir(workspace_path)) {
-			io::eprintfn("[kls] Failed to chdir to workspace: %s", excuse);
+			log::err("[kls] Failed to chdir to workspace: %s", excuse);
 			return;
 		}
 
@@ -693,7 +694,7 @@ fn void resolve_maven(Classpath* cp, String workspace_path) {
 				SpawnOptions.INHERIT_ENV)) {
 			output = out;
 		} else {
-			io::eprintfn("[kls] Maven command failed");
+			log::err("[kls] Maven command failed");
 		}
 
 		// Restore working directory
@@ -791,7 +792,7 @@ fn bool add_jar(Classpath* cp, String jar_path) {
 
 	cp.jar_count++;
 
-	io::eprintfn("[kls]   JAR: %s%s", jar_path, has_source ? " (sources available)" : "");
+	log::debug("[kls]   JAR: %s%s", jar_path, has_source ? " (sources available)" : "");
 	return true;
 }
 

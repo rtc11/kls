@@ -3,6 +3,7 @@ module kls::lsp::progress;
 import std::io;
 import std::collections::object;
 import kls::json_rpc;
+import kls::log;
 
 // Whether the client supports window/workDoneProgress.
 // Set during initialize from client capabilities.
@@ -30,7 +31,7 @@ fn void create(String token) {
 	params.set("token", token);
 
 	json_rpc::send_request("window/workDoneProgress/create", params);
-	io::eprintfn("[kls] Sent workDoneProgress/create (token=%s)", token);
+	log::debug("[kls] Sent workDoneProgress/create (token=%s)", token);
 }
 
 /**

@@ -3,6 +3,7 @@ module kls::server;
 import std::io;
 import std::encoding::json;
 import std::collections::object;
+import kls::log;
 import kls::json_rpc;
 import kls::document;
 import kls::lsp::lifecycle;
@@ -50,17 +51,17 @@ fn void Server.init(Server* self) {
 
 fn void Server.run(Server* self) {
 	self.is_running = true;
-	io::eprintfn("[kls] Server ready, waiting for messages on stdin...");
+	log::info("[kls] Server ready, waiting for messages on stdin...");
 
 	while (self.is_running) {
 		@pool() {
 			// #1: Gracefully handle read/parse failures instead of panicking
 			if (catch excuse = self.run_one_message()) {
 				if (excuse == json_rpc::UNEXPECTED_EOF) {
-					io::eprintfn("[kls] stdin closed, shutting down");
+					log::info("[kls] stdin closed, shutting down");
 					self.is_running = false;
 				} else {
-					io::eprintfn("[kls] Error processing message: %s", excuse);
+					log::err("[kls] Error processing message: %s", excuse);
 				}
 			}
 		};
@@ -74,7 +75,7 @@ fn void? Server.run_one_message(Server* self) {
 	if (try m = json::tparse_string(raw)) {
 		msg = m;
 	} else {
-		io::eprintfn("[kls] JSON parse error");
+		log::err("[kls] JSON parse error");
 		json_rpc::send_error_response(null, json_rpc::PARSE_ERROR, "Parse error");
 		return;
 	}
@@ -86,7 +87,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 	// #2: Gracefully handle missing "method" field (e.g., JSON-RPC responses)
 	String method = msg.get_string("method") ?? "";
 	if (method.len == 0) {
-		io::eprintfn("[kls] Ignoring message without method field");
+		log::debug("[kls] Ignoring message without method field");
 		return;
 	}
 
@@ -121,7 +122,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		params = p;
 	}
 
-	io::eprintfn("[kls] -> %s", method);
+	log::debug("[kls] -> %s", method);
 
 	switch (method) {
 		case "initialize":
@@ -130,7 +131,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			self.is_initialized = true;
 
 		case "initialized":
-			io::eprintfn("[kls] Client initialized");
+			log::info("[kls] Client initialized");
 			progress::create("kls-indexing");
 			progress::begin("kls-indexing", "Kotlin Language Server", 0);
 
@@ -330,7 +331,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			}
 
 		default:
-			io::eprintfn("[kls] Unknown method: %s", method);
+			log::debug("[kls] Unknown method: %s", method);
 			if (is_request) {
 				json_rpc::send_error_response(request_id, json_rpc::METHOD_NOT_FOUND, "Method not found");
 			}
@@ -371,12 +372,12 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 				if (try content = workspace::read_file_content(file_path)) {
 					workspace.index_file(uri, content);
 					mem::free(content.ptr);
-					io::eprintfn("[kls] Re-indexed: %s", uri);
+					log::debug("[kls] Re-indexed: %s", uri);
 				}
 
 			case FILE_CHANGE_DELETED:
 				workspace.remove_file(uri);
-				io::eprintfn("[kls] Removed from index: %s", uri);
+				log::debug("[kls] Removed from index: %s", uri);
 
 			default:
 				break;
@@ -385,7 +386,7 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 
 	// Re-resolve classpath if any build file changed
 	if (build_file_changed) {
-		io::eprintfn("[kls] Build file changed, re-resolving classpath...");
+		log::info("[kls] Build file changed, re-resolving classpath...");
 		progress::create("kls-reindex");
 		progress::begin("kls-reindex", "Kotlin Language Server", 0);
 

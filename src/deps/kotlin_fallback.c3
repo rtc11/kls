@@ -6,6 +6,7 @@ import std::io::path;
 import std::os::env;
 import std::os::process;
 import kls::deps::jar_index;
+import kls::log;
 
 faultdef KOTLIN_NOT_FOUND;
 
@@ -30,7 +31,7 @@ fn String detect_kotlin_home() {
 	@pool() {
 		if (try kotlin_home = env::tget_var("KOTLIN_HOME")) {
 			if (kotlin_home.len > 0 && has_stdlib_jar(kotlin_home)) {
-				io::eprintfn("[kls] Kotlin detected from KOTLIN_HOME: %s", kotlin_home);
+				log::info("[kls] Kotlin detected from KOTLIN_HOME: %s", kotlin_home);
 				return kotlin_home.copy(mem);
 			}
 		}
@@ -41,12 +42,12 @@ fn String detect_kotlin_home() {
 		@pool() {
 			// ARM Homebrew
 			if (try home = find_homebrew_kotlin("/opt/homebrew/Cellar/kotlin")) {
-				io::eprintfn("[kls] Kotlin detected from Homebrew (ARM): %s", home);
+				log::info("[kls] Kotlin detected from Homebrew (ARM): %s", home);
 				return home;
 			}
 			// Intel Homebrew
 			if (try home = find_homebrew_kotlin("/usr/local/Cellar/kotlin")) {
-				io::eprintfn("[kls] Kotlin detected from Homebrew (Intel): %s", home);
+				log::info("[kls] Kotlin detected from Homebrew (Intel): %s", home);
 				return home;
 			}
 		};
@@ -60,7 +61,7 @@ fn String detect_kotlin_home() {
 			sdkman_path.appendf("%s/.sdkman/candidates/kotlin/current", home_dir);
 			String sdkman = sdkman_path.str_view();
 			if (has_stdlib_jar(sdkman)) {
-				io::eprintfn("[kls] Kotlin detected from SDKMAN: %s", sdkman);
+				log::info("[kls] Kotlin detected from SDKMAN: %s", sdkman);
 				return sdkman.copy(mem);
 			}
 		}
@@ -76,7 +77,7 @@ fn String detect_kotlin_home() {
 	@pool() {
 		foreach (p : LINUX_PATHS) {
 			if (has_stdlib_jar(p)) {
-				io::eprintfn("[kls] Kotlin detected at: %s", p);
+				log::info("[kls] Kotlin detected at: %s", p);
 				return p.copy(mem);
 			}
 		}
@@ -98,7 +99,7 @@ fn String detect_kotlin_home() {
 				// Try stripping /bin/kotlinc from the end
 				if (try home = strip_bin_suffix(kotlinc_path)) {
 					if (has_stdlib_jar(home)) {
-						io::eprintfn("[kls] Kotlin detected from `which kotlinc`: %s", home);
+						log::info("[kls] Kotlin detected from `which kotlinc`: %s", home);
 						return home.copy(mem);
 					}
 				}
@@ -114,7 +115,7 @@ fn String detect_kotlin_home() {
 					}
 					if (try home = strip_bin_suffix(resolved_path)) {
 						if (has_stdlib_jar(home)) {
-							io::eprintfn("[kls] Kotlin detected from resolved kotlinc: %s", home);
+							log::info("[kls] Kotlin detected from resolved kotlinc: %s", home);
 							return home.copy(mem);
 						}
 					}
@@ -123,7 +124,7 @@ fn String detect_kotlin_home() {
 		}
 	};
 
-	io::eprintfn("[kls] No system Kotlin detected (set KOTLIN_HOME to enable stdlib fallback)");
+	log::info("[kls] No system Kotlin detected (set KOTLIN_HOME to enable stdlib fallback)");
 	return "";
 }
 
@@ -151,12 +152,12 @@ fn void index_system_kotlin(DependencyIndex* dep_index) {
 		if (file::is_file(path_str)) {
 			dep_index.index_jar(path_str);
 		} else {
-			io::eprintfn("[kls]   kotlin-stdlib.jar not found at: %s", path_str);
+			log::warn("[kls]   kotlin-stdlib.jar not found at: %s", path_str);
 		}
 	};
 
 	usz total_after = dep_index.symbols.len();
-	io::eprintfn("[kls] System Kotlin fallback: %d symbols from kotlin-stdlib.jar", (int)(total_after - total_before));
+	log::info("[kls] System Kotlin fallback: %d symbols from kotlin-stdlib.jar", (int)(total_after - total_before));
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import kls::config;
 import kls::lsp::capabilities;
 import kls::lsp::progress;
 import kls::workspace;
+import kls::log;
 
 /**
  * Handle the "initialize" request.
@@ -13,7 +14,7 @@ import kls::workspace;
  * Extracts rootUri and stores it in the workspace index.
  */
 fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
-	io::eprintfn("[kls] Handling initialize");
+	log::debug("[kls] Handling initialize");
 
 	// #6: Check if the client supports UTF-8 position encoding
 	bool client_supports_utf8 = false;
@@ -22,7 +23,7 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 	if (params != null) {
 		if (try client_info = params.get("clientInfo")) {
 			if (try name = client_info.get_string("name")) {
-				io::eprintfn("[kls] Client: %s", name);
+				log::info("[kls] Client: %s", name);
 			}
 		}
 
@@ -44,7 +45,7 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 				if (try wdp = window.get("workDoneProgress")) {
 					if (wdp.is_bool() && wdp.b) {
 						progress::set_client_support(true);
-						io::eprintfn("[kls] Client supports workDoneProgress");
+						log::debug("[kls] Client supports workDoneProgress");
 					}
 				}
 			}
@@ -86,6 +87,6 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
  * Returns null result (success).
  */
 fn Object* handle_shutdown() {
-	io::eprintfn("[kls] Handling shutdown");
+	log::debug("[kls] Handling shutdown");
 	return null;
 }

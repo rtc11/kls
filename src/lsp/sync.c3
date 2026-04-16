@@ -5,6 +5,7 @@ import std::collections::object;
 import kls::document;
 import kls::workspace;
 import kls::lsp::diagnostics;
+import kls::log;
 
 /**
  * Handle textDocument/didOpen notification.
@@ -19,7 +20,7 @@ fn void handle_did_open(DocumentStore* store, WorkspaceIndex* workspace, Object*
 	int version = td.get_int("version")!!;
 	String text = td.get_string("text")!!;
 
-	io::eprintfn("[kls] Document opened: %s (lang=%s, v=%d)", uri, language_id, version);
+	log::debug("[kls] Document opened: %s (lang=%s, v=%d)", uri, language_id, version);
 	store.open(uri, language_id, version, text);
 	workspace.index_file(uri, text);
 	diagnostics::publish_diagnostics(store, uri, workspace);
@@ -79,7 +80,7 @@ fn void handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Objec
 		}
 	}
 
-	io::eprintfn("[kls] Document changed: %s (v=%d)", uri, version);
+	log::debug("[kls] Document changed: %s (v=%d)", uri, version);
 	Document* doc = store.get(uri) ?? null;
 	if (doc != null) {
 		workspace.index_file(uri, doc.content);
@@ -97,7 +98,7 @@ fn void handle_did_close(DocumentStore* store, Object* params) {
 	Object* td = params.get("textDocument")!!;
 	String uri = td.get_string("uri")!!;
 
-	io::eprintfn("[kls] Document closed: %s", uri);
+	log::debug("[kls] Document closed: %s", uri);
 	store.close(uri);
 	// Publish empty diagnostics after closing (doc is gone, so content=""
 	// and no AST, producing an empty diagnostics array to clear client-side)
