@@ -1265,6 +1265,11 @@ fn void definition_explicit_import_prevents_wrong_workspace_match() @test {
 		ws.index_file("file:///wrong/WrongOppdrag.kt",
 			"package wrong.pkg\ndata class Oppdrag(val x: Int)");
 
+		// Add the correct Oppdrag to the dep index (no real JAR, so source nav will fail)
+		jar_index::add_dep_symbol(&ws.dep_index, "Oppdrag", "class Oppdrag",
+			"no.trygdeetaten.skjema.oppdrag", "Oppdrag", "/nonexistent.jar", jar_index::DepSymbolKind.DEP_CLASS,
+			null, 0);
+
 		// The file has an explicit import for a DIFFERENT package's Oppdrag
 		String content =
 `import no.trygdeetaten.skjema.oppdrag.Oppdrag
@@ -1276,13 +1281,22 @@ fun foo(o: Oppdrag) {}`;
 		Object* params = make_params("file:///test.kt", 2, 11);
 		Object* result = definition::handle_definition(&store, &ws, params);
 
-		// Should NOT resolve to the wrong package's Oppdrag
-		// Since the correct one is external (not in workspace), result should be null
-		// (or resolved via deps, which we don't have in this test)
-		if (result != null) {
-			String uri = result.get_string("uri") ?? "";
-			assert(uri != "file:///wrong/WrongOppdrag.kt",
-				"should not navigate to wrong-package Oppdrag, got %s", uri);
+		// Should NOT resolve to the wrong package's Oppdrag.
+		// Since the correct one is external and has no source JAR,
+		// it should fall back to the import statement itself (line 0).
+		assert(result != null, "expected fallback to import statement");
+		String uri = result.get_string("uri") ?? "";
+		assert(uri == "file:///test.kt",
+			"expected navigation to import statement in same file, got %s", uri);
+		assert(uri != "file:///wrong/WrongOppdrag.kt",
+			"should not navigate to wrong-package Oppdrag, got %s", uri);
+		Object* range = result.get("range") ?? null;
+		if (range != null) {
+			Object* start = range.get("start") ?? null;
+			if (start != null) {
+				int line = start.get_int("line") ?? -1;
+				assert(line == 0, "expected import line 0, got %d", line);
+			}
 		}
 	};
 }

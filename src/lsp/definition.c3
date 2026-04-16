@@ -100,7 +100,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// try the dependency index first, filtered by the import's package. This prevents
 	// navigating to a same-named class in a different workspace package.
 	if (workspace != null) {
-		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call)) {
+		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
 			return result;
 		}
 	}
@@ -890,7 +890,7 @@ faultdef NOT_FOUND_BY_IMPORT;
  * correct Oppdrag in that package, even if there's a same-named class
  * elsewhere in the workspace.
  */
-fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call) {
+fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call, String current_uri) {
 	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
 
 	ImportMap imports = workspace::build_import_map(pr);
@@ -923,6 +923,21 @@ fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex*
 	Object* result = source_nav::resolve_dep_definition(best);
 	if (result != null) return result;
 
+	// Source JAR not available — fall back to the import statement itself.
+	// This gives the user a useful navigation target (the FQN is visible
+	// in the import line) rather than "no locations found".
+	String full_import = imports.import_paths[0]; // need to find the right one
+	for (usz i = 0; i < imports.import_count; i++) {
+		if (imports.is_star[i]) continue;
+		if (imports.import_names[i] == target_name) {
+			full_import = imports.import_paths[i];
+			break;
+		}
+	}
+	if (try loc = find_import_statement_location(pr, full_import, current_uri)) {
+		return loc;
+	}
+
 	return NOT_FOUND_BY_IMPORT~;
 }
 
@@ -935,6 +950,22 @@ fn bool has_explicit_import_for(ImportMap* imports, String name) {
 		if (imports.import_names[i] == name) return true;
 	}
 	return false;
+}
+
+/**
+ * Find the IMPORT_DECL node in the AST matching a full import path
+ * and return an LSP Location pointing to it. Used as a fallback when
+ * source JAR navigation fails — the user can at least see the FQN.
+ */
+fn Object*? find_import_statement_location(ParseResult* pr, String full_import_path, String uri) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != IMPORT_DECL) continue;
+		if (n.extra_text != full_import_path) continue;
+
+		return build_location_from_node(uri, n);
+	}
+	return NOT_FOUND_BY_IMPORT~;
 }
 
 /**

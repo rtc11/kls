@@ -921,3 +921,65 @@ fun MyClass.greet(): String {
 		}
 	};
 }
+
+fn void star_imported_workspace_function_not_flagged() @test {
+	@pool() {
+		// Index a file that declares bytes() in package libs.kafka
+		// Mirrors the real Serde.kt structure: object Serde { ... } then top-level fun bytes()
+		WorkspaceIndex workspace;
+		workspace.init();
+		defer workspace.free();
+		workspace.index_file("file:///libs/kafka/Serde.kt",
+`package libs.kafka
+object Serde {
+    inline fun xml() = Unit
+    inline fun json() = Unit
+    fun string() = Unit
+}
+fun string() = Unit
+fun bytes() = Unit
+inline fun json() = Unit
+inline fun xml() = Unit`);
+
+		// Verify bytes is actually indexed
+		if (try indices = workspace.lookup_by_name("bytes")) {
+			assert(indices.len() > 0, "expected 'bytes' in workspace index");
+		} else {
+			assert(false, "bytes not found in workspace index at all");
+		}
+
+		// The file under test star-imports libs.kafka and calls bytes()
+		// Uses actual Kafka.kt structure with multiple imports and Topic calls
+		String content =
+`package abetal
+
+import libs.kafka.*
+import libs.kafka.processor.EnrichMetadataProcessor
+import libs.kafka.processor.Processor
+import libs.kafka.stream.MappedStream
+import libs.utils.appLog
+import libs.utils.intoUids
+import libs.utils.sha256
+import models.*
+
+const val FS_KEY = "fagsystem"
+
+object Topics {
+    val dp = Topic("teamdagpenger.utbetaling.v1", bytes())
+    val aap = Topic("aap.utbetaling.v1", bytes())
+    val ts = Topic("tilleggsstonader.utbetaling.v1", bytes())
+}`;
+		ParseResult* pr = mem::new(ParseResult);
+		defer { pr.free_errors(); mem::free(pr); }
+		parser::parse(content, pr);
+
+		Object* result = diagnostics::build_diagnostics_array(content, pr, &workspace);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'bytes'"),
+				"star-imported workspace function should not be flagged, got: %s", msg);
+		}
+	};
+}

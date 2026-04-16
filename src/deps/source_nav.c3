@@ -53,22 +53,112 @@ fn String get_cache_dir() {
 
 // ── Source JAR path derivation ─────────────────────────────────────
 
+fn String find_sources_in_sibling_dirs(String jar_path) {
+	// Find the jar filename
+	usz last_slash = 0;
+	bool found_slash = false;
+	for (usz i = jar_path.len; i > 0; i--) {
+		if (jar_path[i - 1] == '/') {
+			last_slash = i - 1;
+			found_slash = true;
+			break;
+		}
+	}
+	if (!found_slash || last_slash == 0) return "";
+
+	String jar_dir = jar_path[..last_slash - 1];
+
+	usz parent_slash = 0;
+	bool found_parent = false;
+	for (usz i = jar_dir.len; i > 0; i--) {
+		if (jar_dir[i - 1] == '/') {
+			parent_slash = i - 1;
+			found_parent = true;
+			break;
+		}
+	}
+	if (!found_parent || parent_slash == 0) return "";
+
+	String version_dir = jar_dir[..parent_slash - 1];
+
+	String jar_filename = jar_path[last_slash + 1..];
+	if (!jar_filename.ends_with(".jar")) return "";
+	String jar_base = jar_filename[..jar_filename.len - 5];
+
+	DString sources_name;
+	sources_name.tinit();
+	sources_name.appendf("%s-sources.jar", jar_base);
+	String expected_name = sources_name.str_view();
+
+	Path version_path;
+	if (try vp = path::temp(version_dir)) {
+		version_path = vp;
+	} else {
+		return "";
+	}
+
+	PathList entry_list;
+	if (try list = path::ls(tmem, version_path)) {
+		entry_list = list;
+	} else {
+		return "";
+	}
+
+	foreach (entry : entry_list) {
+		String ename = entry.basename();
+		if (ename.len == 0 || ename[0] == '.') continue;
+
+		Path full;
+		if (try f = version_path.tappend(ename)) {
+			full = f;
+		} else {
+			continue;
+		}
+
+		if (!path::is_dir(full)) continue;
+
+		Path candidate;
+		if (try c = full.tappend(expected_name)) {
+			candidate = c;
+		} else {
+			continue;
+		}
+
+		String cand_str = candidate.str_view();
+		if (file::is_file(cand_str)) {
+			return cand_str;
+		}
+	}
+
+	return "";
+}
+
 /**
  * Derive the source JAR path from a binary JAR path.
- * Replaces ".jar" with "-sources.jar".
+ * First tries simple replacement (.jar -> -sources.jar in same directory).
+ * Then handles Gradle cache layout where each artifact variant lives in a
+ * separate hash subdirectory under the version directory:
+ *   .../group/artifact/version/<hash1>/artifact-version.jar
+ *   .../group/artifact/version/<hash2>/artifact-version-sources.jar
  * Returns empty string if the source JAR doesn't exist on disk.
  */
 fn String derive_source_jar_path(String jar_path) {
 	if (!jar_path.ends_with(".jar")) return "";
 
+	// Strategy 1: simple replacement in same directory
 	DString ds;
 	ds.tinit();
 	String base = jar_path[..jar_path.len - 5]; // strip ".jar"
 	ds.appendf("%s-sources.jar", base);
 
 	String source_path = ds.str_view();
-	if (!file::is_file(source_path)) return "";
-	return source_path;
+	if (file::is_file(source_path)) return source_path;
+
+	// Strategy 2: search sibling hash directories (Gradle cache layout)
+	String sibling_result = find_sources_in_sibling_dirs(jar_path);
+	if (sibling_result.len > 0) return sibling_result;
+
+	return "";
 }
 
 /**
