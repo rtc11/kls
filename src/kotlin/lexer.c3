@@ -809,7 +809,7 @@ fn Token Lexer.make_token_at(Lexer* self, TokenKind kind, usz start, uint start_
 }
 
 fn bool is_ident_start(char c) @inline {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80;
 }
 
 fn bool is_ident_part(char c) @inline {

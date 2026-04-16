@@ -3943,3 +3943,55 @@ fn void parse_typealias_type_params() @test {
 		assert(tp.name == "V", "expected 'V', got '%s'", tp.name);
 	};
 }
+
+// ── Destructuring lambda parameters ────────────────────────────────
+
+fn void parse_lambda_destructuring_params() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    list.map { (a, b) -> a + b }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Find the LAMBDA_EXPR and check it has PARAM children named "a" and "b"
+		bool found_a = false;
+		bool found_b = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == LAMBDA_EXPR) {
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == PARAM) {
+						if (r.nodes[j].name == "a") found_a = true;
+						if (r.nodes[j].name == "b") found_b = true;
+					}
+				}
+			}
+		}
+		assert(found_a, "expected PARAM 'a' in lambda");
+		assert(found_b, "expected PARAM 'b' in lambda");
+	};
+}
+
+fn void parse_lambda_destructuring_with_underscore() @test {
+	@pool() {
+		String content =
+`fun foo() {
+    list.map { (_, dp) -> dp.name }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Should have PARAM 'dp' but NOT a PARAM '_'
+		bool found_dp = false;
+		bool found_underscore = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM) {
+				if (r.nodes[i].name == "dp") found_dp = true;
+				if (r.nodes[i].name == "_") found_underscore = true;
+			}
+		}
+		assert(found_dp, "expected PARAM 'dp' in lambda");
+		assert(!found_underscore, "underscore should not create a PARAM node");
+	};
+}

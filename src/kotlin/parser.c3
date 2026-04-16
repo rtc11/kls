@@ -2635,8 +2635,38 @@ fn void Parser.parse_lambda_params(Parser* self) {
 
 			self.node_end(param_idx);
 		} else if (self.at(LPAREN)) {
-			// Destructuring parameter: (a, b)
-			self.skip_balanced_parens();
+			// Destructuring parameter: (a, b) or (_, dp)
+			self.advance(); // consume '('
+			while (!self.at(RPAREN) && !self.at_eof()) {
+				if (self.at(COMMA)) {
+					self.advance();
+					continue;
+				}
+				if (self.at_identifier()) {
+					// Skip underscore placeholders -- no PARAM node needed
+					if (self.current.text == "_") {
+						self.advance();
+					} else {
+						uint param_idx = self.add_node(PARAM);
+						self.node_start(param_idx, self.current);
+						Token name = self.expect_identifier();
+						self.node_set_name(param_idx, name);
+						// Optional type annotation: (a: Int, b: String)
+						if (self.eat(COLON)) {
+							uint type_start = self.current.offset;
+							self.skip_type_ref();
+							uint type_end = self.previous.offset + self.previous.len;
+							if (type_end > type_start) {
+								self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+							}
+						}
+						self.node_end(param_idx);
+					}
+				} else {
+					self.advance(); // skip unexpected token
+				}
+			}
+			if (self.at(RPAREN)) self.advance(); // consume ')'
 		}
 
 		if (!self.eat(COMMA)) break;

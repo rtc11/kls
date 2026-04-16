@@ -1017,3 +1017,57 @@ fn void backtick_is_identifier_or_soft_keyword() @test {
 	Token tok = first("`fun`");
 	assert(tok.kind.is_identifier_or_soft_keyword(), "backtick identifier should pass is_identifier_or_soft_keyword");
 }
+
+// ── Unicode identifiers ─────────────────────────────────────────────
+
+fn void unicode_identifier_latin() @test {
+	Token tok = first("cònsola");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER for latin unicode identifier");
+	assert(tok.text == "cònsola", "expected full unicode text");
+}
+
+fn void unicode_identifier_standalone() @test {
+	Token tok = first("ñ");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER for single unicode char");
+}
+
+fn void unicode_identifier_mixed_with_ascii() @test {
+	Token[] toks = all_tokens("val café = 42");
+	assert(toks.len == 4, "expected 4 tokens");
+	assert(toks[0].kind == KW_VAL);
+	assert(toks[1].kind == IDENTIFIER);
+	assert(toks[1].text == "café");
+	assert(toks[2].kind == ASSIGNMENT);
+	assert(toks[3].kind == INTEGER_LITERAL);
+}
+
+fn void unicode_identifier_in_fun_decl() @test {
+	Token[] toks = all_tokens("fun beräkna()");
+	assert(toks[0].kind == KW_FUN);
+	assert(toks[1].kind == IDENTIFIER);
+	assert(toks[1].text == "beräkna");
+	assert(toks[2].kind == LPAREN);
+}
+
+fn void unicode_no_invalid_tokens() @test {
+	// The original bug: multi-byte chars produced INVALID tokens
+	Token[] toks = all_tokens("ò");
+	assert(toks.len == 1, "expected 1 token for 'ò'");
+	assert(toks[0].kind == IDENTIFIER, "expected IDENTIFIER, not INVALID");
+}
+
+fn void unicode_oslash_mid_identifier() @test {
+	// Exact pattern from the bug report: TILLEGGSSTØNADER contains Ø (U+00D8)
+	Token[] toks = all_tokens("Fagsystem.TILLEGGSSTØNADER");
+	assert(toks.len == 3, "expected 3 tokens (ident, dot, ident)");
+	assert(toks[0].kind == IDENTIFIER);
+	assert(toks[0].text == "Fagsystem");
+	assert(toks[1].kind == DOT);
+	assert(toks[2].kind == IDENTIFIER);
+	assert(toks[2].text == "TILLEGGSSTØNADER");
+}
+
+fn void unicode_oslash_standalone() @test {
+	Token tok = first("Ø");
+	assert(tok.kind == IDENTIFIER, "expected IDENTIFIER for Ø");
+}

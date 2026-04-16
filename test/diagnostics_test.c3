@@ -845,3 +845,20 @@ fun main() {
 		}
 	};
 }
+
+fn void destructuring_lambda_param_no_unresolved() @test {
+	@pool() {
+		Object* result = build_diagnostics_with_workspace(
+`fun foo() {
+    list.map { (_, dp) -> dp.name }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'dp'"),
+				"destructuring lambda param 'dp' should not be flagged, got: %s", msg);
+		}
+	};
+}
