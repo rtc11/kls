@@ -4,6 +4,8 @@ import std::collections;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
 import kls::kotlin::types;
+import kls::kotlin::incremental;
+import kls::kotlin::token_cache;
 
 struct Document {
 	String uri;
@@ -12,6 +14,8 @@ struct Document {
 	String content;
 	ParseResult* cached_ast;    // Lazily populated, heap-allocated
 	TypeInfo* cached_types;     // Lazily populated, heap-allocated (parallel to cached_ast)
+	ChunkMap* cached_chunks;    // Lazily populated, heap-allocated (parallel to cached_ast)
+	TokenCache* cached_tokens;  // Lazily populated, heap-allocated for optimized fallback
 }
 
 struct DocumentStore {
@@ -34,6 +38,12 @@ fn void DocumentStore.free(DocumentStore* self) {
 			if (doc.cached_types != null) {
 				mem::free(doc.cached_types);
 			}
+			if (doc.cached_chunks != null) {
+				mem::free(doc.cached_chunks);
+			}
+			if (doc.cached_tokens != null) {
+				mem::free(doc.cached_tokens);
+			}
 			mem::free(doc.uri.ptr);
 			mem::free(doc.language_id.ptr);
 			mem::free(doc.content.ptr);
@@ -52,6 +62,12 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 		if (old.cached_types != null) {
 			mem::free(old.cached_types);
 		}
+		if (old.cached_chunks != null) {
+			mem::free(old.cached_chunks);
+		}
+		if (old.cached_tokens != null) {
+			mem::free(old.cached_tokens);
+		}
 		mem::free(old.uri.ptr);
 		mem::free(old.language_id.ptr);
 		mem::free(old.content.ptr);
@@ -63,6 +79,8 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 		.content = content.copy(mem),
 		.cached_ast = null,
 		.cached_types = null,
+		.cached_chunks = null,
+		.cached_tokens = null,
 	};
 	// HashMap copies keys internally (COPY_KEYS), so pass uri directly
 	self.docs.set(uri, doc);
@@ -70,7 +88,7 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 
 fn void DocumentStore.update(DocumentStore* self, String uri, int version, String content) {
 	if (try doc = self.docs.get_ref(uri)) {
-		// Invalidate cached AST and types before replacing content
+		// Full content replacement -- invalidate all caches
 		if (doc.cached_ast != null) {
 			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);
@@ -79,6 +97,14 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 		if (doc.cached_types != null) {
 			mem::free(doc.cached_types);
 			doc.cached_types = null;
+		}
+		if (doc.cached_chunks != null) {
+			mem::free(doc.cached_chunks);
+			doc.cached_chunks = null;
+		}
+		if (doc.cached_tokens != null) {
+			mem::free(doc.cached_tokens);
+			doc.cached_tokens = null;
 		}
 		// Free old content before replacing
 		mem::free(doc.content.ptr);
@@ -90,51 +116,156 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 /**
  * Apply a single incremental change to a document.
  * The change replaces the byte range [start_offset, end_offset) with new_text.
- * Invalidates the cached AST.
+ * Attempts incremental re-parse if a chunk map is available; falls back to
+ * full invalidation otherwise.
  */
 fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 		uint start_offset, uint end_offset, String new_text) {
 	if (try doc = self.docs.get_ref(uri)) {
-		// Invalidate cached AST and types
-		if (doc.cached_ast != null) {
-			doc.cached_ast.free_errors();
-			mem::free(doc.cached_ast);
-			doc.cached_ast = null;
-		}
-		if (doc.cached_types != null) {
-			mem::free(doc.cached_types);
-			doc.cached_types = null;
-		}
-
-		String old = doc.content;
+		String old_content = doc.content;
 
 		// Clamp offsets to content bounds
-		uint s = start_offset > (uint)old.len ? (uint)old.len : start_offset;
-		uint e = end_offset > (uint)old.len ? (uint)old.len : end_offset;
+		uint s = start_offset > (uint)old_content.len ? (uint)old_content.len : start_offset;
+		uint e = end_offset > (uint)old_content.len ? (uint)old_content.len : end_offset;
 		if (e < s) e = s;
 
 		usz prefix_len = (usz)s;
-		usz suffix_len = old.len - (usz)e;
+		usz suffix_len = old_content.len - (usz)e;
 		usz new_len = prefix_len + new_text.len + suffix_len;
 
+		// Build the new content
 		char* buf = mem::alloc_array(char, new_len);
-		// Copy prefix
 		if (prefix_len > 0) {
-			mem::copy(buf, old.ptr, prefix_len);
+			mem::copy(buf, old_content.ptr, prefix_len);
 		}
-		// Copy replacement text
 		if (new_text.len > 0) {
 			mem::copy(&buf[prefix_len], new_text.ptr, new_text.len);
 		}
-		// Copy suffix
 		if (suffix_len > 0) {
-			mem::copy(&buf[prefix_len + new_text.len], &old.ptr[(usz)e], suffix_len);
+			mem::copy(&buf[prefix_len + new_text.len], &old_content.ptr[(usz)e], suffix_len);
 		}
 
-		mem::free(old.ptr);
+		String new_content = (String)buf[:new_len];
+
+		// Try incremental re-parse if we have a cached AST and chunk map
+		bool incremental_ok = false;
+		if (doc.cached_ast != null && doc.cached_chunks != null) {
+			incremental_ok = incremental::try_incremental_reparse(
+				doc.cached_ast, doc.cached_chunks,
+				old_content, new_content,
+				s, e, new_text.len);
+
+			if (incremental_ok) {
+				// Incremental parse succeeded -- invalidate types only
+				// (types depend on the AST which was updated in-place)
+				if (doc.cached_types != null) {
+					mem::free(doc.cached_types);
+					doc.cached_types = null;
+				}
+				// Update name/type_text/extra_text String slices that point into
+				// old source -- they now need to point into new source.
+				// Since String slices point into the source buffer and we replaced
+				// it, we need to rebase them. The parser stored slices into the
+				// source passed to parse_chunk (which was new_content), so the
+				// re-parsed chunk's strings already point to new_content.
+				// Strings in unchanged nodes still point to old_content which
+				// we're about to free. We must fix these up.
+				rebase_string_slices(doc.cached_ast, old_content, new_content, s, e, new_text.len);
+			}
+		}
+
+		if (!incremental_ok) {
+			// Full invalidation -- next get_ast() will re-parse
+			if (doc.cached_ast != null) {
+				doc.cached_ast.free_errors();
+				mem::free(doc.cached_ast);
+				doc.cached_ast = null;
+			}
+			if (doc.cached_types != null) {
+				mem::free(doc.cached_types);
+				doc.cached_types = null;
+			}
+			if (doc.cached_chunks != null) {
+				mem::free(doc.cached_chunks);
+				doc.cached_chunks = null;
+			}
+
+			// Optimized fallback: try to patch the token cache so the
+			// next full parse can benefit from cached lex results.
+			// If patching fails, the cache is rebuilt on next get_ast().
+			if (doc.cached_tokens != null) {
+				bool patch_ok = doc.cached_tokens.patch(new_content, s, e, new_text.len);
+				if (!patch_ok) {
+					mem::free(doc.cached_tokens);
+					doc.cached_tokens = null;
+				}
+			}
+		} else {
+			// Incremental succeeded -- also patch token cache if available
+			if (doc.cached_tokens != null) {
+				bool patch_ok = doc.cached_tokens.patch(new_content, s, e, new_text.len);
+				if (!patch_ok) {
+					mem::free(doc.cached_tokens);
+					doc.cached_tokens = null;
+				}
+			}
+		}
+
+		mem::free(old_content.ptr);
 		doc.version = version;
-		doc.content = (String)buf[:new_len];
+		doc.content = new_content;
 	}
+}
+
+/**
+ * Rebase String slices in AstNode fields (name, type_text, extra_text,
+ * annotation_text) from old_content to new_content after an incremental edit.
+ *
+ * Strings that pointed into the old source before the edit region just need
+ * their pointer updated (same offset in new buffer). Strings after the edit
+ * need offset adjustment by the byte delta.
+ */
+fn void rebase_string_slices(ParseResult* result, String old_content, String new_content,
+		uint edit_start, uint edit_end, usz new_text_len) {
+	int byte_delta = (int)new_text_len - (int)(edit_end - edit_start);
+
+	for (uint i = 0; i < result.node_count; i++) {
+		AstNode* n = &result.nodes[i];
+
+		// Rebase each string field that's a slice into old source
+		rebase_slice(&n.name, old_content, new_content, edit_start, byte_delta);
+		rebase_slice(&n.type_text, old_content, new_content, edit_start, byte_delta);
+		rebase_slice(&n.extra_text, old_content, new_content, edit_start, byte_delta);
+		rebase_slice(&n.annotation_text, old_content, new_content, edit_start, byte_delta);
+	}
+}
+
+/**
+ * Rebase a single String slice from old source to new source.
+ */
+fn void rebase_slice(String* s, String old_content, String new_content,
+		uint edit_start, int byte_delta) {
+	if (s.len == 0) return;
+
+	// Check if the string points into old_content
+	if (s.ptr >= old_content.ptr && s.ptr < old_content.ptr + old_content.len) {
+		usz offset_in_old = (usz)(s.ptr - old_content.ptr);
+
+		if (offset_in_old < (usz)edit_start) {
+			// Before the edit: same offset in new content
+			*s = new_content[offset_in_old : s.len];
+		} else if (offset_in_old >= (usz)edit_start) {
+			// After (or in) the edit region: adjust by byte_delta
+			usz new_offset = (usz)((int)offset_in_old + byte_delta);
+			if (new_offset + s.len <= new_content.len) {
+				*s = new_content[new_offset : s.len];
+			} else {
+				// String extends past end -- clear it
+				*s = "";
+			}
+		}
+	}
+	// If it points into new_content already (re-parsed chunk), leave it alone
 }
 
 // ── Position / offset utilities ───────────────────────────────────
@@ -172,7 +303,7 @@ fn long position_to_byte_offset(String content, uint line, uint character) {
 }
 
 fn void DocumentStore.close(DocumentStore* self, String uri) {
-	// Free document strings and cached AST/types before HashMap.remove() frees the entry
+	// Free document strings and cached AST/types/chunks before HashMap.remove() frees the entry
 	if (try doc = self.docs.get_ref(uri)) {
 		if (doc.cached_ast != null) {
 			doc.cached_ast.free_errors();
@@ -180,6 +311,12 @@ fn void DocumentStore.close(DocumentStore* self, String uri) {
 		}
 		if (doc.cached_types != null) {
 			mem::free(doc.cached_types);
+		}
+		if (doc.cached_chunks != null) {
+			mem::free(doc.cached_chunks);
+		}
+		if (doc.cached_tokens != null) {
+			mem::free(doc.cached_tokens);
 		}
 		mem::free(doc.uri.ptr);
 		mem::free(doc.language_id.ptr);
@@ -204,6 +341,18 @@ fn ParseResult*? DocumentStore.get_ast(DocumentStore* self, String uri) {
 	if (doc.cached_ast == null) {
 		doc.cached_ast = mem::new(ParseResult);
 		parser::parse(doc.content, doc.cached_ast);
+
+		// Build chunk map for incremental parsing
+		if (doc.cached_chunks == null) {
+			doc.cached_chunks = mem::new(ChunkMap);
+		}
+		incremental::build_chunk_map(doc.cached_ast, doc.cached_chunks, doc.content);
+
+		// Build token cache for optimized fallback
+		if (doc.cached_tokens == null) {
+			doc.cached_tokens = mem::new(TokenCache);
+		}
+		token_cache::build_cache(doc.cached_tokens, doc.content);
 	}
 
 	return doc.cached_ast;

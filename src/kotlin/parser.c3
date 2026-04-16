@@ -37,6 +37,54 @@ fn void parse(String source, ParseResult* result) {
 	p.parse_file();
 }
 
+/**
+ * Parse a chunk of source for incremental re-parsing.
+ * Parses declarations in source[byte_start..byte_end) into the result.
+ * The lexer starts at byte_start with the given line number.
+ * Nodes are written starting at result.node_count = 0.
+ *
+ * This is used by incremental parsing to re-parse a single top-level
+ * declaration or class member without re-parsing the entire file.
+ */
+fn void parse_chunk(String source, ParseResult* result,
+		uint byte_start, uint byte_end, uint line_start) {
+	result.node_count = 0;
+	result.error_count = 0;
+
+	// Compute column: scan backwards from byte_start to find start of line
+	uint col = 0;
+	if (byte_start > 0) {
+		uint scan = byte_start;
+		while (scan > 0 && source[scan - 1] != '\n') {
+			scan--;
+			col++;
+		}
+	}
+
+	Parser p = {
+		.source = source,
+		.lexer = lexer::init_at(source, (usz)byte_start, line_start, col),
+		.result = result,
+	};
+
+	// Prime the parser with the first token
+	p.current = p.lexer.next();
+
+	// Parse declarations until we pass byte_end or hit EOF
+	while (!p.at_eof() && p.current.offset < byte_end) {
+		uint mods = p.parse_modifiers();
+		if (p.at_eof() || p.current.offset >= byte_end) break;
+
+		if (!p.parse_declaration(mods)) {
+			// Could not parse a declaration -- skip token and try again
+			if (!p.at_eof() && p.current.offset < byte_end) {
+				p.add_error("Unexpected token in chunk");
+				p.advance();
+			}
+		}
+	}
+}
+
 // ── Core helpers ───────────────────────────────────────────────────
 
 fn void Parser.advance(Parser* self) {

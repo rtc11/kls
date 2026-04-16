@@ -29,6 +29,25 @@ fn Lexer init(String source) {
 	};
 }
 
+/**
+ * Initialize a lexer starting at a given byte offset with known line/col.
+ * Used by incremental parsing to lex a chunk of source without starting
+ * from the beginning of the file. The source string is the FULL file source,
+ * but lexing begins at `start_pos`.
+ *
+ * SAFETY: The caller must ensure that `start_pos` is NOT inside a string
+ * template expression. Top-level and class-member declaration boundaries
+ * are always safe starting points.
+ */
+fn Lexer init_at(String source, usz start_pos, uint start_line, uint start_col) {
+	return {
+		.source = source,
+		.pos = start_pos,
+		.line = start_line,
+		.col = start_col,
+	};
+}
+
 fn Token Lexer.next(Lexer* self) {
 	// If we're inside a string template expression (${ ... }),
 	// lex normally but track brace nesting.

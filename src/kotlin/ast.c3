@@ -289,6 +289,98 @@ fn bool AstNode.has_annotation(AstNode* self, String name) {
 	return false;
 }
 
+// ── Incremental parsing: node array manipulation ───────────────────
+
+/**
+ * Check if a NodeKind is a class-like declaration that can contain members.
+ */
+fn bool is_class_like(NodeKind kind) {
+	switch (kind) {
+		case CLASS_DECL:
+		case INTERFACE_DECL:
+		case OBJECT_DECL:
+		case COMPANION_OBJECT_DECL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Shift all parent indices and children_start fields in [from_idx..node_count)
+ * by `delta` (which may be negative, cast to int). Used when nodes are
+ * inserted or removed from the middle of the flat array.
+ *
+ * Also updates parent references that point at or beyond from_idx.
+ */
+fn void ParseResult.shift_indices(ParseResult* self, uint from_idx, int delta) {
+	for (uint i = 0; i < self.node_count; i++) {
+		// Shift parent references that point at or beyond from_idx
+		if (self.nodes[i].parent != NO_PARENT && self.nodes[i].parent >= from_idx) {
+			int new_parent = (int)self.nodes[i].parent + delta;
+			self.nodes[i].parent = new_parent >= 0 ? (uint)new_parent : NO_PARENT;
+		}
+		// Shift children_start that points at or beyond from_idx
+		if (self.nodes[i].children_start >= from_idx && self.nodes[i].child_count > 0) {
+			int new_start = (int)self.nodes[i].children_start + delta;
+			self.nodes[i].children_start = new_start >= 0 ? (uint)new_start : 0;
+		}
+	}
+}
+
+/**
+ * Shift byte offsets, line numbers, and column numbers for all nodes
+ * in [from_idx..to_idx) by the given deltas. Used after an incremental
+ * edit to adjust nodes that come after the edited region.
+ *
+ * For nodes whose start_line == edit_line (same line as edit end),
+ * the column is also adjusted by col_delta.
+ */
+fn void ParseResult.shift_offsets(ParseResult* self, uint from_idx, uint to_idx,
+		int byte_delta, int line_delta, int col_delta, uint edit_end_line) {
+	if (to_idx > self.node_count) to_idx = self.node_count;
+	for (uint i = from_idx; i < to_idx; i++) {
+		AstNode* n = &self.nodes[i];
+		// Shift start position
+		n.start_offset = (uint)((int)n.start_offset + byte_delta);
+		n.start_line = (uint)((int)n.start_line + line_delta);
+		if (line_delta == 0 && n.start_line == edit_end_line) {
+			n.start_col = (uint)((int)n.start_col + col_delta);
+		}
+		// Shift end position
+		n.end_offset = (uint)((int)n.end_offset + byte_delta);
+		n.end_line = (uint)((int)n.end_line + line_delta);
+		if (line_delta == 0 && n.end_line == edit_end_line) {
+			n.end_col = (uint)((int)n.end_col + col_delta);
+		}
+		// Shift name position
+		if (n.name.len > 0) {
+			n.name_offset = (uint)((int)n.name_offset + byte_delta);
+			n.name_line = (uint)((int)n.name_line + line_delta);
+			if (line_delta == 0 && n.name_line == edit_end_line) {
+				n.name_col = (uint)((int)n.name_col + col_delta);
+			}
+		}
+	}
+}
+
+/**
+ * Move a block of nodes within the flat array. Copies nodes[src..src+count)
+ * to nodes[dst..dst+count). Handles overlapping regions correctly.
+ */
+fn void ParseResult.move_nodes(ParseResult* self, uint dst, uint src, uint count) {
+	if (count == 0 || dst == src) return;
+	if (dst < src) {
+		for (uint i = 0; i < count; i++) {
+			self.nodes[dst + i] = self.nodes[src + i];
+		}
+	} else {
+		for (uint i = count; i > 0; i--) {
+			self.nodes[dst + i - 1] = self.nodes[src + i - 1];
+		}
+	}
+}
+
 /**
  * Free heap-allocated error messages inside a ParseResult.
  * Must be called before freeing the ParseResult itself.
