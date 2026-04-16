@@ -862,3 +862,33 @@ fn void destructuring_lambda_param_no_unresolved() @test {
 		}
 	};
 }
+
+fn void same_package_symbol_no_unresolved() @test {
+	@pool() {
+		// Index a file that declares AggregateService in package abetal
+		WorkspaceIndex workspace;
+		workspace.init();
+		defer workspace.free();
+		workspace.index_file("file:///test/AggregateService.kt",
+			"package abetal\nobject AggregateService {\n    fun utledSimulering() {}\n}");
+
+		// The file under test is also in package abetal and references AggregateService
+		String content =
+`package abetal
+fun foo() {
+    AggregateService.utledSimulering()
+}`;
+		ParseResult* pr = mem::new(ParseResult);
+		defer { pr.free_errors(); mem::free(pr); }
+		parser::parse(content, pr);
+
+		Object* result = diagnostics::build_diagnostics_array(content, pr, &workspace);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'AggregateService'"),
+				"same-package symbol should not be flagged, got: %s", msg);
+		}
+	};
+}

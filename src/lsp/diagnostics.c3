@@ -397,6 +397,20 @@ fn bool is_auto_imported(String name) {
 }
 
 /**
+ * Get the package name declared in the file's AST (from PACKAGE_DECL).
+ * Returns "" if no package declaration is found.
+ */
+fn String get_file_package(ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind == PACKAGE_DECL && n.parent == 0) {
+			return n.extra_text;
+		}
+	}
+	return "";
+}
+
+/**
  * Check if any wildcard import in the file covers a given package name.
  * E.g., if the file has `import java.util.*`, then package "java.util" is covered.
  */
@@ -914,14 +928,22 @@ fn void add_unresolved_reference_diagnostics(Object* diagnostics, String content
 				resolved = true;
 			}
 
-			// 3. Check if there's a wildcard import covering a package that has this symbol
+			// 3. Check if there's a wildcard import covering a package that has this symbol,
+			//    or if the symbol is in the same package as this file.
 			if (!resolved) {
 				String[16] import_paths;
 				String[16] packages;
 				usz candidate_count = find_import_candidates(name, workspace, &import_paths, &packages);
 				if (candidate_count > 0) {
-					// Check if any candidate's package is covered by a wildcard import
+					// Get this file's package name
+					String file_package = get_file_package(ast);
+
 					for (usz c = 0; c < candidate_count; c++) {
+						// Same-package symbols are always in scope
+						if (file_package.len > 0 && packages[c] == file_package) {
+							resolved = true;
+							break;
+						}
 						if (is_covered_by_wildcard_import(ast, packages[c])) {
 							resolved = true;
 							break;
