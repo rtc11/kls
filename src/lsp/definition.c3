@@ -14,6 +14,7 @@ import kls::kotlin::symbols;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::source_nav;
+import kls::log;
 
 /**
  * Handle textDocument/definition request.
@@ -51,6 +52,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	}
 
 	String target_name = tok.text;
+	log::debug("[def] target='%s' line=%d col=%d uri=%s", target_name, line, character, uri);
 
 	// Get cached AST (parses lazily if needed)
 	ParseResult* pr = store.get_ast(uri) ?? null;
@@ -75,6 +77,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	// Find definition using scope-aware AST search
 	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
+		log::debug("[def] found via AST scope search");
 		return build_location_from_node(uri, node);
 	}
 
@@ -82,6 +85,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// If the cursor is inside an extension function (fun Receiver.name()),
 	// bare identifiers may refer to implicit `this` members of the receiver.
 	if (try result = find_extension_receiver_member_definition(pr, workspace, target_name, tok.offset, uri)) {
+		log::debug("[def] found via extension receiver member");
 		return result;
 	}
 
@@ -91,6 +95,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	TypeInfo* ti = store.get_types(uri) ?? null;
 	if (ti != null) {
 		if (try result = find_dot_member_definition(pr, ti, store, workspace, tok, uri)) {
+			log::debug("[def] found via dot-member navigation");
 			return result;
 		}
 	}
@@ -101,6 +106,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// navigating to a same-named class in a different workspace package.
 	if (workspace != null) {
 		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
+			log::debug("[def] found via explicit import dep lookup");
 			return result;
 		}
 	}
@@ -108,6 +114,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// ── Cross-file fallback via workspace index ──────────────────
 	if (workspace != null) {
 		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri, pr)) {
+			log::debug("[def] found via workspace index");
 			return result;
 		}
 	}
@@ -116,10 +123,12 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	if (workspace != null) {
 		Object* dep_result = source_nav::find_definition_in_deps(&workspace.dep_index, target_name, is_call);
 		if (dep_result != null) {
+			log::debug("[def] found via dep JAR fallback");
 			return dep_result;
 		}
 	}
 
+	log::debug("[def] no definition found for '%s'", target_name);
 	return null;
 }
 
@@ -977,8 +986,19 @@ fn Object*? find_import_statement_location(ParseResult* pr, String full_import_p
 fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String target_name, bool is_call, String current_uri, ParseResult* pr) {
 	List{usz}* indices = workspace.lookup_by_name(target_name)!;
 
+	log::debug("[def:ws] lookup '%s': %d candidates", target_name, (int)indices.len());
+
 	// Build import map for import-aware filtering
 	ImportMap imports = workspace::build_import_map(pr);
+
+	log::debug("[def:ws] file package='%s', %d imports", imports.package_name, (int)imports.import_count);
+	for (usz di = 0; di < imports.import_count; di++) {
+		if (imports.is_star[di]) {
+			log::debug("[def:ws]   import %s (star, pkg='%s')", imports.import_paths[di], imports.star_packages[di]);
+		} else {
+			log::debug("[def:ws]   import %s (name='%s')", imports.import_paths[di], imports.import_names[di]);
+		}
+	}
 
 	WorkspaceSymbol* first_match = null;
 	WorkspaceSymbol* func_match = null;
@@ -995,7 +1015,16 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		if (sym.uri == current_uri) continue;
 
 		// Skip symbols not reachable via module dependency graph
-		if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
+		String from_mod = workspace.get_file_module(current_uri);
+		String sym_mod = workspace.get_file_module(sym.uri);
+		if (!workspace.is_module_visible(sym.uri, current_uri)) {
+			log::debug("[def:ws]   SKIP module-invisible: %s (pkg=%s, uri=%s) from_mod='%s' sym_mod='%s' mod_count=%d",
+				sym.name, sym.package_name, sym.uri, from_mod, sym_mod, (int)workspace.classpath.module_count);
+			continue;
+		}
+
+		log::debug("[def:ws]   candidate: %s (pkg=%s, uri=%s)",
+			sym.name, sym.package_name, sym.uri);
 
 		if (first_match == null) {
 			first_match = sym;
@@ -1007,6 +1036,7 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		// Check import visibility
 		String visible_name = workspace::is_symbol_visible(sym, &imports, target_name);
 		if (visible_name.len > 0) {
+			log::debug("[def:ws]   import-visible as '%s'", visible_name);
 			if (imported_match == null) {
 				imported_match = sym;
 			}
@@ -1020,6 +1050,8 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 			if (imported_file_func_match == null && sym.kind == FUNCTION && uri_filename_matches(sym.uri, target_name)) {
 				imported_file_func_match = sym;
 			}
+		} else {
+			log::debug("[def:ws]   NOT import-visible");
 		}
 	}
 
@@ -1028,6 +1060,11 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 	// matched that import's package, don't fall back to first_match -- the symbol
 	// is likely from an external dependency (JAR) and the first_match would be wrong.
 	bool has_explicit = has_explicit_import_for(&imports, target_name);
+
+	log::debug("[def:ws] has_explicit=%d first=%s imported=%s",
+		(int)has_explicit ? 1 : 0,
+		first_match != null ? first_match.uri : "(null)",
+		imported_match != null ? imported_match.uri : "(null)");
 
 	WorkspaceSymbol* chosen = null;
 	if (is_call) {

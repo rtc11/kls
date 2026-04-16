@@ -166,7 +166,7 @@ fn void free_member_decl(MemberDecl* m) {
  * @param count   The number of symbols scanned.
  */
 fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, String content,
-		Symbol* syms, usz count) {
+		Symbol* syms, usz count, usz start) {
 	// Check if any class-like symbols exist in this file
 	bool has_classes = false;
 	for (usz i = 0; i < count; i++) {
@@ -189,7 +189,7 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 		if (syms[s].kind != SymbolKind.CLASS && syms[s].kind != SymbolKind.INTERFACE &&
 			syms[s].kind != SymbolKind.OBJECT) continue;
 
-		String class_name = syms[s].name;
+		String class_name = self.symbols[start + s].name;
 
 		// Find the class node in the AST
 		for (uint i = 0; i < pr.node_count; i++) {
@@ -381,7 +381,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			List{usz} new_list;
 			new_list.init(mem);
 			new_list.push(sym_idx);
-			self.name_index.set(buf[i].name, new_list);
+			self.name_index.set(ws.name, new_list);
 		}
 
 		// Update super_index: map each supertype name -> this symbol
@@ -394,7 +394,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 				List{usz} new_list;
 				new_list.init(mem);
 				new_list.push(sym_idx);
-				self.super_index.set(st_name, new_list);
+				self.super_index.set(ws.supertypes[j], new_list);
 			}
 		}
 	}
@@ -407,10 +407,10 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 		.symbol_start = start,
 		.symbol_count = count,
 	};
-	self.files.set(uri, wf);
+	self.files.set(wf.uri, wf);
 
 	// Populate member cache for class-like declarations
-	self.cache_class_members(uri, content, &buf, count);
+	self.cache_class_members(uri, content, &buf, count, start);
 }
 
 /**
@@ -597,9 +597,12 @@ fn void WorkspaceIndex.scan_workspace(WorkspaceIndex* self) {
 			GradleModule* m = &self.classpath.modules[i];
 			for (usz j = 0; j < m.src_root_count; j++) {
 				if (m.src_roots[j].len == 0) continue;
-				Path src = path::temp(m.src_roots[j])!!;
-				if (path::is_dir(src)) {
-					scan_directory_recursive(self, src, &file_count);
+				if (try src = path::temp(m.src_roots[j])) {
+					if (path::is_dir(src)) {
+						scan_directory_recursive(self, src, &file_count);
+					}
+				} else {
+					log::warn("[kls] Invalid source root path: '%s'", m.src_roots[j]);
 				}
 			}
 		}
@@ -966,7 +969,15 @@ fn bool WorkspaceIndex.is_module_visible(WorkspaceIndex* self, String sym_uri, S
 	String sym_module = self.get_file_module(sym_uri);
 
 	// If either has no module, be permissive (backward compat / files outside modules)
-	if (from_module.len == 0 || sym_module.len == 0) return true;
+	if (from_module.len == 0 || sym_module.len == 0) {
+		log::debug("[def:vis] permissive: from='%s'(mod='%s') sym='%s'(mod='%s')",
+			from_uri, from_module, sym_uri, sym_module);
+		return true;
+	}
 
-	return self.classpath.module_depends_on(from_module, sym_module);
+	bool result = self.classpath.module_depends_on(from_module, sym_module);
+	if (!result) {
+		log::debug("[def:vis] REJECTED: from_mod='%s' sym_mod='%s'", from_module, sym_module);
+	}
+	return result;
 }

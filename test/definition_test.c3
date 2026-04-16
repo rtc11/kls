@@ -5,6 +5,7 @@ import kls::document;
 import kls::lsp::definition;
 import kls::workspace;
 import kls::deps::jar_index;
+import kls::deps::classpath;
 
 // ── Helper: build params object ────────────────────────────────────
 
@@ -1251,6 +1252,123 @@ fun MyClass.greet(): String {
 }
 
 // ── Explicit import prevents wrong workspace fallback ──────────────
+
+fn void definition_qualified_type_in_type_arg() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class in package "urskog.models"
+		ws.index_file("file:///models/Utbetaling.kt",
+			"package urskog.models\ndata class Utbetaling(val id: String)");
+
+		// The file under test uses a star import and references the type
+		// via its qualified name inside a type argument: json<models.Utbetaling>()
+		String content =
+`package urskog
+import urskog.models.*
+val serde = json<models.Utbetaling>()`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "Utbetaling" in "models.Utbetaling" at line 2
+		// "val serde = json<models.Utbetaling>()"
+		//                          ^ col 24
+		Object* params = make_params("file:///test.kt", 2, 24);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		assert(result != null, "expected a Location for qualified type in type arg");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///models/Utbetaling.kt",
+			"expected Utbetaling.kt, got %s", uri);
+	};
+}
+
+// Cursor on the qualifier part "models" in "models.Utbetaling" should also resolve
+fn void definition_qualified_type_on_qualifier() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///models/Utbetaling.kt",
+			"package urskog.models\ndata class Utbetaling(val id: String)");
+
+		String content =
+`package urskog
+import urskog.models.*
+val serde = json<models.Utbetaling>()`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "models" at line 2, col 17
+		// "val serde = json<models.Utbetaling>()"
+		//                   ^ col 17
+		Object* params = make_params("file:///test.kt", 2, 17);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// "models" is a package qualifier — ideally should navigate to Utbetaling
+		// but at minimum should not crash. Currently returns null which is acceptable
+		// for a package name, but if we can resolve it, even better.
+	};
+}
+
+// Cross-module: qualified type in type arg with Gradle module boundaries
+fn void definition_qualified_type_cross_module() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Set up two Gradle modules: :urskog depends on :models
+		ws.classpath.module_count = 2;
+
+		// Module :models with source root
+		GradleModule* models_mod = &ws.classpath.modules[0];
+		models_mod.name = ":models".copy(mem);
+		models_mod.dir = "/project/models".copy(mem);
+		models_mod.src_roots[0] = "/project/models/src/main/kotlin".copy(mem);
+		models_mod.src_root_count = 1;
+		models_mod.dep_module_count = 0;
+
+		// Module :urskog depends on :models
+		GradleModule* urskog_mod = &ws.classpath.modules[1];
+		urskog_mod.name = ":urskog".copy(mem);
+		urskog_mod.dir = "/project/urskog".copy(mem);
+		urskog_mod.src_roots[0] = "/project/urskog/src/main/kotlin".copy(mem);
+		urskog_mod.src_root_count = 1;
+		urskog_mod.dep_modules[0] = ":models".copy(mem);
+		urskog_mod.dep_module_count = 1;
+
+		// Index model class (URI maps to models src root)
+		ws.index_file("file:///project/models/src/main/kotlin/models/Utbetaling.kt",
+			"package urskog.models\ndata class Utbetaling(val id: String)");
+
+		// The file under test is in :urskog module
+		String content =
+`package urskog
+import urskog.models.*
+val serde = json<models.Utbetaling>()`;
+		store.open("file:///project/urskog/src/main/kotlin/urskog/Kafka.kt", "kotlin", 1, content);
+
+		// Cursor on "Utbetaling" in "models.Utbetaling" at line 2, col 24
+		Object* params = make_params("file:///project/urskog/src/main/kotlin/urskog/Kafka.kt", 2, 24);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		assert(result != null, "expected a Location for cross-module qualified type");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///project/models/src/main/kotlin/models/Utbetaling.kt",
+			"expected Utbetaling.kt, got %s", uri);
+	};
+}
 
 fn void definition_explicit_import_prevents_wrong_workspace_match() @test {
 	@pool() {

@@ -102,6 +102,7 @@ fn GradleModule* Classpath.find_module(Classpath* self, String name) {
  * module source roots. Returns null if no module matches.
  */
 fn GradleModule* Classpath.find_module_for_path(Classpath* self, String file_path) {
+	// First pass: match against explicit source roots
 	for (usz i = 0; i < self.module_count; i++) {
 		GradleModule* m = &self.modules[i];
 		for (usz j = 0; j < m.src_root_count; j++) {
@@ -110,7 +111,23 @@ fn GradleModule* Classpath.find_module_for_path(Classpath* self, String file_pat
 			}
 		}
 	}
-	return null;
+	// Fallback: match against module directory (for modules with no source roots)
+	// Use longest-match to prefer deeper modules (e.g. :apps:abetal over :apps)
+	GradleModule* best = null;
+	usz best_len = 0;
+	for (usz i = 0; i < self.module_count; i++) {
+		GradleModule* m = &self.modules[i];
+		if (m.dir.len > 0 && file_path.starts_with(m.dir) && m.dir.len > best_len) {
+			log::debug("[mod] dir-match: file='%s' mod='%s' dir='%s' (len=%d > best=%d)",
+				file_path, m.name, m.dir, (int)m.dir.len, (int)best_len);
+			best = m;
+			best_len = m.dir.len;
+		}
+	}
+	if (best != null) {
+		log::debug("[mod] dir-fallback result: '%s' for file '%s'", best.name, file_path);
+	}
+	return best;
 }
 
 /**
@@ -522,7 +539,8 @@ fn String write_gradle_init_script() {
             } catch (Exception e) {}
         }
         if (srcDirs.isEmpty()) {
-            ["src/main/kotlin", "src/main/java", "src/test/kotlin", "src/test/java"].each {
+            ["src/main/kotlin", "src/main/java", "src/test/kotlin", "src/test/java",
+             "main", "test"].each {
                 def d = new File(project.projectDir, it)
                 if (d.exists()) srcDirs << d.absolutePath
             }
@@ -555,9 +573,9 @@ fn String write_gradle_init_script() {
         task klsClasspath {
             doLast {
                 println "KLS_MODULE:" + modulePath + "|" + moduleDir
-                srcDirs.each { println "KLS_SRC:" + it }
-                projectDeps.unique().each { println "KLS_DEP:" + it }
-                jarFiles.each { println "KLS_JAR:" + it }
+                srcDirs.each { println "KLS_SRC:" + modulePath + "|" + it }
+                projectDeps.unique().each { println "KLS_DEP:" + modulePath + "|" + it }
+                jarFiles.each { println "KLS_JAR:" + modulePath + "|" + it }
             }
         }
     }
@@ -574,21 +592,49 @@ fn String write_gradle_init_script() {
 
 /**
  * Parse Gradle output for KLS_MODULE:, KLS_SRC:, KLS_DEP:, and KLS_JAR: lines.
- *
- * Output format per subproject:
+ * Format:
  *   KLS_MODULE:<gradle-path>|<absolute-dir>
- *   KLS_SRC:<absolute-source-root>
- *   KLS_DEP:<gradle-path-of-dependency>
- *   KLS_JAR:<absolute-jar-path>
+ *   KLS_SRC:<gradle-path>|<absolute-source-root>
+ *   KLS_DEP:<gradle-path>|<dependency-module-path>
+ *   KLS_JAR:<gradle-path>|<absolute-jar-path>
  *
  * Lines for a module appear consecutively: MODULE first, then SRC/DEP/JAR lines
  * until the next MODULE line or end of output.
+ *
+ * NOTE: Each SRC/DEP/JAR line includes the module path prefix to handle
+ * interleaved output from parallel Gradle task execution.
  */
+
+/**
+ * Find or create a GradleModule by name. If mod_dir is non-empty and the module
+ * is newly created, sets the dir. Returns null if the module table is full.
+ */
+fn GradleModule* ensure_module(Classpath* cp, String mod_name, String mod_dir) {
+	// Look for existing
+	for (usz i = 0; i < cp.module_count; i++) {
+		if (cp.modules[i].name == mod_name) {
+			// Update dir if provided and not yet set
+			if (mod_dir.len > 0 && cp.modules[i].dir.len == 0) {
+				cp.modules[i].dir = mod_dir.copy(mem);
+			}
+			return &cp.modules[i];
+		}
+	}
+	// Create new
+	if (cp.module_count >= MAX_MODULES) return null;
+	GradleModule* m = &cp.modules[cp.module_count];
+	m.name = mod_name.copy(mem);
+	m.dir = mod_dir.len > 0 ? mod_dir.copy(mem) : "";
+	m.src_root_count = 0;
+	m.dep_module_count = 0;
+	m.jar_start = cp.jar_count;
+	m.jar_count = 0;
+	cp.module_count++;
+	return m;
+}
+
 fn void parse_gradle_output(Classpath* cp, String output) {
 	if (output.len == 0) return;
-
-	// Index of the current module being populated (-1 = none yet)
-	sz cur_mod = -1;
 
 	usz pos = 0;
 	while (pos < output.len) {
@@ -610,40 +656,52 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 			if (try pipe = find_substring(rest, "|")) {
 				String mod_name = rest[:pipe];
 				String mod_dir = rest[pipe + 1..];
-				if (cp.module_count < MAX_MODULES && mod_name.len > 0) {
-					cur_mod = (sz)cp.module_count;
-					GradleModule* m = &cp.modules[cp.module_count];
-					m.name = mod_name.copy(mem);
-					m.dir = mod_dir.copy(mem);
-					m.src_root_count = 0;
-					m.dep_module_count = 0;
-					m.jar_start = cp.jar_count;
-					m.jar_count = 0;
-					cp.module_count++;
+				if (mod_name.len > 0) {
+					ensure_module(cp, mod_name, mod_dir);
 				}
 			}
-		} else if (line.starts_with("KLS_SRC:") && cur_mod >= 0) {
-			String src_path = line["KLS_SRC:".len..];
-			GradleModule* m = &cp.modules[(usz)cur_mod];
-			if (src_path.len > 0 && m.src_root_count < MAX_MODULE_SRC_ROOTS) {
-				m.src_roots[m.src_root_count] = src_path.copy(mem);
-				m.src_root_count++;
+		} else if (line.starts_with("KLS_SRC:")) {
+			// Format: KLS_SRC:<module-path>|<src-dir>
+			String rest = line["KLS_SRC:".len..];
+			if (try pipe = find_substring(rest, "|")) {
+				String mod_name = rest[:pipe];
+				String src_path = rest[pipe + 1..];
+				GradleModule* m = ensure_module(cp, mod_name, "");
+				if (m != null && src_path.len > 0 && m.src_root_count < MAX_MODULE_SRC_ROOTS) {
+					m.src_roots[m.src_root_count] = src_path.copy(mem);
+					m.src_root_count++;
+				}
 			}
-		} else if (line.starts_with("KLS_DEP:") && cur_mod >= 0) {
-			String dep_name = line["KLS_DEP:".len..];
-			GradleModule* m = &cp.modules[(usz)cur_mod];
-			if (dep_name.len > 0 && m.dep_module_count < MAX_MODULE_DEPS) {
-				m.dep_modules[m.dep_module_count] = dep_name.copy(mem);
-				m.dep_module_count++;
+		} else if (line.starts_with("KLS_DEP:")) {
+			// Format: KLS_DEP:<module-path>|<dep-name>
+			String rest = line["KLS_DEP:".len..];
+			if (try pipe = find_substring(rest, "|")) {
+				String mod_name = rest[:pipe];
+				String dep_name = rest[pipe + 1..];
+				GradleModule* m = ensure_module(cp, mod_name, "");
+				if (m != null && dep_name.len > 0 && m.dep_module_count < MAX_MODULE_DEPS) {
+					m.dep_modules[m.dep_module_count] = dep_name.copy(mem);
+					m.dep_module_count++;
+				}
 			}
 		} else if (line.starts_with("KLS_JAR:")) {
-			String jar_path = line["KLS_JAR:".len..];
-			if (jar_path.len > 0 && cp.jar_count < 256) {
-				if (add_jar(cp, jar_path)) {
-					// Track this JAR as belonging to the current module
-					if (cur_mod >= 0) {
-						cp.modules[(usz)cur_mod].jar_count++;
+			// Format: KLS_JAR:<module-path>|<jar-path> or KLS_JAR:<jar-path> (legacy/orphan)
+			String rest = line["KLS_JAR:".len..];
+			if (try pipe = find_substring(rest, "|")) {
+				String mod_name = rest[:pipe];
+				String jar_path = rest[pipe + 1..];
+				if (jar_path.len > 0 && cp.jar_count < 256) {
+					GradleModule* m = ensure_module(cp, mod_name, "");
+					if (add_jar(cp, jar_path)) {
+						if (m != null) {
+							m.jar_count++;
+						}
 					}
+				}
+			} else {
+				// No pipe — legacy format, jar without module
+				if (rest.len > 0 && cp.jar_count < 256) {
+					add_jar(cp, rest);
 				}
 			}
 		}
@@ -655,7 +713,7 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 		log::info("[kls] Discovered %d Gradle modules", (int)cp.module_count);
 		for (usz i = 0; i < cp.module_count; i++) {
 			GradleModule* m = &cp.modules[i];
-			log::debug("[kls]   %s: %d src roots, %d deps, %d JARs",
+			log::info("[kls]   %s: %d src roots, %d deps, %d JARs",
 				m.name, (int)m.src_root_count, (int)m.dep_module_count, (int)m.jar_count);
 		}
 	}

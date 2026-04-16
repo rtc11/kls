@@ -58,14 +58,27 @@ fn Object* handle_initialize(Object* params, WorkspaceIndex* workspace) {
 
 		// Extract workspace root URI
 		if (try root_uri = params.get_string("rootUri")) {
+			log::info("[kls] rootUri: %s", root_uri);
 			workspace.set_root(root_uri);
 		} else {
+			log::info("[kls] rootUri not found in initialize params");
 			// Fallback to rootPath (deprecated but still used by some clients)
 			if (try root_path = params.get_string("rootPath")) {
 				DString uri;
 				uri.tinit();
 				uri.appendf("file://%s", root_path);
 				workspace.set_root(uri.str_view());
+			} else {
+				// Fallback to workspaceFolders (modern LSP clients)
+				if (try folders = params.get("workspaceFolders")) {
+					if (folders.is_array() && folders.get_len() > 0) {
+						Object* first = folders.get_at(0);
+						if (try folder_uri = first.get_string("uri")) {
+							log::info("[kls] workspace root from workspaceFolders: %s", folder_uri);
+							workspace.set_root(folder_uri);
+						}
+					}
+				}
 			}
 		}
 	}

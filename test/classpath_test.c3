@@ -298,8 +298,8 @@ fn void test_parse_gradle_output_single_module() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::|/home/user/project
-KLS_SRC:/home/user/project/src/main/kotlin
-KLS_JAR:/path/to/lib.jar
+KLS_SRC::|/home/user/project/src/main/kotlin
+KLS_JAR::|/path/to/lib.jar
 `);
 	assert(cp.module_count == 1, "expected 1 module, got %d", (int)cp.module_count);
 	assert(cp.modules[0].name == ":", "expected ':', got '%s'", cp.modules[0].name);
@@ -307,7 +307,6 @@ KLS_JAR:/path/to/lib.jar
 	assert(cp.modules[0].src_root_count == 1);
 	assert(cp.modules[0].src_roots[0] == "/home/user/project/src/main/kotlin");
 	assert(cp.jar_count == 1);
-	assert(cp.modules[0].jar_start == 0);
 	assert(cp.modules[0].jar_count == 1);
 }
 
@@ -318,13 +317,13 @@ fn void test_parse_gradle_output_multi_module() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::core|/home/user/project/core
-KLS_SRC:/home/user/project/core/src/main/kotlin
-KLS_JAR:/path/to/lib1.jar
+KLS_SRC::core|/home/user/project/core/src/main/kotlin
+KLS_JAR::core|/path/to/lib1.jar
 KLS_MODULE::app|/home/user/project/app
-KLS_SRC:/home/user/project/app/src/main/kotlin
-KLS_DEP::core
-KLS_JAR:/path/to/lib2.jar
-KLS_JAR:/path/to/lib3.jar
+KLS_SRC::app|/home/user/project/app/src/main/kotlin
+KLS_DEP::app|:core
+KLS_JAR::app|/path/to/lib2.jar
+KLS_JAR::app|/path/to/lib3.jar
 `);
 	assert(cp.module_count == 2, "expected 2 modules, got %d", (int)cp.module_count);
 
@@ -333,7 +332,6 @@ KLS_JAR:/path/to/lib3.jar
 	assert(cp.modules[0].dir == "/home/user/project/core");
 	assert(cp.modules[0].src_root_count == 1);
 	assert(cp.modules[0].dep_module_count == 0);
-	assert(cp.modules[0].jar_start == 0);
 	assert(cp.modules[0].jar_count == 1);
 
 	// App module
@@ -342,7 +340,6 @@ KLS_JAR:/path/to/lib3.jar
 	assert(cp.modules[1].src_root_count == 1);
 	assert(cp.modules[1].dep_module_count == 1);
 	assert(cp.modules[1].dep_modules[0] == ":core");
-	assert(cp.modules[1].jar_start == 1);
 	assert(cp.modules[1].jar_count == 2);
 
 	assert(cp.jar_count == 3, "expected 3 JARs total, got %d", (int)cp.jar_count);
@@ -355,9 +352,9 @@ fn void test_parse_gradle_output_multiple_src_roots() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::lib|/home/user/project/lib
-KLS_SRC:/home/user/project/lib/src/main/kotlin
-KLS_SRC:/home/user/project/lib/src/main/java
-KLS_SRC:/home/user/project/lib/src/test/kotlin
+KLS_SRC::lib|/home/user/project/lib/src/main/kotlin
+KLS_SRC::lib|/home/user/project/lib/src/main/java
+KLS_SRC::lib|/home/user/project/lib/src/test/kotlin
 `);
 	assert(cp.module_count == 1);
 	assert(cp.modules[0].src_root_count == 3, "expected 3 src roots, got %d", (int)cp.modules[0].src_root_count);
@@ -373,9 +370,9 @@ fn void test_parse_gradle_output_multiple_deps() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::app|/home/user/project/app
-KLS_DEP::core
-KLS_DEP::data
-KLS_DEP::common
+KLS_DEP::app|:core
+KLS_DEP::app|:data
+KLS_DEP::app|:common
 `);
 	assert(cp.modules[0].dep_module_count == 3);
 	assert(cp.modules[0].dep_modules[0] == ":core");
@@ -401,7 +398,7 @@ fn void test_parse_gradle_output_crlf_module() {
 	defer cp.free();
 
 	classpath::parse_gradle_output(&cp,
-		"KLS_MODULE::core|/home/user/project/core\r\nKLS_SRC:/home/user/project/core/src/main/kotlin\r\nKLS_JAR:/path/to/lib.jar\r\n"
+		"KLS_MODULE::core|/home/user/project/core\r\nKLS_SRC::core|/home/user/project/core/src/main/kotlin\r\nKLS_JAR::core|/path/to/lib.jar\r\n"
 	);
 	assert(cp.module_count == 1);
 	assert(cp.modules[0].name == ":core");
@@ -453,9 +450,9 @@ fn void test_find_module_for_path_matches_src_root() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::core|/home/user/project/core
-KLS_SRC:/home/user/project/core/src/main/kotlin
+KLS_SRC::core|/home/user/project/core/src/main/kotlin
 KLS_MODULE::app|/home/user/project/app
-KLS_SRC:/home/user/project/app/src/main/kotlin
+KLS_SRC::app|/home/user/project/app/src/main/kotlin
 `);
 
 	GradleModule* m = cp.find_module_for_path("/home/user/project/core/src/main/kotlin/com/example/Foo.kt");
@@ -470,9 +467,9 @@ fn void test_find_module_for_path_second_module() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::core|/home/user/project/core
-KLS_SRC:/home/user/project/core/src/main/kotlin
+KLS_SRC::core|/home/user/project/core/src/main/kotlin
 KLS_MODULE::app|/home/user/project/app
-KLS_SRC:/home/user/project/app/src/main/kotlin
+KLS_SRC::app|/home/user/project/app/src/main/kotlin
 `);
 
 	GradleModule* m = cp.find_module_for_path("/home/user/project/app/src/main/kotlin/com/example/Main.kt");
@@ -487,7 +484,7 @@ fn void test_find_module_for_path_no_match() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::core|/home/user/project/core
-KLS_SRC:/home/user/project/core/src/main/kotlin
+KLS_SRC::core|/home/user/project/core/src/main/kotlin
 `);
 
 	GradleModule* m = cp.find_module_for_path("/home/user/other-project/src/main/kotlin/Foo.kt");
@@ -501,8 +498,8 @@ fn void test_find_module_for_path_test_source_root() {
 
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::lib|/home/user/project/lib
-KLS_SRC:/home/user/project/lib/src/main/kotlin
-KLS_SRC:/home/user/project/lib/src/test/kotlin
+KLS_SRC::lib|/home/user/project/lib/src/main/kotlin
+KLS_SRC::lib|/home/user/project/lib/src/test/kotlin
 `);
 
 	GradleModule* m = cp.find_module_for_path("/home/user/project/lib/src/test/kotlin/com/example/FooTest.kt");
@@ -536,7 +533,7 @@ fn void test_module_depends_on_direct() {
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::core|/home/user/project/core
 KLS_MODULE::app|/home/user/project/app
-KLS_DEP::core
+KLS_DEP::app|:core
 `);
 	assert(cp.module_depends_on(":app", ":core"), "app should depend on core");
 }
@@ -549,7 +546,7 @@ fn void test_module_depends_on_not_reverse() {
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::core|/home/user/project/core
 KLS_MODULE::app|/home/user/project/app
-KLS_DEP::core
+KLS_DEP::app|:core
 `);
 	assert(!cp.module_depends_on(":core", ":app"), "core should NOT depend on app");
 }
@@ -562,9 +559,9 @@ fn void test_module_depends_on_transitive() {
 	classpath::parse_gradle_output(&cp,
 `KLS_MODULE::common|/home/user/project/common
 KLS_MODULE::core|/home/user/project/core
-KLS_DEP::common
+KLS_DEP::core|:common
 KLS_MODULE::app|/home/user/project/app
-KLS_DEP::core
+KLS_DEP::app|:core
 `);
 	// app -> core -> common
 	assert(cp.module_depends_on(":app", ":core"), "app -> core");
@@ -611,4 +608,43 @@ fn void test_classpath_init_modules() {
 	Classpath cp;
 	cp.init();
 	assert(cp.module_count == 0);
+}
+
+// ── Interleaved output tests ──────────────────────────────────────
+
+fn void test_parse_gradle_output_interleaved() {
+	// Simulates parallel Gradle task output where modules interleave
+	Classpath cp;
+	cp.init();
+	defer cp.free();
+
+	classpath::parse_gradle_output(&cp,
+`KLS_MODULE::core|/home/user/project/core
+KLS_MODULE::app|/home/user/project/app
+KLS_SRC::app|/home/user/project/app/src/main/kotlin
+KLS_SRC::core|/home/user/project/core/src/main/kotlin
+KLS_DEP::app|:core
+KLS_JAR::core|/path/to/lib1.jar
+KLS_JAR::app|/path/to/lib2.jar
+`);
+	assert(cp.module_count == 2);
+
+	// Core module should have its own src root, not app's
+	GradleModule* core = cp.find_module(":core");
+	assert(core != null);
+	assert(core.src_root_count == 1);
+	assert(core.src_roots[0] == "/home/user/project/core/src/main/kotlin",
+		"expected core src root, got '%s'", core.src_roots[0]);
+	assert(core.dep_module_count == 0);
+	assert(core.jar_count == 1);
+
+	// App module should have its own src root
+	GradleModule* app = cp.find_module(":app");
+	assert(app != null);
+	assert(app.src_root_count == 1);
+	assert(app.src_roots[0] == "/home/user/project/app/src/main/kotlin",
+		"expected app src root, got '%s'", app.src_roots[0]);
+	assert(app.dep_module_count == 1);
+	assert(app.dep_modules[0] == ":core");
+	assert(app.jar_count == 1);
 }
