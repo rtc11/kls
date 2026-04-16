@@ -513,3 +513,99 @@ fn void hover_let_shows_doc() @test {
 			"expected doc text, got: '%s'", value);
 	};
 }
+
+// ── Hover for generic declarations ─────────────────────────────────
+
+fn void hover_generic_class_shows_type_params() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "class Box<T>(val value: T)");
+		// Hover over "Box" at col 6
+		Object* params = make_hover_params("file:///test.kt", 0, 6);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("class Box<T>"), "expected 'class Box<T>' in hover, got: '%s'", value);
+	};
+}
+
+fn void hover_generic_fun_shows_type_params() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun <T> identity(x: T): T = x");
+		// Hover over "identity" at col 8
+		Object* params = make_hover_params("file:///test.kt", 0, 8);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("<T>"), "expected '<T>' in hover, got: '%s'", value);
+		assert(value.contains("fun"), "expected 'fun' in hover");
+		assert(value.contains("identity"), "expected 'identity' in hover");
+	};
+}
+
+fn void hover_generic_class_with_bound_and_variance() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "class Sorter<out T : Comparable<T>>()");
+		// Hover over "Sorter" at col 6
+		Object* params = make_hover_params("file:///test.kt", 0, 6);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("out T"), "expected 'out T' in hover, got: '%s'", value);
+		assert(value.contains("Comparable<T>"), "expected bound 'Comparable<T>' in hover, got: '%s'", value);
+	};
+}
+
+fn void hover_fun_with_where_clause() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun <T> sort(list: List<T>) where T : Comparable<T> {}");
+		// Hover over "sort" at col 8
+		Object* params = make_hover_params("file:///test.kt", 0, 8);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("where"), "expected 'where' clause in hover, got: '%s'", value);
+		assert(value.contains("Comparable<T>"), "expected 'Comparable<T>' in where clause, got: '%s'", value);
+	};
+}
+
+fn void hover_typealias_with_type_params() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "typealias StringMap<V> = Map<String, V>");
+		// Hover over "StringMap" at col 10
+		Object* params = make_hover_params("file:///test.kt", 0, 10);
+		Object* result = hover::handle_hover(&store, null, params);
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("StringMap<V>"), "expected 'StringMap<V>' in hover, got: '%s'", value);
+	};
+}

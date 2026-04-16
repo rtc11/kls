@@ -23,6 +23,8 @@ enum NodeKind : int {
 	// Structural
 	PARAM,
 	TYPE_PARAM,
+	TYPE_ARG,            // type argument at use site: Int in List<Int>, * for star projection
+	WHERE_CONSTRAINT,    // where clause constraint: T : Comparable<T>
 	TYPE_REF,
 	BLOCK,
 

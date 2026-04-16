@@ -72,12 +72,20 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// Check if we're in a dot-completion context (after . or ?.)
 	bool is_dot_context = is_dot_completion_context(doc.content, line, character, prefix);
 
+	// Check if we're inside type argument angle brackets: List<|>
+	bool is_type_arg_context = !is_dot_context && is_type_argument_context(doc.content, line, character, prefix);
+
 	// Build completion items
 	Object* items = object::new_obj(tmem);
 
 	if (is_dot_context) {
 		// Dot-completion: resolve receiver type and offer members
 		add_dot_completions(items, store, workspace, uri, doc.content, line, character, prefix);
+	}
+
+	if (is_type_arg_context) {
+		// Type argument context: offer types, type params, star projection
+		add_type_argument_completions(items, store, uri, doc.content, line, character, prefix);
 	}
 
 	// Always add general completions (keywords, identifiers, etc.)
@@ -253,6 +261,117 @@ fn bool is_dot_completion_context(String content, uint line, uint character, Str
 	}
 
 	return false;
+}
+
+/**
+ * Detect if the cursor is inside type argument angle brackets: List<|>, Map<String, |>
+ * Scans backward from cursor for an unmatched '<'.
+ */
+fn bool is_type_argument_context(String content, uint line, uint character, String prefix) {
+	long byte_offset = hover::position_to_offset(content, line, character);
+	if (byte_offset <= 0) return false;
+
+	usz pos = (usz)byte_offset - prefix.len;
+	int depth = 0;
+
+	while (pos > 0) {
+		pos--;
+		char c = content[pos];
+		if (c == '>') {
+			depth++;
+		} else if (c == '<') {
+			if (depth == 0) {
+				// Found unmatched '<' -- check that it follows an identifier (type name)
+				if (pos > 0 && lexer::is_ident_part(content[pos - 1])) {
+					return true;
+				}
+				return false;
+			}
+			depth--;
+		} else if (c == '{' || c == '}' || c == ';' || c == '\n') {
+			// Stop at statement/block boundaries
+			return false;
+		}
+	}
+	return false;
+}
+
+/**
+ * Add type completions for inside angle brackets context.
+ * Offers: type params in scope, class/interface names, type aliases, star projection.
+ */
+fn void add_type_argument_completions(Object* items, DocumentStore* store, String uri, String content,
+		uint line, uint character, String prefix) {
+	ParseResult* pr = store.get_ast(uri) ?? null;
+
+	// Add star projection
+	if ("*".starts_with(prefix) || prefix.len == 0) {
+		Object* item = object::new_obj(tmem);
+		item.set("label", "*");
+		item.set("kind", 14); // Keyword
+		item.set("detail", "Star projection");
+		item.set("sortText", "0000*");
+		items.push(item);
+	}
+
+	if (pr == null) return;
+
+	long byte_offset = hover::position_to_offset(content, line, character);
+	uint cursor_offset = byte_offset > 0 ? (uint)byte_offset : 0;
+
+	// Add type parameters in scope (highest priority)
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != TYPE_PARAM || n.name.len == 0) continue;
+		if (n.parent == ast::NO_PARENT) continue;
+
+		// Check if cursor is within the parent scope
+		AstNode* owner = &pr.nodes[n.parent];
+		if (cursor_offset < owner.start_offset || cursor_offset >= owner.end_offset) continue;
+
+		if (prefix.len == 0 || n.name.starts_with(prefix)) {
+			Object* item = object::new_obj(tmem);
+			item.set("label", n.name);
+			item.set("kind", 25); // TypeParameter
+			if (n.type_text.len > 0) {
+				DString detail;
+				detail.tinit();
+				detail.appendf("type parameter : %s", n.type_text);
+				item.set("detail", detail.str_view());
+			} else {
+				item.set("detail", "type parameter");
+			}
+			item.set("sortText", "0001");
+			items.push(item);
+		}
+	}
+
+	// Add class/interface/typealias declarations (from AST)
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name.len == 0) continue;
+		bool is_type = n.kind == CLASS_DECL || n.kind == INTERFACE_DECL ||
+		               n.kind == OBJECT_DECL || n.kind == TYPEALIAS_DECL ||
+		               n.kind == ENUM_ENTRY;
+		if (!is_type) continue;
+
+		if (prefix.len == 0 || n.name.starts_with(prefix)) {
+			Object* item = object::new_obj(tmem);
+			item.set("label", n.name);
+			int kind;
+			switch (n.kind) {
+				case CLASS_DECL:     kind = 7;  // Class
+				case INTERFACE_DECL: kind = 8;  // Interface
+				case OBJECT_DECL:    kind = 7;  // Class
+				case TYPEALIAS_DECL: kind = 7;  // Class
+				case ENUM_ENTRY:     kind = 13; // Enum
+				default:             kind = 7;
+			}
+			item.set("kind", kind);
+			item.set("sortText", "0010");
+			items.push(item);
+		}
+	}
 }
 
 /**

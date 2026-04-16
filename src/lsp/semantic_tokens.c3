@@ -8,9 +8,16 @@ import kls::kotlin::ast;
 
 // Maximum tokens we'll encode per document.
 const usz MAX_TOKENS = 16384;
-
-// Maximum AST name positions we'll track for identifier classification.
 const usz MAX_NAME_ENTRIES = 4096;
+
+// Type parameter scope entry for classifying type param uses
+const usz MAX_TYPE_PARAMS = 128;
+
+struct TypeParamScope {
+	String name;
+	uint scope_start;  // owner declaration start offset
+	uint scope_end;    // owner declaration end offset
+}
 
 // ── Semantic token type legend (indices) ───────────────────────────
 // These indices must match the tokenTypes array in build_semantic_tokens_options().
@@ -132,6 +139,39 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 		count++;
 	}
 
+	// Pass 4: type parameter uses -- identifiers matching TYPE_PARAM names in scope
+	// Collect all type parameter names and their parent scope ranges
+	for (uint i = 0; i < pr.node_count && count < table.len; i++) {
+		AstNode* tp = &pr.nodes[i];
+		if (tp.kind != TYPE_PARAM || tp.name.len == 0) continue;
+
+		// Find the parent declaration (CLASS_DECL, FUN_DECL, etc.) that owns this type param
+		if (tp.parent == ast::NO_PARENT) continue;
+		AstNode* owner = &pr.nodes[tp.parent];
+		String tp_name = tp.name;
+
+		// Scan all NAME_EXPR and TYPE_ARG nodes for matching identifiers within the owner scope
+		for (uint j = 0; j < pr.node_count && count < table.len; j++) {
+			AstNode* n = &pr.nodes[j];
+			if (n.name != tp_name) continue;
+			if (n.name_len == 0) continue;
+			// Skip the declaration itself
+			if (n.name_offset == tp.name_offset) continue;
+			// Must be within owner scope
+			if (n.start_offset < owner.start_offset || n.start_offset >= owner.end_offset) continue;
+
+			// Only classify NAME_EXPR and TYPE_ARG nodes
+			if (n.kind != NAME_EXPR && n.kind != TYPE_ARG) continue;
+
+			// Skip if already classified
+			if (lookup_name(table[..], count, n.name_offset) >= 0) continue;
+
+			table[count].offset = n.name_offset;
+			table[count].token_type = TT_TYPE_PARAMETER;
+			count++;
+		}
+	}
+
 	return count;
 }
 
@@ -145,6 +185,39 @@ fn int lookup_name(NameEntry[] table, usz count, uint offset) {
 		}
 	}
 	return -1;
+}
+
+/**
+ * Build a table of type parameter names with their owner scope ranges.
+ * Used to classify IDENTIFIER tokens as type parameters even when they
+ * appear in positions not captured by the AST (e.g., type annotations).
+ */
+fn usz build_type_param_scopes(ParseResult* pr, TypeParamScope[] table) {
+	usz count = 0;
+	for (uint i = 0; i < pr.node_count && count < table.len; i++) {
+		AstNode* tp = &pr.nodes[i];
+		if (tp.kind != TYPE_PARAM || tp.name.len == 0) continue;
+		if (tp.parent == ast::NO_PARENT) continue;
+
+		AstNode* owner = &pr.nodes[tp.parent];
+		table[count].name = tp.name;
+		table[count].scope_start = owner.start_offset;
+		table[count].scope_end = owner.end_offset;
+		count++;
+	}
+	return count;
+}
+
+/**
+ * Check if an identifier at the given offset matches a type parameter in scope.
+ */
+fn bool is_type_param_use(TypeParamScope[] table, usz count, String name, uint offset) {
+	for (usz i = 0; i < count; i++) {
+		if (table[i].name == name && offset >= table[i].scope_start && offset < table[i].scope_end) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -191,6 +264,10 @@ fn Object* encode_semantic_tokens(String content, ParseResult* pr) {
 	NameEntry[MAX_NAME_ENTRIES] name_table;
 	usz name_count = build_name_table(pr, &name_table);
 
+	// Build type parameter scope table for classifying uses in type positions
+	TypeParamScope[MAX_TYPE_PARAMS] tp_scopes;
+	usz tp_count = build_type_param_scopes(pr, &tp_scopes);
+
 	Lexer lex = lexer::init(content);
 	uint prev_line = 0;
 	uint prev_col = 0;
@@ -202,11 +279,13 @@ fn Object* encode_semantic_tokens(String content, ParseResult* pr) {
 
 		int token_type = map_token_type(tok.kind);
 
-		// For identifiers, check if this is a declaration name
+		// For identifiers, check if this is a declaration name or type param use
 		if (tok.kind == IDENTIFIER && name_count > 0) {
 			int ast_type = lookup_name(name_table[..], name_count, tok.offset);
 			if (ast_type >= 0) {
 				token_type = ast_type;
+			} else if (tp_count > 0 && is_type_param_use(tp_scopes[..], tp_count, tok.text, tok.offset)) {
+				token_type = TT_TYPE_PARAMETER;
 			}
 		}
 

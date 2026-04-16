@@ -582,7 +582,7 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 
 	// Where clause: where T : Comparable<T>
 	if (self.at(KW_WHERE)) {
-		self.skip_where_clause();
+		self.parse_where_clause();
 	}
 
 	// Class body
@@ -626,7 +626,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 		if (self.at(LANGLE)) {
 			// Could be Receiver<T>.name -- capture full receiver text
 			uint recv_start = first_name.offset;
-			self.skip_angle_brackets();
+			self.parse_type_args();
 			// Handle nullable generic receiver: Receiver<T>?.name
 			bool is_nullable_recv = false;
 			if (self.at(QUEST)) {
@@ -699,7 +699,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 
 	// Where clause
 	if (self.at(KW_WHERE)) {
-		self.skip_where_clause();
+		self.parse_where_clause();
 	}
 
 	// Body: { ... } or = expression
@@ -780,7 +780,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 		// Check for receiver: Name.property or Name<T>.property or Name?.property
 		if (self.at(LANGLE)) {
 			uint recv_start = first_name.offset;
-			self.skip_angle_brackets();
+			self.parse_type_args();
 			// Handle nullable generic receiver: Name<T>?.property
 			bool is_nullable_recv = false;
 			if (self.at(QUEST)) {
@@ -870,9 +870,11 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 		self.node_set_name(idx, name);
 	}
 
+	uint children_start = self.result.node_count;
+
 	// Type parameters
 	if (self.at(LANGLE)) {
-		self.skip_angle_brackets();
+		self.parse_type_params();
 	}
 
 	// = Type
@@ -885,6 +887,7 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 		}
 	}
 
+	self.adopt_children(idx, children_start);
 	self.node_end(idx);
 }
 
@@ -1116,6 +1119,60 @@ fn void Parser.parse_type_params(Parser* self) {
 	self.expect(RANGLE);
 }
 
+// ── Type arguments (use-site) ──────────────────────────────────────
+
+/**
+ * Parse type arguments at a use site: <Int, String>, <out T>, <*>
+ * Each becomes a TYPE_ARG child node with:
+ *   - name: the type text (e.g. "Int", "String", "*")
+ *   - type_text: full text of complex types (e.g. "List<Int>", "suspend () -> Unit")
+ *   - mod_flags: MOD_IN/MOD_OUT for use-site variance
+ */
+fn void Parser.parse_type_args(Parser* self) {
+	self.advance(); // consume '<'
+
+	while (!self.at(RANGLE) && !self.at_eof()) {
+		uint idx = self.add_node(TYPE_ARG);
+		self.node_start(idx, self.current);
+
+		// Use-site variance: in/out
+		uint mods = ast::MOD_NONE;
+		if (self.eat(KW_IN)) {
+			mods |= ast::MOD_IN;
+		} else if (self.eat(KW_OUT)) {
+			mods |= ast::MOD_OUT;
+		}
+		self.result.nodes[idx].mod_flags = mods;
+
+		// Star projection: *
+		if (self.at(MULT)) {
+			self.result.nodes[idx].name = "*";
+			uint type_start = self.current.offset;
+			self.advance(); // consume '*'
+			uint type_end = self.previous.offset + self.previous.len;
+			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+		} else {
+			// Type reference
+			uint type_start = self.current.offset;
+			self.skip_type_ref();
+			uint type_end = self.previous.offset + self.previous.len;
+			if (type_end > type_start) {
+				String type_text = self.source[type_start:type_end - type_start];
+				self.result.nodes[idx].type_text = type_text;
+				// Set name to simple identifier if it's just a name
+				self.result.nodes[idx].name = type_text;
+			}
+		}
+
+		self.node_end(idx);
+		if (!self.eat(COMMA)) break;
+	}
+
+	if (self.at(RANGLE)) {
+		self.advance();
+	}
+}
+
 // ── Super types ────────────────────────────────────────────────────
 
 /**
@@ -1146,7 +1203,7 @@ fn void Parser.parse_super_types(Parser* self) {
 
 			// Generic arguments: <T, R>
 			if (self.at(LANGLE)) {
-				self.skip_angle_brackets();
+				self.parse_type_args();
 			}
 			// Constructor call: ()
 			if (self.at(LPAREN)) {
@@ -1167,15 +1224,28 @@ fn void Parser.parse_super_types(Parser* self) {
 
 // ── Where clause ───────────────────────────────────────────────────
 
-fn void Parser.skip_where_clause(Parser* self) {
+fn void Parser.parse_where_clause(Parser* self) {
 	self.advance(); // consume 'where'
 
 	while (!self.at_eof()) {
 		if (self.at_identifier()) {
+			uint idx = self.add_node(WHERE_CONSTRAINT);
+			self.node_start(idx, self.current);
+
+			Token name_tok = self.current;
+			self.node_set_name(idx, name_tok);
 			self.advance();
-		}
-		if (self.eat(COLON)) {
-			self.skip_type_ref();
+
+			if (self.eat(COLON)) {
+				uint type_start = self.current.offset;
+				self.skip_type_ref();
+				uint type_end = self.previous.offset + self.previous.len;
+				if (type_end > type_start) {
+					self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+				}
+			}
+
+			self.node_end(idx);
 		}
 		if (self.eat(COMMA)) continue;
 		break;
@@ -2423,7 +2493,7 @@ fn uint Parser.parse_super_expr(Parser* self) {
 
 	// Generic qualifier: super<Type>
 	if (self.at(LANGLE)) {
-		self.skip_angle_brackets();
+		self.parse_type_args();
 	}
 
 	// Optional label: @label
@@ -2670,14 +2740,14 @@ fn uint Parser.parse_postfix_chain(Parser* self, uint left) {
 				left = self.parse_postfix_incr_decr(left);
 			case COLONCOLON:
 				left = self.parse_member_ref(left);
-			case LANGLE:
-				// Generic type arguments: name<Type>() or name<A, B>
-				// Only after name-like expressions. Skip the angle brackets.
-				if (self.is_generic_context(left)) {
-					self.skip_angle_brackets();
-				} else {
-					return left;
-				}
+		case LANGLE:
+			// Generic type arguments: name<Type>() or name<A, B>
+			// Only after name-like expressions. Parse the type arguments.
+			if (self.is_generic_context(left)) {
+				self.parse_type_args();
+			} else {
+				return left;
+			}
 			case LCURL:
 				// Trailing lambda: only after call-like expressions or identifiers
 				// Heuristic: if the previous expression is a name or call, this is a trailing lambda

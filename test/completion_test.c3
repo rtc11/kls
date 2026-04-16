@@ -242,3 +242,22 @@ fn void identifier_item_has_correct_kind() @test {
 		assert(detail == "Identifier", "expected detail 'Identifier', got '%s'", detail);
 	};
 }
+
+// ── Type argument context detection ────────────────────────────────
+
+fn void type_arg_context_inside_angle_brackets() @test {
+	// "List<" then cursor -- should be type argument context
+	bool result = completion::is_type_argument_context("val x: List<", 0, 12, "");
+	assert(result, "expected type argument context inside List<");
+}
+
+fn void type_arg_context_not_in_normal_code() @test {
+	bool result = completion::is_type_argument_context("val x = 1", 0, 9, "");
+	assert(!result, "should not be type argument context in normal code");
+}
+
+fn void type_arg_context_after_comma() @test {
+	// "Map<String, " then cursor
+	bool result = completion::is_type_argument_context("val x: Map<String, ", 0, 19, "");
+	assert(result, "expected type argument context after comma in Map<String, ");
+}

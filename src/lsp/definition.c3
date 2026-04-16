@@ -283,7 +283,7 @@ fn bool is_scope_node(NodeKind kind) {
  */
 fn bool is_definition_target(NodeKind kind) {
 	if (ast::is_declaration(kind)) return true;
-	return kind == PARAM;
+	return kind == PARAM || kind == TYPE_PARAM;
 }
 
 /**

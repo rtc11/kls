@@ -492,7 +492,13 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 	// Declaration keyword + name
 	switch (node.kind) {
 		case FUN_DECL:
-			ds.appendf("fun %s", node.name);
+			ds.appendf("fun ");
+			append_type_params(&ds, pr, node);
+			// Receiver type
+			if (node.extra_text.len > 0) {
+				ds.appendf("%s.", node.extra_text);
+			}
+			ds.appendf("%s", node.name);
 			// Append parameters
 			ds.appendf("(");
 			bool first = true;
@@ -520,12 +526,17 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 					ds.appendf(": %s", inferred);
 				}
 			}
+			append_where_clause(&ds, pr, node);
 
 		case CLASS_DECL:
 			ds.appendf("class %s", node.name);
+			append_type_params(&ds, pr, node);
+			append_where_clause(&ds, pr, node);
 
 		case INTERFACE_DECL:
 			ds.appendf("interface %s", node.name);
+			append_type_params(&ds, pr, node);
+			append_where_clause(&ds, pr, node);
 
 		case OBJECT_DECL:
 			ds.appendf("object %s", node.name);
@@ -536,7 +547,13 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 		case PROPERTY_DECL:
 			// #13: Show val vs var based on MOD_VAR flag
 			String prop_keyword = (node.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
-			ds.appendf("%s %s", prop_keyword, node.name);
+			ds.appendf("%s ", prop_keyword);
+			append_type_params(&ds, pr, node);
+			// Receiver type
+			if (node.extra_text.len > 0) {
+				ds.appendf("%s.", node.extra_text);
+			}
+			ds.appendf("%s", node.name);
 			if (node.type_text.len > 0) {
 				ds.appendf(": %s", node.type_text);
 			} else if (type_info != null && type_info.has_type[node_idx]) {
@@ -548,6 +565,7 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 
 		case TYPEALIAS_DECL:
 			ds.appendf("typealias %s", node.name);
+			append_type_params(&ds, pr, node);
 			if (node.type_text.len > 0) {
 				ds.appendf(" = %s", node.type_text);
 			}
@@ -594,6 +612,77 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 	}
 
 	return ds.str_view();
+}
+
+/**
+ * Append type parameters to a DString: <T, out R : Comparable<R>, reified V>
+ * Returns true if any type parameters were appended.
+ */
+fn bool append_type_params(DString* ds, ParseResult* pr, AstNode* node) {
+	uint node_idx = ast::node_index(pr, node);
+	bool has_any = false;
+	bool first = true;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != node_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+
+		if (first) {
+			ds.appendf("<");
+			first = false;
+		} else {
+			ds.appendf(", ");
+		}
+		has_any = true;
+
+		// Variance
+		if (child.mod_flags & ast::MOD_IN != 0) ds.appendf("in ");
+		if (child.mod_flags & ast::MOD_OUT != 0) ds.appendf("out ");
+		if (child.mod_flags & ast::MOD_REIFIED != 0) ds.appendf("reified ");
+
+		// Name
+		ds.appendf("%s", child.name);
+
+		// Upper bound
+		if (child.type_text.len > 0) {
+			ds.appendf(" : %s", child.type_text);
+		}
+	}
+
+	if (has_any) {
+		ds.appendf(">");
+	}
+	return has_any;
+}
+
+/**
+ * Append where clause constraints to a DString: where T : Comparable<T>, R : Serializable
+ * Returns true if any constraints were appended.
+ */
+fn bool append_where_clause(DString* ds, ParseResult* pr, AstNode* node) {
+	uint node_idx = ast::node_index(pr, node);
+	bool first = true;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != node_idx) continue;
+		if (child.kind != WHERE_CONSTRAINT) continue;
+
+		if (first) {
+			ds.appendf(" where ");
+			first = false;
+		} else {
+			ds.appendf(", ");
+		}
+
+		ds.appendf("%s", child.name);
+		if (child.type_text.len > 0) {
+			ds.appendf(" : %s", child.type_text);
+		}
+	}
+
+	return !first;
 }
 
 /**

@@ -3831,3 +3831,115 @@ fn void parse_annotation_on_class_member_fun() @test {
 		assert(!helper.has_annotation("Test"), "helper should not have @Test");
 	};
 }
+
+// ── TYPE_ARG nodes ─────────────────────────────────────────────────
+
+fn void parse_type_args_in_supertype() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Foo : Bar<Int, String>"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+		assert(cls.name == "Foo");
+
+		// TYPE_REF for Bar should have TYPE_ARG children
+		AstNode* type_ref = ast::find_child(r, cls, TYPE_REF)!!;
+		assert(type_ref.name == "Bar", "expected 'Bar', got '%s'", type_ref.name);
+
+		// Count TYPE_ARG children of the class (they're adopted by the class)
+		uint arg_count = ast::count_children_of_kind(r, cls, TYPE_ARG);
+		assert(arg_count == 2, "expected 2 TYPE_ARG, got %d", (int)arg_count);
+	};
+}
+
+fn void parse_type_args_star_projection() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Foo : Bar<*>"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+
+		uint arg_count = ast::count_children_of_kind(r, cls, TYPE_ARG);
+		assert(arg_count == 1, "expected 1 TYPE_ARG, got %d", (int)arg_count);
+
+		AstNode* arg = ast::find_child(r, cls, TYPE_ARG)!!;
+		assert(arg.name == "*", "expected '*', got '%s'", arg.name);
+	};
+}
+
+fn void parse_type_args_nested_generics() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Foo : Bar<Map<String, List<Int>>>"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL);
+
+		uint arg_count = ast::count_children_of_kind(r, cls, TYPE_ARG);
+		assert(arg_count == 1, "expected 1 TYPE_ARG for deeply nested, got %d", (int)arg_count);
+
+		AstNode* arg = ast::find_child(r, cls, TYPE_ARG)!!;
+		assert(arg.type_text == "Map<String, List<Int>>", "expected 'Map<String, List<Int>>', got '%s'", arg.type_text);
+	};
+}
+
+fn void parse_type_args_use_site_variance() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Foo : Bar<out Int, in String>"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+
+		uint arg_count = ast::count_children_of_kind(r, cls, TYPE_ARG);
+		assert(arg_count == 2, "expected 2 TYPE_ARG, got %d", (int)arg_count);
+	};
+}
+
+// ── WHERE_CONSTRAINT nodes ─────────────────────────────────────────
+
+fn void parse_where_clause_on_class() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Foo<T> where T : Comparable<T>, T : Serializable {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL);
+
+		uint wc_count = ast::count_children_of_kind(r, cls, WHERE_CONSTRAINT);
+		assert(wc_count == 2, "expected 2 WHERE_CONSTRAINT, got %d", (int)wc_count);
+
+		AstNode* wc = ast::find_child(r, cls, WHERE_CONSTRAINT)!!;
+		assert(wc.name == "T", "expected 'T', got '%s'", wc.name);
+		assert(wc.type_text == "Comparable<T>", "expected 'Comparable<T>', got '%s'", wc.type_text);
+	};
+}
+
+fn void parse_where_clause_on_fun() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun <T> sort(list: List<T>) where T : Comparable<T> {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL);
+
+		uint wc_count = ast::count_children_of_kind(r, fun, WHERE_CONSTRAINT);
+		assert(wc_count == 1, "expected 1 WHERE_CONSTRAINT, got %d", (int)wc_count);
+
+		AstNode* wc = ast::find_child(r, fun, WHERE_CONSTRAINT)!!;
+		assert(wc.name == "T");
+		assert(wc.type_text == "Comparable<T>", "expected 'Comparable<T>', got '%s'", wc.type_text);
+	};
+}
+
+// ── Typealias type params ──────────────────────────────────────────
+
+fn void parse_typealias_type_params() @test {
+	@pool() {
+		ParseResult* r = do_parse("typealias StringMap<V> = Map<String, V>"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* ta = child(r, f, 0);
+		assert(ta.kind == TYPEALIAS_DECL);
+		assert(ta.name == "StringMap");
+
+		uint tp_count = ast::count_children_of_kind(r, ta, TYPE_PARAM);
+		assert(tp_count == 1, "expected 1 TYPE_PARAM on typealias, got %d", (int)tp_count);
+
+		AstNode* tp = ast::find_child(r, ta, TYPE_PARAM)!!;
+		assert(tp.name == "V", "expected 'V', got '%s'", tp.name);
+	};
+}

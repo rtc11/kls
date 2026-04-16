@@ -1092,3 +1092,52 @@ fn void definition_scope_fn_also_returns_null_without_deps() @test {
 		assert(result == null, "expected null for .also with no deps");
 	};
 }
+
+// ── Go to type parameter definition ────────────────────────────────
+
+fn void definition_of_type_param_in_fun() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		//                  0123456789012345678901234567
+		String content = "fun <T> identity(x: T): T = x";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "T" in return type at col 24
+		Object* params = make_params("file:///test.kt", 0, 24);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected a Location result for type param T");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		int col = start.get_int("character")!!;
+		assert(line == 0, "expected line 0, got %d", line);
+		assert(col == 5, "expected col 5 (TYPE_PARAM declaration), got %d", col);
+	};
+}
+
+fn void definition_of_type_param_in_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "class Box<T>(val value: T)";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "T" in "val value: T" at col 24
+		Object* params = make_params("file:///test.kt", 0, 24);
+		Object* result = definition::handle_definition(&store, null, params);
+
+		assert(result != null, "expected a Location result for class type param T");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int col = start.get_int("character")!!;
+		assert(col == 10, "expected col 10 (TYPE_PARAM T declaration), got %d", col);
+	};
+}

@@ -601,3 +601,48 @@ fn void member_call_classified_as_function() @test {
 		assert(found, "expected to find 'toString' token");
 	};
 }
+
+// ── Type parameter semantic tokens ─────────────────────────────────
+
+fn void type_param_declaration_gets_type_parameter_token() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "class Box<T>");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+
+		assert(result != null, "expected result");
+		int[] data = get_data(result);
+
+		// Find the T token (type parameter declaration)
+		// Token types: 14 = typeParameter
+		bool found_tp = false;
+		usz i = 0;
+		uint curr_line = 0;
+		uint curr_col = 0;
+		while (i + 4 < data.len) {
+			uint delta_line = (uint)data[i];
+			uint delta_start = (uint)data[i + 1];
+			uint length = (uint)data[i + 2];
+			int token_type = data[i + 3];
+
+			if (delta_line > 0) {
+				curr_line += delta_line;
+				curr_col = delta_start;
+			} else {
+				curr_col += delta_start;
+			}
+
+			// T is at col 10, length 1
+			if (curr_line == 0 && curr_col == 10 && length == 1 && token_type == 14) {
+				found_tp = true;
+			}
+			i += 5;
+		}
+		assert(found_tp, "expected T declaration to be classified as typeParameter (14)");
+	};
+}
