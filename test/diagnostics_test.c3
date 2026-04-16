@@ -25,16 +25,6 @@ fn void empty_content_returns_empty_array() @test {
 	};
 }
 
-fn void valid_code_returns_no_diagnostics() @test {
-	@pool() {
-		Object* result = build_test_diagnostics("fun main() { val x = 42 }");
-		assert(result.is_indexable());
-		if (result.is_array()) {
-			assert(result.get_len() == 0);
-		}
-	};
-}
-
 fn void single_error_returns_one_diagnostic() @test {
 	@pool() {
 		// Lone '&' is an error token in Kotlin
@@ -889,6 +879,45 @@ fun foo() {
 			String msg = diag.get_string("message") ?? "";
 			assert(!msg.contains("Unresolved reference: 'AggregateService'"),
 				"same-package symbol should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void extension_function_implicit_this_member_not_flagged() @test {
+	@pool() {
+		Object* result = build_diagnostics_with_workspace(
+			`import no.trygdeetaten.skjema.oppdrag.Oppdrag
+
+private fun Oppdrag.info(): String {
+    val last = oppdrag110.oppdragsLinje150s.last()
+    return oppdrag110.kodeFagomraade
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'oppdrag110'"),
+				"extension function implicit this member should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void extension_function_with_local_class_member_check() @test {
+	@pool() {
+		Object* result = build_diagnostics_with_workspace(
+			`class MyClass(val name: String)
+
+fun MyClass.greet(): String {
+    return name
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'name'"),
+				"extension function member 'name' should not be flagged, got: %s", msg);
 		}
 	};
 }

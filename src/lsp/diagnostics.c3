@@ -838,6 +838,38 @@ fn bool is_member_of_class(ParseResult* ast, String class_name, String member_na
 }
 
 /**
+ * Check if a NAME_EXPR is inside an extension function/property body and
+ * could refer to an implicit `this` member of the receiver type.
+ *
+ * Walks the parent chain to find an enclosing FUN_DECL or PROPERTY_DECL
+ * with a non-empty extra_text (the receiver type). Then checks if the
+ * name is a member of that receiver class via is_member_of_class.
+ */
+fn bool is_in_extension_function_scope(ParseResult* ast, uint node_idx, String name, WorkspaceIndex* workspace) {
+	uint current = ast.nodes[node_idx].parent;
+	while (current != ast::NO_PARENT) {
+		AstNode* n = &ast.nodes[current];
+		if ((n.kind == FUN_DECL || n.kind == PROPERTY_DECL) && n.extra_text.len > 0) {
+			String receiver = n.extra_text;
+			// Strip nullable suffix for lookup
+			if (receiver.len > 0 && receiver[receiver.len - 1] == '?') {
+				receiver = receiver[:receiver.len - 1];
+			}
+			// Strip type parameters (e.g., "List<String>" -> "List")
+			for (usz k = 0; k < receiver.len; k++) {
+				if (receiver[k] == '<') {
+					receiver = receiver[:k];
+					break;
+				}
+			}
+			return is_member_of_class(ast, receiver, name, workspace);
+		}
+		current = n.parent;
+	}
+	return false;
+}
+
+/**
  * Check if a NAME_EXPR is inside a receiver lambda and refers to a member
  * of the receiver type.
  *
@@ -894,6 +926,10 @@ fn void add_unresolved_reference_diagnostics(Object* diagnostics, String content
 
 		// Skip if this is a named argument label (e.g., `type` in Lib(type = "jar"))
 		if (is_named_argument_label(ast, i)) continue;
+
+		// Skip if inside an extension function and the name could be an
+		// implicit `this` member of the receiver type
+		if (is_in_extension_function_scope(ast, i, name, workspace)) continue;
 
 		// Skip if this name is inside a receiver lambda and refers to a
 		// member of the receiver type (e.g., `src` inside Module.() -> Unit)

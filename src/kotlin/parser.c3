@@ -1201,6 +1201,17 @@ fn void Parser.parse_super_types(Parser* self) {
 			self.node_set_name(ref_idx, name_tok);
 			self.advance();
 
+			// Dot-qualified name: models.Simulering
+			while (self.eat(DOT)) {
+				if (self.at_identifier()) {
+					name_tok = self.current;
+					self.node_set_name(ref_idx, name_tok);
+					self.advance();
+				} else {
+					break;
+				}
+			}
+
 			// Generic arguments: <T, R>
 			if (self.at(LANGLE)) {
 				self.parse_type_args();

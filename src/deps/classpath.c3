@@ -5,6 +5,8 @@ import std::io::file;
 import std::io::path;
 import std::os::env;
 import std::os::process;
+import std::thread;
+import kls::lsp::progress;
 
 // ── Build system detection ─────────────────────────────────────────
 
@@ -205,11 +207,16 @@ fn BuildSystem detect_build_system(String workspace_path) {
 
 // ── Main classpath resolution ──────────────────────────────────────
 
+// Active progress token for reporting Gradle progress to LSP.
+String active_progress_token = "kls-indexing";
+
 /**
  * Detect the build system and resolve the full classpath.
  * This may run external processes (gradle/mvn) and can be slow.
+ * progress_token is the LSP progress token to use for reporting.
  */
-fn void resolve_classpath(Classpath* cp, String workspace_path) {
+fn void resolve_classpath(Classpath* cp, String workspace_path, String progress_token = "kls-indexing") {
+	active_progress_token = progress_token;
 	cp.build_system = detect_build_system(workspace_path);
 
 	io::eprintfn("[kls] Build system: %s", build_system_name(cp.build_system));
@@ -266,8 +273,6 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 			if (init_script.len > 0) mem::free(init_script.ptr);
 		}
 
-		io::eprintfn("[kls] Running: %s -I %s klsClasspath -q", gradle_cmd, init_script);
-
 		// Change to workspace directory, run gradle, restore
 		Path old_cwd;
 		if (try cwd = path::tcwd()) {
@@ -282,24 +287,15 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 			return;
 		}
 
-		char[65536] buf;
-		String output = "";
-		if (try out = process::run_capture_stdout(&buf,
-				{ gradle_cmd, "-I", init_script, "klsClasspath", "-q" },
-				SpawnOptions.INHERIT_ENV)) {
-			output = out;
-		} else {
-			io::eprintfn("[kls] Gradle command failed, trying with 'gradle' fallback");
-			// Try system gradle if wrapper failed
-			if (gradle_cmd != "gradle") {
-				if (try out = process::run_capture_stdout(&buf,
-						{ "gradle", "-I", init_script, "klsClasspath", "-q" },
-						SpawnOptions.INHERIT_ENV)) {
-					output = out;
-				} else {
-					io::eprintfn("[kls] Gradle fallback also failed");
-				}
-			}
+		String output = run_gradle_classpath(gradle_cmd, init_script, false);
+
+		// If the first attempt failed or produced no output, retry with
+		// --no-configuration-cache. This handles projects that enable the
+		// Gradle configuration cache, which forbids Project access at
+		// task execution time.
+		if (output.len == 0 || !has_kls_output(output)) {
+			io::eprintfn("[kls] Retrying with --no-configuration-cache");
+			output = run_gradle_classpath(gradle_cmd, init_script, true);
 		}
 
 		// Restore working directory
@@ -308,6 +304,177 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 		// Parse output: lines starting with "KLS_JAR:" contain JAR paths
 		parse_gradle_output(cp, output);
 	};
+}
+
+/**
+ * Run the Gradle klsClasspath task and capture stdout, streaming stderr
+ * for progress reporting.
+ * If no_config_cache is true, adds --no-configuration-cache flag.
+ * Returns the captured output string (in temp memory).
+ */
+fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_config_cache) {
+	String[] cmd;
+	if (no_config_cache) {
+		io::eprintfn("[kls] Running: %s -I %s klsClasspath -q --no-configuration-cache", gradle_cmd, init_script);
+		cmd = { gradle_cmd, "-I", init_script, "klsClasspath", "-q", "--no-configuration-cache" };
+	} else {
+		io::eprintfn("[kls] Running: %s -I %s klsClasspath -q", gradle_cmd, init_script);
+		cmd = { gradle_cmd, "-I", init_script, "klsClasspath", "-q" };
+	}
+
+	String result = run_gradle_streaming(cmd);
+	if (result.len > 0) return result;
+
+	// If the preferred command failed, try the system gradle fallback
+	if (gradle_cmd != "gradle") {
+		io::eprintfn("[kls] Gradle command failed, trying with 'gradle' fallback");
+		if (no_config_cache) {
+			cmd = { "gradle", "-I", init_script, "klsClasspath", "-q", "--no-configuration-cache" };
+		} else {
+			cmd = { "gradle", "-I", init_script, "klsClasspath", "-q" };
+		}
+		result = run_gradle_streaming(cmd);
+		if (result.len > 0) return result;
+		io::eprintfn("[kls] Gradle fallback also failed");
+	}
+	return "";
+}
+
+/**
+ * Spawn a Gradle process and stream its output. Reads stderr for progress
+ * messages (sent to LSP progress bar) and accumulates stdout for KLS_ lines.
+ * Returns the captured stdout (in temp memory).
+ */
+fn String run_gradle_streaming(String[] cmd) {
+	Process proc;
+	if (try p = process::spawn(cmd, SpawnOptions.ASYNC_OUTPUT | SpawnOptions.INHERIT_ENV)) {
+		proc = p;
+	} else {
+		return "";
+	}
+	defer (void)proc.destroy();
+
+	// Accumulate stdout into a buffer
+	char[65536] stdout_buf;
+	usz stdout_len = 0;
+
+	// Stderr read buffer for progress extraction
+	char[4096] stderr_buf;
+	// Line accumulation buffer for stderr (Gradle lines can be partial)
+	char[512] stderr_line_buf;
+	usz stderr_line_len = 0;
+
+	while (true) {
+		bool running = proc.is_running() ?? false;
+
+		// Read any available stderr (progress messages)
+		while (true) {
+			sz n = proc.read_stderr(&stderr_buf, stderr_buf.len) ?? 0;
+			if (n <= 0) break;
+			// Process stderr bytes, extracting lines for progress
+			for (usz i = 0; i < (usz)n; i++) {
+				char c = stderr_buf[i];
+				if (c == '\n' || c == '\r') {
+					if (stderr_line_len > 0) {
+						String line = (String)stderr_line_buf[:stderr_line_len];
+						report_gradle_progress(line);
+						stderr_line_len = 0;
+					}
+				} else if (stderr_line_len < stderr_line_buf.len) {
+					stderr_line_buf[stderr_line_len] = c;
+					stderr_line_len++;
+				}
+			}
+		}
+
+		// Read any available stdout (KLS_ output)
+		while (stdout_len < stdout_buf.len) {
+			sz n = proc.read_stdout(&stdout_buf[stdout_len], stdout_buf.len - stdout_len) ?? 0;
+			if (n <= 0) break;
+			stdout_len += (usz)n;
+		}
+
+		if (!running) break;
+		thread::sleep_ms(100);
+	}
+
+	// Final drain of stdout after process exit
+	while (stdout_len < stdout_buf.len) {
+		sz n = proc.read_stdout(&stdout_buf[stdout_len], stdout_buf.len - stdout_len) ?? 0;
+		if (n <= 0) break;
+		stdout_len += (usz)n;
+	}
+
+	// Final drain of stderr
+	while (true) {
+		sz n = proc.read_stderr(&stderr_buf, stderr_buf.len) ?? 0;
+		if (n <= 0) break;
+		for (usz i = 0; i < (usz)n; i++) {
+			char c = stderr_buf[i];
+			if (c == '\n' || c == '\r') {
+				if (stderr_line_len > 0) {
+					String line = (String)stderr_line_buf[:stderr_line_len];
+					report_gradle_progress(line);
+					stderr_line_len = 0;
+				}
+			} else if (stderr_line_len < stderr_line_buf.len) {
+				stderr_line_buf[stderr_line_len] = c;
+				stderr_line_len++;
+			}
+		}
+	}
+
+	if (stdout_len == 0) return "";
+	return (String)stdout_buf[:stdout_len];
+}
+
+/**
+ * Extract a meaningful progress message from a Gradle stderr line
+ * and send it to the LSP progress bar.
+ */
+fn void report_gradle_progress(String line) {
+	if (line.len == 0) return;
+
+	// Log all Gradle stderr to KLS log
+	io::eprintfn("[kls] gradle: %s", line);
+
+	// Extract meaningful messages for the progress bar
+	String message = "";
+
+	if (line.starts_with("> Task ")) {
+		// "> Task :app:klsClasspath" -> "Task :app:klsClasspath"
+		message = line[2..];
+	} else if (line.starts_with("Downloading ")) {
+		// "Downloading https://..." -> show it
+		message = line;
+	} else if (line.starts_with("> ")) {
+		// Generic Gradle status line
+		message = line[2..];
+	} else if (line.starts_with("BUILD SUCCESSFUL") || line.starts_with("BUILD FAILED")) {
+		message = line;
+	}
+
+	if (message.len > 0) {
+		// Truncate long messages for the progress bar
+		if (message.len > 80) {
+			message = message[:80];
+		}
+		progress::report(active_progress_token, message, 20);
+	}
+}
+
+/**
+ * Check if Gradle output contains any KLS_ lines (i.e., actual output from our task).
+ */
+fn bool has_kls_output(String output) {
+	usz i = 0;
+	while (i + 4 < output.len) {
+		if (output[i] == 'K' && output[i+1] == 'L' && output[i+2] == 'S' && output[i+3] == '_') {
+			return true;
+		}
+		i++;
+	}
+	return false;
 }
 
 /**
@@ -330,58 +497,66 @@ fn String write_gradle_init_script() {
 
 	String script_content =
 `allprojects {
-    task klsClasspath {
-        doLast {
-            println "KLS_MODULE:" + project.path + "|" + project.projectDir.absolutePath
-            // Emit source roots from all Kotlin/Java source sets
-            def srcDirs = []
-            if (project.hasProperty("sourceSets")) {
-                project.sourceSets.each { ss ->
-                    ss.allSource.srcDirs.each { dir ->
+    afterEvaluate {
+        def modulePath = project.path
+        def moduleDir = project.projectDir.absolutePath
+        def srcDirs = []
+        if (project.hasProperty("sourceSets")) {
+            project.sourceSets.each { ss ->
+                ss.allSource.srcDirs.each { dir ->
+                    if (dir.exists()) srcDirs << dir.absolutePath
+                }
+            }
+        }
+        if (project.hasProperty("android")) {
+            try {
+                project.android.sourceSets.each { ss ->
+                    ss.kotlin.srcDirs.each { dir ->
+                        if (dir.exists()) srcDirs << dir.absolutePath
+                    }
+                    ss.java.srcDirs.each { dir ->
                         if (dir.exists()) srcDirs << dir.absolutePath
                     }
                 }
+            } catch (Exception e) {}
+        }
+        if (srcDirs.isEmpty()) {
+            ["src/main/kotlin", "src/main/java", "src/test/kotlin", "src/test/java"].each {
+                def d = new File(project.projectDir, it)
+                if (d.exists()) srcDirs << d.absolutePath
             }
-            // Android projects use different source set APIs
-            if (project.hasProperty("android")) {
-                try {
-                    project.android.sourceSets.each { ss ->
-                        ss.kotlin.srcDirs.each { dir ->
-                            if (dir.exists()) srcDirs << dir.absolutePath
-                        }
-                        ss.java.srcDirs.each { dir ->
-                            if (dir.exists()) srcDirs << dir.absolutePath
-                        }
+        }
+        srcDirs = srcDirs.unique()
+        def projectDeps = []
+        ["implementation", "api", "compileOnly"].each { configName ->
+            configurations.findByName(configName)?.dependencies?.each { dep ->
+                if (dep instanceof org.gradle.api.artifacts.ProjectDependency) {
+                    try {
+                        def p = dep.path
+                        if (p != null) { projectDeps << p; return }
+                    } catch (Exception e) {}
+                    try {
+                        projectDeps << dep.dependencyProject.path
+                    } catch (Exception e) {
+                        projectDeps << ":" + dep.name
                     }
-                } catch (Exception e) {}
-            }
-            // Fallback: check conventional directories
-            if (srcDirs.isEmpty()) {
-                ["src/main/kotlin", "src/main/java", "src/test/kotlin", "src/test/java"].each {
-                    def d = new File(project.projectDir, it)
-                    if (d.exists()) srcDirs << d.absolutePath
                 }
             }
-            srcDirs.unique().each { println "KLS_SRC:" + it }
-            // Emit project dependencies
-            configurations.findByName("implementation")?.dependencies?.each {
-                if (it instanceof org.gradle.api.artifacts.ProjectDependency) {
-                    println "KLS_DEP:" + it.dependencyProject.path
-                }
-            }
-            configurations.findByName("api")?.dependencies?.each {
-                if (it instanceof org.gradle.api.artifacts.ProjectDependency) {
-                    println "KLS_DEP:" + it.dependencyProject.path
-                }
-            }
-            configurations.findByName("compileOnly")?.dependencies?.each {
-                if (it instanceof org.gradle.api.artifacts.ProjectDependency) {
-                    println "KLS_DEP:" + it.dependencyProject.path
-                }
-            }
-            // Emit external JARs
-            configurations.findByName("compileClasspath")?.resolvedConfiguration?.files?.each {
-                println "KLS_JAR:" + it.absolutePath
+        }
+        def jarFiles = []
+        def cpConfig = configurations.findByName("compileClasspath")
+        if (cpConfig != null && cpConfig.isCanBeResolved()) {
+            try {
+                jarFiles = cpConfig.resolve().collect { it.absolutePath }
+            } catch (Exception e) {}
+        }
+
+        task klsClasspath {
+            doLast {
+                println "KLS_MODULE:" + modulePath + "|" + moduleDir
+                srcDirs.each { println "KLS_SRC:" + it }
+                projectDeps.unique().each { println "KLS_DEP:" + it }
+                jarFiles.each { println "KLS_JAR:" + it }
             }
         }
     }
@@ -463,10 +638,11 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 		} else if (line.starts_with("KLS_JAR:")) {
 			String jar_path = line["KLS_JAR:".len..];
 			if (jar_path.len > 0 && cp.jar_count < 256) {
-				add_jar(cp, jar_path);
-				// Track this JAR as belonging to the current module
-				if (cur_mod >= 0) {
-					cp.modules[(usz)cur_mod].jar_count++;
+				if (add_jar(cp, jar_path)) {
+					// Track this JAR as belonging to the current module
+					if (cur_mod >= 0) {
+						cp.modules[(usz)cur_mod].jar_count++;
+					}
 				}
 			}
 		}
@@ -580,8 +756,13 @@ fn void parse_maven_output(Classpath* cp, String output) {
  * Add a JAR to the classpath. Derives source JAR path and
  * optionally extracts group/artifact/version from the path.
  */
-fn void add_jar(Classpath* cp, String jar_path) {
-	if (cp.jar_count >= 256) return;
+fn bool add_jar(Classpath* cp, String jar_path) {
+	if (cp.jar_count >= 256) return false;
+
+	// Deduplicate: skip if we already have this JAR path
+	for (usz i = 0; i < cp.jar_count; i++) {
+		if (cp.jars[i].path == jar_path) return false;
+	}
 
 	// Derive source JAR path: replace .jar with -sources.jar
 	DString src_ds;
@@ -611,6 +792,7 @@ fn void add_jar(Classpath* cp, String jar_path) {
 	cp.jar_count++;
 
 	io::eprintfn("[kls]   JAR: %s%s", jar_path, has_source ? " (sources available)" : "");
+	return true;
 }
 
 /**

@@ -137,7 +137,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			// Resolve classpath first so module source roots are available
 			// for scan_workspace() to use and for index_file() to assign module_name
 			progress::report("kls-indexing", "Resolving classpath...", 20);
-			classpath::resolve_classpath(&self.workspace.classpath, self.workspace.root_path);
+			classpath::resolve_classpath(&self.workspace.classpath, self.workspace.root_path, "kls-indexing");
 
 			progress::report("kls-indexing", "Scanning workspace...", 40);
 			self.workspace.scan_workspace();
@@ -392,7 +392,7 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 		progress::report("kls-reindex", "Re-resolving classpath...", 20);
 		workspace.classpath.free();
 		workspace.classpath.init();
-		classpath::resolve_classpath(&workspace.classpath, workspace.root_path);
+		classpath::resolve_classpath(&workspace.classpath, workspace.root_path, "kls-reindex");
 
 		// Re-scan workspace with updated module source roots
 		progress::report("kls-reindex", "Re-scanning workspace...", 40);

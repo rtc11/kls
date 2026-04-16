@@ -78,12 +78,29 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 		return build_location_from_node(uri, node);
 	}
 
+	// ── Extension function receiver member navigation ────────────
+	// If the cursor is inside an extension function (fun Receiver.name()),
+	// bare identifiers may refer to implicit `this` members of the receiver.
+	if (try result = find_extension_receiver_member_definition(pr, workspace, target_name, tok.offset, uri)) {
+		return result;
+	}
+
 	// ── Dot-member navigation ────────────────────────────────────
 	// If the token is a member of a DOT_EXPR, resolve the receiver type
 	// and search for the member declaration in the receiver class.
 	TypeInfo* ti = store.get_types(uri) ?? null;
 	if (ti != null) {
 		if (try result = find_dot_member_definition(pr, ti, store, workspace, tok, uri)) {
+			return result;
+		}
+	}
+
+	// ── Import-aware dependency lookup ───────────────────────────
+	// If the file has an explicit import for this name (e.g., import com.example.Foo),
+	// try the dependency index first, filtered by the import's package. This prevents
+	// navigating to a same-named class in a different workspace package.
+	if (workspace != null) {
+		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call)) {
 			return result;
 		}
 	}
@@ -699,6 +716,64 @@ fn bool is_declared_in_lambda_scope(ParseResult* pr, String name, uint cursor_of
  * `Module.() -> Unit`, navigating from `src` should go to Module's `src`
  * property, not to some other `src` in the file.
  */
+/**
+ * Navigate to a member of the extension function's receiver type.
+ *
+ * Inside `fun Receiver.name() { ... }`, bare identifiers like `member`
+ * refer to `this.member` — a member of the Receiver class. Walk up
+ * the parent chain from the NAME_EXPR to find an enclosing FUN_DECL
+ * or PROPERTY_DECL with a receiver type (extra_text), then look up
+ * the member in that class.
+ */
+fn Object*? find_extension_receiver_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
+		String target_name, uint cursor_offset, String current_uri) {
+	// Find the NAME_EXPR at the cursor position
+	uint name_node_idx = ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != NAME_EXPR) continue;
+		if (n.name != target_name) continue;
+		if (cursor_offset >= n.name_offset && cursor_offset < n.name_offset + n.name_len) {
+			name_node_idx = i;
+			break;
+		}
+	}
+	if (name_node_idx == ast::NO_PARENT) return NOT_RECEIVER_MEMBER~;
+
+	// Walk up parent chain to find an extension function/property
+	uint current = pr.nodes[name_node_idx].parent;
+	while (current != ast::NO_PARENT) {
+		AstNode* n = &pr.nodes[current];
+		if ((n.kind == FUN_DECL || n.kind == PROPERTY_DECL) && n.extra_text.len > 0) {
+			String receiver = n.extra_text;
+			// Strip nullable suffix
+			if (receiver.len > 0 && receiver[receiver.len - 1] == '?') {
+				receiver = receiver[:receiver.len - 1];
+			}
+			// Strip type parameters (e.g., "List<String>" -> "List")
+			for (usz k = 0; k < receiver.len; k++) {
+				if (receiver[k] == '<') {
+					receiver = receiver[:k];
+					break;
+				}
+			}
+			// Try same-file AST
+			if (try result = find_member_in_class_ast(pr, receiver, target_name, current_uri)) {
+				return result;
+			}
+			// Try workspace
+			if (workspace != null) {
+				if (try result = find_member_in_workspace_class(workspace, null, receiver, target_name)) {
+					return result;
+				}
+			}
+			return NOT_RECEIVER_MEMBER~;
+		}
+		current = n.parent;
+	}
+	return NOT_RECEIVER_MEMBER~;
+}
+
 fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
 		String target_name, uint cursor_offset, String current_uri) {
 	// Find the NAME_EXPR at the cursor position
@@ -806,6 +881,62 @@ fn String find_receiver_type_for_call_def(ParseResult* pr, uint call_idx) {
 
 faultdef NOT_FOUND_IN_WORKSPACE;
 
+faultdef NOT_FOUND_BY_IMPORT;
+
+/**
+ * If the file has an explicit import for target_name, try the dependency
+ * index filtered by the import's package. This ensures that
+ * `import no.trygdeetaten.skjema.oppdrag.Oppdrag` navigates to the
+ * correct Oppdrag in that package, even if there's a same-named class
+ * elsewhere in the workspace.
+ */
+fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call) {
+	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
+
+	ImportMap imports = workspace::build_import_map(pr);
+
+	// Find the explicit import for this name
+	String import_package = "";
+	for (usz i = 0; i < imports.import_count; i++) {
+		if (imports.is_star[i]) continue;
+		if (imports.import_names[i] == target_name) {
+			import_package = workspace::get_import_package(imports.import_paths[i]);
+			break;
+		}
+	}
+	if (import_package.len == 0) return NOT_FOUND_BY_IMPORT~;
+
+	// Look up in dep index, filtering by the import's package
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(target_name, &matches);
+	if (count == 0) return NOT_FOUND_BY_IMPORT~;
+
+	DepSymbol* best = null;
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].package_name == import_package) {
+			best = matches[i];
+			break;
+		}
+	}
+	if (best == null) return NOT_FOUND_BY_IMPORT~;
+
+	Object* result = source_nav::resolve_dep_definition(best);
+	if (result != null) return result;
+
+	return NOT_FOUND_BY_IMPORT~;
+}
+
+/**
+ * Check if the import map has an explicit (non-star) import for a given name.
+ */
+fn bool has_explicit_import_for(ImportMap* imports, String name) {
+	for (usz i = 0; i < imports.import_count; i++) {
+		if (imports.is_star[i]) continue;
+		if (imports.import_names[i] == name) return true;
+	}
+	return false;
+}
+
 /**
  * Look up a definition in the workspace index. Searches all indexed files
  * for a symbol matching the target name. In call context, prefers FUNCTION
@@ -862,13 +993,18 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 	}
 
 	// Prefer file-name-matching > imported > any visible
+	// When the file has an explicit import for this name but no workspace symbol
+	// matched that import's package, don't fall back to first_match -- the symbol
+	// is likely from an external dependency (JAR) and the first_match would be wrong.
+	bool has_explicit = has_explicit_import_for(&imports, target_name);
+
 	WorkspaceSymbol* chosen = null;
 	if (is_call) {
 		if (imported_file_func_match != null) {
 			chosen = imported_file_func_match;
 		} else if (imported_func_match != null) {
 			chosen = imported_func_match;
-		} else {
+		} else if (!has_explicit) {
 			chosen = func_match;
 		}
 	} else {
@@ -876,7 +1012,7 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 			chosen = imported_file_match;
 		} else if (imported_match != null) {
 			chosen = imported_match;
-		} else {
+		} else if (!has_explicit) {
 			chosen = first_match;
 		}
 	}

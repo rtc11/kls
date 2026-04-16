@@ -1180,3 +1180,109 @@ fun foo(s: Simulering) {}`;
 			"expected Simulering.kt, got %s", uri);
 	};
 }
+
+// ── Extension function receiver member navigation ──────────────────
+
+fn void definition_extension_function_receiver_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class with a member
+		ws.index_file("file:///Oppdrag.kt",
+			"package oppdrag\ndata class Oppdrag(val oppdrag110: Oppdrag110)");
+
+		// File with an extension function on Oppdrag
+		String content =
+`import oppdrag.Oppdrag
+
+fun Oppdrag.info(): String {
+    return oppdrag110.toString()
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "oppdrag110" at line 3 ("    return oppdrag110.toString()")
+		Object* params = make_params("file:///test.kt", 3, 11);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		assert(result != null, "expected a Location for extension receiver member");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///Oppdrag.kt",
+			"expected Oppdrag.kt, got %s", uri);
+	};
+}
+
+fn void definition_extension_function_local_shadows_receiver() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///MyClass.kt",
+			"package pkg\nclass MyClass(val name: String)");
+
+		// Local `name` should shadow the receiver member
+		String content =
+`import pkg.MyClass
+
+fun MyClass.greet(): String {
+    val name = "local"
+    return name
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "name" at line 4 ("    return name")
+		Object* params = make_params("file:///test.kt", 4, 11);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		assert(result != null, "expected a Location for local name");
+		// Should resolve to the local val on line 3, NOT the workspace member
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///test.kt",
+			"local should shadow receiver member, got %s", uri);
+	};
+}
+
+// ── Explicit import prevents wrong workspace fallback ──────────────
+
+fn void definition_explicit_import_prevents_wrong_workspace_match() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class with the same name but in a different package
+		ws.index_file("file:///wrong/WrongOppdrag.kt",
+			"package wrong.pkg\ndata class Oppdrag(val x: Int)");
+
+		// The file has an explicit import for a DIFFERENT package's Oppdrag
+		String content =
+`import no.trygdeetaten.skjema.oppdrag.Oppdrag
+
+fun foo(o: Oppdrag) {}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "Oppdrag" at line 2
+		Object* params = make_params("file:///test.kt", 2, 11);
+		Object* result = definition::handle_definition(&store, &ws, params);
+
+		// Should NOT resolve to the wrong package's Oppdrag
+		// Since the correct one is external (not in workspace), result should be null
+		// (or resolved via deps, which we don't have in this test)
+		if (result != null) {
+			String uri = result.get_string("uri") ?? "";
+			assert(uri != "file:///wrong/WrongOppdrag.kt",
+				"should not navigate to wrong-package Oppdrag, got %s", uri);
+		}
+	};
+}
