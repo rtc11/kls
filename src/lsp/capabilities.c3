@@ -42,6 +42,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Go to definition support
 	caps.set("definitionProvider", true);
 
+	// Go to type definition support
+	caps.set("typeDefinitionProvider", true);
+
 	// Go to implementation support
 	caps.set("implementationProvider", true);
 

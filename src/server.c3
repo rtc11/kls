@@ -18,6 +18,7 @@ import kls::lsp::signature_help;
 import kls::lsp::semantic_tokens;
 import kls::lsp::workspace_symbols;
 import kls::lsp::rename;
+import kls::lsp::type_definition;
 import kls::lsp::implementation;
 import kls::lsp::folding_range;
 import kls::lsp::selection_range;
@@ -208,6 +209,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/definition":
 			if (params != null) {
 				Object* result = definition::handle_definition(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/typeDefinition":
+			if (params != null) {
+				Object* result = type_definition::handle_type_definition(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
