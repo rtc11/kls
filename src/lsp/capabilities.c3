@@ -96,6 +96,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Call hierarchy support (prepare + incoming/outgoing)
 	caps.set("callHierarchyProvider", true);
 
+	// Type hierarchy support (prepare + supertypes/subtypes)
+	caps.set("typeHierarchyProvider", true);
+
 	// Workspace capabilities
 	Object* workspace_caps = object::new_obj(tmem);
 	Object* file_operations = object::new_obj(tmem);

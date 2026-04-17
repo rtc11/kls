@@ -62,6 +62,7 @@ kls/
       folding_range.c3        # kls::lsp::folding_range - textDocument/foldingRange (AST nodes, imports, comments)
       rename.c3               # kls::lsp::rename - textDocument/rename + prepareRename (cross-file)
       implementation.c3       # kls::lsp::implementation - textDocument/implementation (in-file, workspace, deps)
+      type_hierarchy.c3       # kls::lsp::type_hierarchy - textDocument/prepareTypeHierarchy, typeHierarchy/supertypes, typeHierarchy/subtypes
       workspace_symbols.c3    # kls::lsp::workspace_symbols - workspace/symbol (fuzzy query)
       document_highlight.c3   # kls::lsp::document_highlight - textDocument/documentHighlight (read/write)
     kotlin/
@@ -110,6 +111,7 @@ kls/
     folding_range_test.c3     # Folding range tests
     rename_test.c3            # Rename tests
     implementation_test.c3    # Implementation tests
+    type_hierarchy_test.c3    # Type hierarchy tests
     workspace_symbols_test.c3 # Workspace symbols tests
     document_highlight_test.c3 # Document highlight tests
     javadoc_test.c3           # Javadoc extraction tests
@@ -313,7 +315,8 @@ Content-Length: <byte-count>\r\n
 19. **Implementation**: textDocument/implementation (find implementors, in-file + workspace + deps)
 20. **Workspace symbols**: workspace/symbol (fuzzy query across workspace)
 21. **Document highlight**: textDocument/documentHighlight (read/write classification)
-22. **Progress**: $/progress (work done progress reporting)
+22. **Type hierarchy**: textDocument/prepareTypeHierarchy, typeHierarchy/supertypes, typeHierarchy/subtypes
+23. **Progress**: $/progress (work done progress reporting)
 
 ## Kotlin Grammar Reference
 
