@@ -616,36 +616,41 @@ fn void WorkspaceIndex.scan_workspace(WorkspaceIndex* self) {
 }
 
 fn void scan_directory_recursive(WorkspaceIndex* idx, Path dir, usz* file_count) {
-	PathList entry_list;
-	if (try list = path::ls(tmem, dir)) {
-		entry_list = list;
-	} else {
-		return;
-	}
-
-	foreach (entry : entry_list) {
-		String entry_name = entry.basename();
-
-		// Skip hidden entries and common non-source dirs
-		if (entry_name.len > 0 && entry_name[0] == '.') continue;
-		if (entry_name == "build" || entry_name == "out" || entry_name == "node_modules") continue;
-
-		Path full;
-		if (try f = dir.tappend(entry_name)) {
-			full = f;
+	// Use @pool to free temp allocations (directory listings, path objects)
+	// per directory, preventing temp allocator exhaustion on large workspaces.
+	@pool() {
+		PathList entry_list;
+		if (try list = path::ls(tmem, dir)) {
+			entry_list = list;
 		} else {
-			continue;
+			return;
 		}
 
-		if (path::is_dir(full)) {
-			// Recurse into subdirectory
-			scan_directory_recursive(idx, full, file_count);
-		} else if (entry_name.len > 3 && entry_name[entry_name.len - 3..] == ".kt") {
-			// Index .kt file
-			String full_str = full.str_view();
-			index_file_from_disk(idx, full_str, file_count);
+		foreach (entry : entry_list) {
+			String entry_name = entry.basename();
+
+			// Skip hidden entries and common non-source dirs
+			if (entry_name.len > 0 && entry_name[0] == '.') continue;
+			if (entry_name == "build" || entry_name == "out" || entry_name == "node_modules") continue;
+
+			Path full;
+			if (try f = dir.tappend(entry_name)) {
+				full = f;
+			} else {
+				continue;
+			}
+
+			if (path::is_dir(full)) {
+				// Recurse into subdirectory
+				scan_directory_recursive(idx, full, file_count);
+			} else if (entry_name.len > 3 && entry_name[entry_name.len - 3..] == ".kt") {
+				// Index .kt file -- heap-copy path before pool reset
+				String full_str = full.str_view().copy(mem);
+				defer mem::free(full_str.ptr);
+				index_file_from_disk(idx, full_str, file_count);
+			}
 		}
-	}
+	};
 }
 
 fn void index_file_from_disk(WorkspaceIndex* idx, String file_path, usz* file_count) {
@@ -659,11 +664,16 @@ fn void index_file_from_disk(WorkspaceIndex* idx, String file_path, usz* file_co
 	}
 	defer mem::free(data.ptr);
 
-	String content = (String)data;
-	String uri = path_to_uri(file_path);
-	String uri_copy = uri.tcopy();
+	// Pool per file: URI construction and index_file internals use tmem.
+	// Without this, temp allocations accumulate across all files and
+	// eventually exhaust the temp allocator, silently dropping files.
+	@pool() {
+		String content = (String)data;
+		String uri = path_to_uri(file_path);
+		String uri_copy = uri.tcopy();
 
-	idx.index_file(uri_copy, content);
+		idx.index_file(uri_copy, content);
+	};
 	(*file_count)++;
 }
 

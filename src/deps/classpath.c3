@@ -331,6 +331,16 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
  * Returns the captured output string (in temp memory).
  */
 fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_config_cache) {
+	// Build the output file path
+	DString out_path_ds;
+	out_path_ds.tinit();
+	if (try tmpdir = env::tget_var("TMPDIR")) {
+		out_path_ds.appendf("%s/kls-gradle-output.txt", tmpdir);
+	} else {
+		out_path_ds.appendf("/tmp/kls-gradle-output.txt");
+	}
+	String output_file = out_path_ds.str_view();
+
 	String[] cmd;
 	if (no_config_cache) {
 		log::debug("[kls] Running: %s -I %s klsClasspath -q --no-configuration-cache", gradle_cmd, init_script);
@@ -340,8 +350,14 @@ fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_co
 		cmd = { gradle_cmd, "-I", init_script, "klsClasspath", "-q" };
 	}
 
-	String result = run_gradle_streaming(cmd);
-	if (result.len > 0) return result;
+	run_gradle_streaming(cmd);
+
+	// Read output from file instead of stdout pipe (avoids 64KB pipe buffer limit)
+	String result = read_file_to_heap(output_file);
+	if (result.len > 0) {
+		log::info("[kls] Gradle output: %d bytes (from file)", (int)result.len);
+		return result;
+	}
 
 	// If the preferred command failed, try the system gradle fallback
 	if (gradle_cmd != "gradle") {
@@ -351,7 +367,8 @@ fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_co
 		} else {
 			cmd = { "gradle", "-I", init_script, "klsClasspath", "-q" };
 		}
-		result = run_gradle_streaming(cmd);
+		run_gradle_streaming(cmd);
+		result = read_file_to_heap(output_file);
 		if (result.len > 0) return result;
 		log::err("[kls] Gradle fallback also failed");
 	}
@@ -359,38 +376,69 @@ fn String run_gradle_classpath(String gradle_cmd, String init_script, bool no_co
 }
 
 /**
- * Spawn a Gradle process and stream its output. Reads stderr for progress
- * messages (sent to LSP progress bar) and accumulates stdout for KLS_ lines.
- * Returns the captured stdout (in temp memory).
+ * Spawn a Gradle process and stream stderr for progress reporting.
+ * KLS_ output goes to a file (via init script), so stdout is just drained.
  */
-fn String run_gradle_streaming(String[] cmd) {
+fn void run_gradle_streaming(String[] cmd) {
 	Process proc;
 	if (try p = process::spawn(cmd, SpawnOptions.ASYNC_OUTPUT | SpawnOptions.INHERIT_ENV)) {
 		proc = p;
 	} else {
-		return "";
+		return;
 	}
 	defer (void)proc.destroy();
 
-	// Accumulate stdout into a buffer
-	char[65536] stdout_buf;
-	usz stdout_len = 0;
-
-	// Stderr read buffer for progress extraction
+	// Drain buffers
+	char[8192] drain_buf;
 	char[4096] stderr_buf;
-	// Line accumulation buffer for stderr (Gradle lines can be partial)
 	char[512] stderr_line_buf;
 	usz stderr_line_len = 0;
 
 	while (true) {
 		bool running = proc.is_running() ?? false;
 
-		// Read any available stderr (progress messages)
-		while (true) {
-			sz n = proc.read_stderr(&stderr_buf, stderr_buf.len) ?? 0;
-			if (n <= 0) break;
-			// Process stderr bytes, extracting lines for progress
-			for (usz i = 0; i < (usz)n; i++) {
+		bool got_data = true;
+		while (got_data) {
+			got_data = false;
+
+			// Drain stderr for progress
+			sz n_err = proc.read_stderr(&stderr_buf, stderr_buf.len) ?? 0;
+			if (n_err > 0) {
+				got_data = true;
+				for (usz i = 0; i < (usz)n_err; i++) {
+					char c = stderr_buf[i];
+					if (c == '\n' || c == '\r') {
+						if (stderr_line_len > 0) {
+							String line = (String)stderr_line_buf[:stderr_line_len];
+							report_gradle_progress(line);
+							stderr_line_len = 0;
+						}
+					} else if (stderr_line_len < stderr_line_buf.len) {
+						stderr_line_buf[stderr_line_len] = c;
+						stderr_line_len++;
+					}
+				}
+			}
+
+			// Drain stdout to prevent pipe buffer filling
+			sz n_out = proc.read_stdout(&drain_buf, drain_buf.len) ?? 0;
+			if (n_out > 0) got_data = true;
+		}
+
+		if (!running) break;
+		thread::sleep_ms(50);
+	}
+
+	// Final drain
+	bool got_final = true;
+	while (got_final) {
+		got_final = false;
+		sz n = proc.read_stdout(&drain_buf, drain_buf.len) ?? 0;
+		if (n > 0) got_final = true;
+		sz n2 = proc.read_stderr(&stderr_buf, stderr_buf.len) ?? 0;
+		if (n2 > 0) {
+			got_final = true;
+			for (usz i = 0; i < (usz)n2; i++) {
 				char c = stderr_buf[i];
 				if (c == '\n' || c == '\r') {
 					if (stderr_line_len > 0) {
@@ -404,46 +452,7 @@ fn String run_gradle_streaming(String[] cmd) {
 				}
 			}
 		}
-
-		// Read any available stdout (KLS_ output)
-		while (stdout_len < stdout_buf.len) {
-			sz n = proc.read_stdout(&stdout_buf[stdout_len], stdout_buf.len - stdout_len) ?? 0;
-			if (n <= 0) break;
-			stdout_len += (usz)n;
-		}
-
-		if (!running) break;
-		thread::sleep_ms(100);
 	}
-
-	// Final drain of stdout after process exit
-	while (stdout_len < stdout_buf.len) {
-		sz n = proc.read_stdout(&stdout_buf[stdout_len], stdout_buf.len - stdout_len) ?? 0;
-		if (n <= 0) break;
-		stdout_len += (usz)n;
-	}
-
-	// Final drain of stderr
-	while (true) {
-		sz n = proc.read_stderr(&stderr_buf, stderr_buf.len) ?? 0;
-		if (n <= 0) break;
-		for (usz i = 0; i < (usz)n; i++) {
-			char c = stderr_buf[i];
-			if (c == '\n' || c == '\r') {
-				if (stderr_line_len > 0) {
-					String line = (String)stderr_line_buf[:stderr_line_len];
-					report_gradle_progress(line);
-					stderr_line_len = 0;
-				}
-			} else if (stderr_line_len < stderr_line_buf.len) {
-				stderr_line_buf[stderr_line_len] = c;
-				stderr_line_len++;
-			}
-		}
-	}
-
-	if (stdout_len == 0) return "";
-	return (String)stdout_buf[:stdout_len];
 }
 
 /**
@@ -514,7 +523,9 @@ fn String write_gradle_init_script() {
 	String script_path = path_ds.str_view();
 
 	String script_content =
-`allprojects {
+`def klsOut = new File(System.getenv("TMPDIR") ?: "/tmp", "kls-gradle-output.txt")
+klsOut.text = ""
+allprojects {
     afterEvaluate {
         def modulePath = project.path
         def moduleDir = project.projectDir.absolutePath
@@ -572,10 +583,10 @@ fn String write_gradle_init_script() {
 
         task klsClasspath {
             doLast {
-                println "KLS_MODULE:" + modulePath + "|" + moduleDir
-                srcDirs.each { println "KLS_SRC:" + modulePath + "|" + it }
-                projectDeps.unique().each { println "KLS_DEP:" + modulePath + "|" + it }
-                jarFiles.each { println "KLS_JAR:" + modulePath + "|" + it }
+                klsOut.append("KLS_MODULE:" + modulePath + "|" + moduleDir + "\n")
+                srcDirs.each { klsOut.append("KLS_SRC:" + modulePath + "|" + it + "\n") }
+                projectDeps.unique().each { klsOut.append("KLS_DEP:" + modulePath + "|" + it + "\n") }
+                jarFiles.each { klsOut.append("KLS_JAR:" + modulePath + "|" + it + "\n") }
             }
         }
     }
@@ -951,6 +962,35 @@ fn usz split_path_parts(String path, String[] out_buf, usz max_parts) {
 /**
  * Write content to a file. Simple wrapper around file operations.
  */
+/**
+ * Read an entire file into a heap-allocated String.
+ * Returns empty string on failure.
+ */
+fn String read_file_to_heap(String path) {
+	File f;
+	if (try opened = file::open(path, "rb")) {
+		f = opened;
+	} else {
+		return "";
+	}
+	defer (void)f.close();
+
+	// Get file size
+	usz size = (usz)(f.size() ?? 0);
+
+	if (size == 0) return "";
+
+	// Allocate heap buffer and read
+	char[] buf = mem::new_array(char, size);
+	usz total = 0;
+	while (total < size) {
+		sz n = f.read(buf[total..size - 1]) ?? 0;
+		if (n <= 0) break;
+		total += (usz)n;
+	}
+	return (String)buf[:total];
+}
+
 fn void? write_string_to_file(String path, String content) {
 	File f = file::open(path, "wb")!;
 	f.write(content)!;

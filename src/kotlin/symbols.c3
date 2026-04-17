@@ -43,13 +43,21 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 
 	Lexer lex = lexer::init(content);
 	usz count = 0;
+	int brace_depth = 0;  // track nesting: only top-level fun/val/var are importable
 
 	while (count < out_buf.len) {
 		Token tok = lex.next();
 		if (tok.kind == EOF) break;
 
+		// Track brace depth for nesting awareness
+		if (tok.kind == LCURL) { brace_depth++; continue; }
+		if (tok.kind == RCURL) { if (brace_depth > 0) brace_depth--; continue; }
+
 		switch (tok.kind) {
 			case KW_FUN:
+				// Skip nested functions (local funs, class members -- members
+				// are found via member_cache from the full parser).
+				if (brace_depth > 0) break;
 				if (try sym = scan_fun_name(&lex)) {
 					out_buf[count] = sym;
 					count++;
@@ -79,6 +87,8 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 			case KW_VAL:
 				nextcase;
 			case KW_VAR:
+				// Skip nested properties (locals, class members).
+				if (brace_depth > 0) break;
 				if (try sym = scan_property_name(&lex)) {
 					out_buf[count] = sym;
 					count++;

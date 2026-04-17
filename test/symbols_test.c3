@@ -278,23 +278,15 @@ interface Quux {}
 object Singleton {}`;
 		Symbol[16] buf;
 		usz count = symbols::scan_declarations(content, &buf);
-		// Foo, x, y, bar, baz, Quux, Singleton = 7
-		assert(count == 7, "expected 7 symbols, got %d", (int)count);
+		// Foo, Quux, Singleton = 3 (nested val/var/fun skipped at brace depth > 0)
+		assert(count == 3, "expected 3 symbols, got %d", (int)count);
 
 		assert(buf[0].name == "Foo", "expected 'Foo', got '%s'", buf[0].name);
 		assert(buf[0].kind == SymbolKind.CLASS);
-		assert(buf[1].name == "x", "expected 'x', got '%s'", buf[1].name);
-		assert(buf[1].kind == SymbolKind.PROPERTY);
-		assert(buf[2].name == "y", "expected 'y', got '%s'", buf[2].name);
-		assert(buf[2].kind == SymbolKind.PROPERTY);
-		assert(buf[3].name == "bar", "expected 'bar', got '%s'", buf[3].name);
-		assert(buf[3].kind == SymbolKind.FUNCTION);
-		assert(buf[4].name == "baz", "expected 'baz', got '%s'", buf[4].name);
-		assert(buf[4].kind == SymbolKind.FUNCTION);
-		assert(buf[5].name == "Quux", "expected 'Quux', got '%s'", buf[5].name);
-		assert(buf[5].kind == SymbolKind.INTERFACE);
-		assert(buf[6].name == "Singleton", "expected 'Singleton', got '%s'", buf[6].name);
-		assert(buf[6].kind == SymbolKind.OBJECT);
+		assert(buf[1].name == "Quux", "expected 'Quux', got '%s'", buf[1].name);
+		assert(buf[1].kind == SymbolKind.INTERFACE);
+		assert(buf[2].name == "Singleton", "expected 'Singleton', got '%s'", buf[2].name);
+		assert(buf[2].kind == SymbolKind.OBJECT);
 	};
 }
 
