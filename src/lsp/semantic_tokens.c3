@@ -5,6 +5,7 @@ import kls::document;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::log;
 
 // Maximum tokens we'll encode per document.
 const usz MAX_TOKENS = 16384;
@@ -239,7 +240,190 @@ fn Object* handle_semantic_tokens_full(DocumentStore* store, Object* params) {
 		return null;
 	}
 
-	return encode_semantic_tokens(doc.content, pr);
+	Object* result = encode_semantic_tokens(doc.content, pr, 0, uint.max);
+
+	// Cache the result data for delta support
+	cache_result_data(doc, result);
+
+	return result;
+}
+
+// ── textDocument/semanticTokens/range ─────────────────────────────
+
+/**
+ * Handle textDocument/semanticTokens/range request.
+ * Returns tokens only within the requested line range.
+ */
+fn Object* handle_semantic_tokens_range(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!!;
+	String uri = td.get_string("uri")!!;
+
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) return null;
+
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) return null;
+
+	// Extract range
+	Object* range = params.get("range")!!;
+	Object* range_start = range.get("start")!!;
+	Object* range_end = range.get("end")!!;
+	uint start_line = (uint)range_start.get_int("line")!!;
+	uint end_line = (uint)range_end.get_int("line")!!;
+
+	return encode_semantic_tokens(doc.content, pr, start_line, end_line);
+}
+
+// ── textDocument/semanticTokens/full/delta ────────────────────────
+
+/**
+ * Handle textDocument/semanticTokens/full/delta request.
+ * If previousResultId matches cached data, returns a SemanticTokensDelta
+ * with minimal edits. Otherwise falls back to full response.
+ */
+fn Object* handle_semantic_tokens_delta(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!!;
+	String uri = td.get_string("uri")!!;
+
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) return null;
+
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) return null;
+
+	// Compute new tokens
+	Object* new_result = encode_semantic_tokens(doc.content, pr, 0, uint.max);
+	Object* new_data = new_result.get("data")!!;
+
+	// Check for previous result
+	String prev_id_str = "";
+	if (try pid = params.get_string("previousResultId")) {
+		prev_id_str = pid;
+	}
+
+	SemanticTokensCache* cached = doc.cached_semantic;
+	if (cached != null && prev_id_str.len > 0) {
+		// Parse previous result ID
+		int prev_id = 0;
+		bool parsed_ok = false;
+		if (try v = prev_id_str.to_int()) {
+			prev_id = v;
+			parsed_ok = true;
+		}
+
+		if (parsed_ok && prev_id == cached.result_id) {
+			// Compute delta between cached and new
+			// Extract new data as int array (heap-allocated, too large for stack)
+			usz new_len = new_data.get_len();
+			int* new_ints = mem::alloc_array(int, document::MAX_SEMANTIC_DATA);
+			defer mem::free(new_ints);
+			usz new_int_count = 0;
+			for (usz i = 0; i < new_len && i < document::MAX_SEMANTIC_DATA; i++) {
+				new_ints[i] = new_data.get_int_at((sz)i) ?? 0;
+				new_int_count++;
+			}
+
+			// Find first difference
+			usz min_len = cached.data_len < new_int_count ? cached.data_len : new_int_count;
+			usz first_diff = min_len;
+			for (usz i = 0; i < min_len; i++) {
+				if (cached.data[i] != new_ints[i]) {
+					first_diff = i;
+					break;
+				}
+			}
+
+			// Find last matching suffix
+			usz old_tail = cached.data_len;
+			usz new_tail = new_int_count;
+			while (old_tail > first_diff && new_tail > first_diff) {
+				if (cached.data[old_tail - 1] != new_ints[new_tail - 1]) break;
+				old_tail--;
+				new_tail--;
+			}
+
+			// Cache new result
+			cache_result_data(doc, new_result);
+
+			// If no differences, return empty edits
+			if (first_diff == old_tail && first_diff == new_tail) {
+				Object* delta = object::new_obj(tmem);
+				DString rid;
+				rid.tinit();
+				rid.appendf("%d", doc.cached_semantic.result_id);
+				delta.set("resultId", rid.str_view());
+				Object* edits = object::new_obj(tmem);
+				delta.set("edits", edits);
+				return delta;
+			}
+
+			// Build single edit
+			Object* edit = object::new_obj(tmem);
+			edit.set("start", (int)first_diff);
+			edit.set("deleteCount", (int)(old_tail - first_diff));
+
+			Object* edit_data = object::new_obj(tmem);
+			for (usz i = first_diff; i < new_tail; i++) {
+				edit_data.push(object::new_int(new_ints[i], tmem));
+			}
+			edit.set("data", edit_data);
+
+			Object* edits = object::new_obj(tmem);
+			edits.push(edit);
+
+			Object* delta = object::new_obj(tmem);
+			DString rid;
+			rid.tinit();
+			rid.appendf("%d", doc.cached_semantic.result_id);
+			delta.set("resultId", rid.str_view());
+			delta.set("edits", edits);
+
+			log::debug("[semanticTokens] delta: start=%d deleteCount=%d insertCount=%d",
+				(int)first_diff, (int)(old_tail - first_diff), (int)(new_tail - first_diff));
+
+			return delta;
+		}
+	}
+
+	// Fallback: return full result
+	cache_result_data(doc, new_result);
+	return new_result;
+}
+
+// ── Cache helpers ─────────────────────────────────────────────────
+
+/**
+ * Global result ID counter for semantic tokens delta support.
+ */
+int g_next_result_id = 1;
+
+/**
+ * Cache the semantic token data array from a result object into the document.
+ * Assigns a new resultId and sets it on the result object.
+ */
+fn void cache_result_data(Document* doc, Object* result) {
+	if (doc.cached_semantic == null) {
+		doc.cached_semantic = mem::new(SemanticTokensCache);
+	}
+
+	SemanticTokensCache* cache = doc.cached_semantic;
+	cache.result_id = g_next_result_id++;
+	cache.data_len = 0;
+
+	Object* data = result.get("data") ?? null;
+	if (data != null) {
+		usz len = data.get_len();
+		for (usz i = 0; i < len && i < document::MAX_SEMANTIC_DATA; i++) {
+			cache.data[i] = data.get_int_at((sz)i) ?? 0;
+			cache.data_len++;
+		}
+	}
+
+	// Set resultId on the response
+	DString rid;
+	rid.tinit();
+	rid.appendf("%d", cache.result_id);
+	result.set("resultId", rid.str_view());
 }
 
 /**
@@ -251,7 +435,7 @@ fn Object* handle_semantic_tokens_full(DocumentStore* store, Object* params) {
  *
  * Returns a SemanticTokens object: { "data": [ ... ] }
  */
-fn Object* encode_semantic_tokens(String content, ParseResult* pr) {
+fn Object* encode_semantic_tokens(String content, ParseResult* pr, uint start_line, uint end_line) {
 	Object* data = object::new_obj(tmem); // JSON array
 
 	if (content.len == 0) {
@@ -276,6 +460,15 @@ fn Object* encode_semantic_tokens(String content, ParseResult* pr) {
 	while (token_count < MAX_TOKENS) {
 		Token tok = lex.next_all();
 		if (tok.kind == EOF) break;
+
+		// Range filtering: skip tokens before start_line, stop after end_line
+		if (tok.line > end_line) break;
+		if (tok.line < start_line) {
+			// Still need to track prev_line/prev_col for tokens we might emit later
+			// that are on the boundary. But since we skip, we only need to update
+			// if we have NOT emitted anything yet.
+			continue;
+		}
 
 		int token_type = map_token_type(tok.kind);
 
@@ -507,7 +700,14 @@ fn Object* build_semantic_tokens_options() {
 
 	Object* opts = object::new_obj(tmem);
 	opts.set("legend", legend);
-	opts.set("full", true);
+
+	// Full with delta support
+	Object* full_opts = object::new_obj(tmem);
+	full_opts.set("delta", true);
+	opts.set("full", full_opts);
+
+	// Range support
+	opts.set("range", true);
 
 	return opts;
 }

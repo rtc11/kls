@@ -304,7 +304,7 @@ Content-Length: <byte-count>\r\n
 6. **Go to definition**: textDocument/definition (scope-aware, cross-file, dep source navigation)
 7. **Find references**: textDocument/references (lexer-based, AST filtering, cross-file)
 8. **Document symbols**: textDocument/documentSymbol (hierarchical)
-9. **Semantic tokens**: textDocument/semanticTokens/full (AST-enhanced)
+9. **Semantic tokens**: textDocument/semanticTokens/full, semanticTokens/full/delta, semanticTokens/range (AST-enhanced)
 10. **Code actions**: textDocument/codeAction (quickfixes, organize imports)
 11. **Type definition**: textDocument/typeDefinition (jump to type of symbol)
 12. **Code lens**: textDocument/codeLens (Run main, Run Test on @Test)

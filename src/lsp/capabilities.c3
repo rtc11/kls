@@ -65,7 +65,7 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	rename_opts.set("prepareProvider", true);
 	caps.set("renameProvider", rename_opts);
 
-	// Semantic tokens support (full document)
+	// Semantic tokens support (full with delta + range)
 	caps.set("semanticTokensProvider", semantic_tokens::build_semantic_tokens_options());
 
 	// Folding range support

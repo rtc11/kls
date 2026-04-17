@@ -391,9 +391,14 @@ fn void capability_options_has_legend() @test {
 		// Modifiers should be empty
 		assert(modifiers.get_len() == 0, "expected 0 modifiers, got %d", (int)modifiers.get_len());
 
-		// full should be true
-		bool full = opts.get_bool("full")!!;
-		assert(full, "expected full=true");
+		// full should be an object with delta=true
+		Object* full = opts.get("full")!!;
+		bool delta = full.get_bool("delta")!!;
+		assert(delta, "expected full.delta=true");
+
+		// range should be true
+		bool range = opts.get_bool("range")!!;
+		assert(range, "expected range=true");
 	};
 }
 
@@ -644,5 +649,201 @@ fn void type_param_declaration_gets_type_parameter_token() @test {
 			i += 5;
 		}
 		assert(found_tp, "expected T declaration to be classified as typeParameter (14)");
+	};
+}
+
+// ── Range: only tokens in requested range ──────────────────────────
+
+fn Object* make_range_params(String uri, int start_line, int start_char, int end_line, int end_char) {
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+
+	Object* start = object::new_obj(tmem);
+	start.set("line", start_line);
+	start.set("character", start_char);
+
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", end_line);
+	end_pos.set("character", end_char);
+
+	Object* range = object::new_obj(tmem);
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	Object* params = object::new_obj(tmem);
+	params.set("textDocument", td);
+	params.set("range", range);
+	return params;
+}
+
+fn void range_returns_subset_of_tokens() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// 3 lines: line 0 = "val x = 1", line 1 = "val y = 2", line 2 = "val z = 3"
+		store.open("file:///test.kt", "kotlin", 1, "val x = 1\nval y = 2\nval z = 3");
+
+		// Full tokens
+		Object* full_params = make_params("file:///test.kt");
+		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		int[] full_data = get_data(full_result);
+
+		// Range: only line 1
+		Object* range_params = make_range_params("file:///test.kt", 1, 0, 1, 9);
+		Object* range_result = semantic_tokens::handle_semantic_tokens_range(&store, range_params);
+
+		assert(range_result != null, "expected range result");
+		int[] range_data = get_data(range_result);
+
+		// Range should have fewer tokens than full
+		assert(range_data.len < full_data.len,
+			"range should have fewer ints than full: range=%d full=%d",
+			(int)range_data.len, (int)full_data.len);
+
+		// Range should have tokens (val, y, =, 2 on line 1)
+		assert(range_data.len > 0, "range should not be empty");
+		assert(range_data.len % 5 == 0, "range data should be multiple of 5");
+	};
+}
+
+fn void range_empty_range_returns_empty() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val x = 1\nval y = 2");
+
+		// Range on line 99 (beyond end)
+		Object* params = make_range_params("file:///test.kt", 99, 0, 99, 0);
+		Object* result = semantic_tokens::handle_semantic_tokens_range(&store, params);
+
+		assert(result != null, "expected result");
+		int[] data = get_data(result);
+		assert(data.len == 0, "expected empty data for out-of-range, got %d", (int)data.len);
+	};
+}
+
+// ── Delta: full result includes resultId ───────────────────────────
+
+fn void full_result_has_result_id() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+
+		Object* params = make_params("file:///test.kt");
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+
+		assert(result != null);
+		String rid = result.get_string("resultId")!!;
+		assert(rid.len > 0, "expected non-empty resultId");
+	};
+}
+
+// ── Delta: no change returns empty edits ───────────────────────────
+
+fn Object* make_delta_params(String uri, String previous_result_id) {
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+
+	Object* params = object::new_obj(tmem);
+	params.set("textDocument", td);
+	params.set("previousResultId", previous_result_id);
+	return params;
+}
+
+fn void delta_no_change_returns_empty_edits() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+
+		// Get full result (caches data)
+		Object* full_params = make_params("file:///test.kt");
+		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		String rid = full_result.get_string("resultId")!!;
+
+		// Request delta with same resultId (no changes)
+		Object* delta_params = make_delta_params("file:///test.kt", rid);
+		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params);
+
+		assert(delta_result != null, "expected delta result");
+		// Should have resultId and edits (empty array)
+		String new_rid = delta_result.get_string("resultId")!!;
+		assert(new_rid.len > 0, "expected new resultId");
+
+		Object* edits = delta_result.get("edits")!!;
+		assert(edits.get_len() == 0, "expected 0 edits for unchanged doc, got %d", (int)edits.get_len());
+	};
+}
+
+// ── Delta: change produces non-empty edits ─────────────────────────
+
+fn void delta_with_change_returns_edits() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+
+		// Get full result
+		Object* full_params = make_params("file:///test.kt");
+		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		String rid = full_result.get_string("resultId")!!;
+
+		// Change document
+		store.update("file:///test.kt", 2, "val x = 1\nval y = 2");
+
+		// Request delta
+		Object* delta_params = make_delta_params("file:///test.kt", rid);
+		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params);
+
+		assert(delta_result != null, "expected delta result");
+		String new_rid = delta_result.get_string("resultId")!!;
+		assert(new_rid.len > 0, "expected new resultId");
+
+		// Should have edits (content changed, more tokens now)
+		Object* edits = delta_result.get("edits")!!;
+		assert(edits.get_len() > 0, "expected non-empty edits for changed doc");
+
+		// Each edit should have start, deleteCount, data
+		Object* edit0 = edits.get_at(0);
+		int start = edit0.get_int("start")!!;
+		int delete_count = edit0.get_int("deleteCount")!!;
+		assert(start >= 0, "edit start should be >= 0");
+		assert(delete_count >= 0, "edit deleteCount should be >= 0");
+	};
+}
+
+// ── Delta: wrong resultId falls back to full ───────────────────────
+
+fn void delta_wrong_id_returns_full() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "val x = 1");
+
+		// Get full result (caches)
+		Object* full_params = make_params("file:///test.kt");
+		semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+
+		// Request delta with wrong ID
+		Object* delta_params = make_delta_params("file:///test.kt", "999999");
+		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params);
+
+		assert(delta_result != null, "expected result");
+		// Should be a full result (has "data" key, not "edits")
+		Object* data = delta_result.get("data") ?? null;
+		assert(data != null, "expected full fallback with 'data' key");
 	};
 }

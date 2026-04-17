@@ -304,6 +304,22 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
+		case "textDocument/semanticTokens/full/delta":
+			if (params != null) {
+				Object* result = semantic_tokens::handle_semantic_tokens_delta(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/semanticTokens/range":
+			if (params != null) {
+				Object* result = semantic_tokens::handle_semantic_tokens_range(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
 		case "textDocument/inlayHint":
 			if (params != null) {
 				Object* result = inlay_hints::handle_inlay_hints(&self.documents, &self.workspace, params);

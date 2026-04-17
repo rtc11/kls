@@ -7,6 +7,14 @@ import kls::kotlin::types;
 import kls::kotlin::incremental;
 import kls::kotlin::token_cache;
 
+const usz MAX_SEMANTIC_DATA = 81920; // 16384 tokens * 5 ints
+
+struct SemanticTokensCache {
+	int[MAX_SEMANTIC_DATA] data;
+	usz data_len;
+	int result_id;
+}
+
 struct Document {
 	String uri;
 	String language_id;
@@ -16,6 +24,7 @@ struct Document {
 	TypeInfo* cached_types;     // Lazily populated, heap-allocated (parallel to cached_ast)
 	ChunkMap* cached_chunks;    // Lazily populated, heap-allocated (parallel to cached_ast)
 	TokenCache* cached_tokens;  // Lazily populated, heap-allocated for optimized fallback
+	SemanticTokensCache* cached_semantic; // Lazily populated, heap-allocated for delta support
 }
 
 struct DocumentStore {
@@ -44,6 +53,9 @@ fn void DocumentStore.free(DocumentStore* self) {
 			if (doc.cached_tokens != null) {
 				mem::free(doc.cached_tokens);
 			}
+			if (doc.cached_semantic != null) {
+				mem::free(doc.cached_semantic);
+			}
 			mem::free(doc.uri.ptr);
 			mem::free(doc.language_id.ptr);
 			mem::free(doc.content.ptr);
@@ -68,6 +80,9 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 		if (old.cached_tokens != null) {
 			mem::free(old.cached_tokens);
 		}
+		if (old.cached_semantic != null) {
+			mem::free(old.cached_semantic);
+		}
 		mem::free(old.uri.ptr);
 		mem::free(old.language_id.ptr);
 		mem::free(old.content.ptr);
@@ -81,6 +96,7 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 		.cached_types = null,
 		.cached_chunks = null,
 		.cached_tokens = null,
+		.cached_semantic = null,
 	};
 	// HashMap copies keys internally (COPY_KEYS), so pass uri directly
 	self.docs.set(uri, doc);
@@ -106,6 +122,8 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 			mem::free(doc.cached_tokens);
 			doc.cached_tokens = null;
 		}
+		// Note: do NOT free cached_semantic here — delta needs previous result
+		// to compute diff. It will be updated on next semanticTokens request.
 		// Free old content before replacing
 		mem::free(doc.content.ptr);
 		doc.version = version;
@@ -317,6 +335,9 @@ fn void DocumentStore.close(DocumentStore* self, String uri) {
 		}
 		if (doc.cached_tokens != null) {
 			mem::free(doc.cached_tokens);
+		}
+		if (doc.cached_semantic != null) {
+			mem::free(doc.cached_semantic);
 		}
 		mem::free(doc.uri.ptr);
 		mem::free(doc.language_id.ptr);
