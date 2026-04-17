@@ -390,16 +390,29 @@ fn void Parser.parse_import_decl(Parser* self) {
 
 fn uint Parser.parse_modifiers(Parser* self) {
 	uint flags = ast::MOD_NONE;
-	DString ann_buf;
-	ann_buf.tinit();
+	// Single annotation: direct source slice (zero-copy, stable pointer).
+	// Multiple: heap-copied concatenation (tiny per-decl leak, acceptable for LSP).
+	String first_ann = "";
+	int ann_count = 0;
+	DString multi_buf;
 
 	while (!self.at_eof()) {
 		// Annotations
 		if (self.at(AT)) {
 			String ann_name = self.scan_annotation();
 			if (ann_name.len > 0) {
-				if (ann_buf.len() > 0) ann_buf.append(" ");
-				ann_buf.append(ann_name);
+				ann_count++;
+				if (ann_count == 1) {
+					first_ann = ann_name;
+				} else if (ann_count == 2) {
+					multi_buf.tinit();
+					multi_buf.append(first_ann);
+					multi_buf.append(" ");
+					multi_buf.append(ann_name);
+				} else {
+					multi_buf.append(" ");
+					multi_buf.append(ann_name);
+				}
 			}
 			continue;
 		}
@@ -426,7 +439,7 @@ fn uint Parser.parse_modifiers(Parser* self) {
 			case KW_PRIVATE:     flags |= ast::MOD_PRIVATE;     self.advance();
 			case KW_PROTECTED:   flags |= ast::MOD_PROTECTED;   self.advance();
 			case KW_INTERNAL:    flags |= ast::MOD_INTERNAL;    self.advance();
-			case KW_PUBLIC:      flags |= ast::MOD_PUBLIC;      self.advance();
+			case KW_PUBLIC:      flags |= ast::MOD_PUBLIC;       self.advance();
 			case KW_EXPECT:      flags |= ast::MOD_EXPECT;      self.advance();
 			case KW_ACTUAL:      flags |= ast::MOD_ACTUAL;      self.advance();
 			case KW_VARARG:      flags |= ast::MOD_VARARG;      self.advance();
@@ -434,12 +447,20 @@ fn uint Parser.parse_modifiers(Parser* self) {
 			case KW_CROSSINLINE: flags |= ast::MOD_CROSSINLINE; self.advance();
 			case KW_REIFIED:     flags |= ast::MOD_REIFIED;     self.advance();
 			default:
-				self.last_annotations = ann_buf.str_view();
+				if (ann_count <= 1) {
+					self.last_annotations = first_ann;
+				} else {
+					self.last_annotations = multi_buf.str_view().copy(mem);
+				}
 				return flags;
 		}
 	}
 
-	self.last_annotations = ann_buf.str_view();
+	if (ann_count <= 1) {
+		self.last_annotations = first_ann;
+	} else {
+		self.last_annotations = multi_buf.str_view().copy(mem);
+	}
 	return flags;
 }
 

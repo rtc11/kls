@@ -211,3 +211,51 @@ fn void code_lens_dotted_test_annotation() @test {
 		assert(title == "▶ Run Test", "expected '▶ Run Test', got '%s'", title);
 	};
 }
+
+fn void code_lens_test_annotation_separate_line() @test {
+	@pool() {
+		String src = `import org.junit.jupiter.api.Test
+
+internal class TsTest : ConsumerTestBase() {
+    @Test
+    fun myTest() {
+        val _x = 1
+    }
+
+    @Test
+    fun anotherTest() {}
+}`;
+		DocumentStore store = make_store_with("file:///test.kt", src);
+		defer store.free();
+		Object* params = make_params("file:///test.kt");
+		Object* result = code_lens::handle_code_lens(&store, params);
+		assert(result != null, "expected non-null result");
+		// 1 class lens + 2 method lenses = 3
+		assert(result.get_len() == 3, "expected 3 lenses, got %d", (int)result.get_len());
+
+		Object* cls_lens = result.get_at(0);
+		Object* cls_cmd = cls_lens.get("command")!!;
+		String cls_title = cls_cmd.get_string("title")!!;
+		assert(cls_title == "▶ Run Tests", "expected '▶ Run Tests', got '%s'", cls_title);
+	};
+}
+
+fn void code_lens_backtick_function_name() @test {
+	@pool() {
+		String src = "class MyTests {\n    @Test\n    fun `test with spaces`() {\n        val _x = 1\n    }\n}";
+		DocumentStore store = make_store_with("file:///test.kt", src);
+		defer store.free();
+		Object* params = make_params("file:///test.kt");
+		Object* result = code_lens::handle_code_lens(&store, params);
+		assert(result != null, "expected non-null result");
+		// 1 class lens + 1 method lens = 2
+		assert(result.get_len() == 2, "expected 2 lenses, got %d", (int)result.get_len());
+
+		// Method lens should have backtick function name
+		Object* method_lens = result.get_at(1);
+		Object* command = method_lens.get("command")!!;
+		Object* args = command.get("arguments")!!;
+		String func_name = args.get_at(2).s;
+		assert(func_name == "test with spaces", "expected backtick name, got '%s'", func_name);
+	};
+}

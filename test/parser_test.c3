@@ -13,6 +13,19 @@ fn ParseResult* do_parse(String src) {
 }
 
 fn void free_result(ParseResult* r) {
+	// Free heap-copied multi-annotation strings (contain spaces)
+	for (uint i = 0; i < r.node_count; i++) {
+		String ann = r.nodes[i].annotation_text;
+		if (ann.len > 0) {
+			bool has_space = false;
+			foreach (c : ann) {
+				if (c == ' ') { has_space = true; break; }
+			}
+			if (has_space) {
+				mem::free((void*)ann.ptr);
+			}
+		}
+	}
 	r.free_errors();
 	mem::free(r);
 }

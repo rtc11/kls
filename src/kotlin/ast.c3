@@ -158,7 +158,7 @@ struct ParseError {
 // ── Parse result ───────────────────────────────────────────────────
 
 const uint NO_PARENT = uint.max;
-const usz MAX_NODES = 16384;
+const usz MAX_NODES = 65536;
 const usz MAX_ERRORS = 256;
 // Last slot is reserved as overflow sink -- writes go there when the array is full,
 // preventing out-of-bounds access. Real nodes use indices 0..MAX_NODES-2.
