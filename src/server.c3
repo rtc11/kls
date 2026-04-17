@@ -162,6 +162,9 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 			progress::end("kls-indexing", "Ready");
 
+			// Wire workspace into document store for cross-file type resolution
+			self.documents.workspace = &self.workspace;
+
 		case "shutdown":
 			Object* result = lifecycle::handle_shutdown();
 			json_rpc::send_response(request_id, result);

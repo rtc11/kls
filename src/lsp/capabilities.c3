@@ -29,6 +29,7 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	Object* completion_opts = object::new_obj(tmem);
 	Object* trigger_chars = object::new_obj(tmem);
 	trigger_chars.push(object::new_string(".", tmem));
+	trigger_chars.push(object::new_string("@", tmem));
 	completion_opts.set("triggerCharacters", trigger_chars);
 	completion_opts.set("resolveProvider", true);
 	caps.set("completionProvider", completion_opts);

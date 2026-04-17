@@ -4,6 +4,7 @@ import kls::kotlin::parser;
 import kls::kotlin::ast;
 import kls::kotlin::types;
 import kls::kotlin::stdlib;
+import kls::workspace;
 import kls::lsp::hover;
 import kls::lsp::completion;
 import kls::document;
@@ -2374,5 +2375,126 @@ fun main() {
 		assert(ti.has_type[b_idx], "b should have a type");
 		assert(ti.node_types[b_idx].name == "Int",
 			"b should be Int (1-param overload), got '%s'", ti.node_types[b_idx].name);
+	};
+}
+
+// ── Cross-file type resolution tests ──────────────────────────────
+
+fn TypeInfo* do_resolve_with_workspace(ParseResult* pr, WorkspaceIndex* ws) {
+	TypeInfo* ti = mem::new(TypeInfo);
+	types::set_workspace(ws);
+	types::resolve_types(pr, ti);
+	types::clear_workspace();
+	return ti;
+}
+
+fn void cross_file_constructor_type() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class in another file
+		ws.index_file("file:///models.kt", "class User(val name: String, val age: Int)");
+
+		// Parse a file that constructs User
+		String src = "fun main() { val u = User(\"Alice\", 30) }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer mem::free(ti);
+
+		uint u_idx = find_decl(pr, "u");
+		assert(u_idx != 0, "should find 'u'");
+		assert(ti.has_type[u_idx], "u should have a type");
+		assert(ti.node_types[u_idx].name == "User",
+			"u should be User, got '%s'", ti.node_types[u_idx].name);
+	};
+}
+
+fn void cross_file_dot_member_type() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class with typed members
+		ws.index_file("file:///models.kt", "class User(val name: String, val age: Int) { fun greet(): String = \"hi\" }");
+
+		// Parse a file that accesses members
+		String src =
+`fun main() {
+    val u = User("Alice", 30)
+    val n = u.name
+    val a = u.age
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer mem::free(ti);
+
+		uint u_idx = find_decl(pr, "u");
+		assert(u_idx != 0, "should find 'u'");
+		assert(ti.has_type[u_idx], "u should have type");
+		assert(ti.node_types[u_idx].name == "User",
+			"u should be User, got '%s'", ti.node_types[u_idx].name);
+
+		uint n_idx = find_decl(pr, "n");
+		assert(n_idx != 0, "should find 'n'");
+		assert(ti.has_type[n_idx], "n should have type");
+		assert(ti.node_types[n_idx].name == "String",
+			"n should be String, got '%s'", ti.node_types[n_idx].name);
+
+		uint a_idx = find_decl(pr, "a");
+		assert(a_idx != 0, "should find 'a'");
+		assert(ti.has_type[a_idx], "a should have type");
+		assert(ti.node_types[a_idx].name == "Int",
+			"a should be Int, got '%s'", ti.node_types[a_idx].name);
+	};
+}
+
+fn void cross_file_method_return_type() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///models.kt", "class Greeter { fun greet(): String = \"hello\" }");
+
+		String src = "fun main() { val g = Greeter(); val msg = g.greet() }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer mem::free(ti);
+
+		uint g_idx = find_decl(pr, "g");
+		assert(g_idx != 0, "should find 'g'");
+		assert(ti.has_type[g_idx], "g should have type");
+		assert(ti.node_types[g_idx].name == "Greeter",
+			"g should be Greeter, got '%s'", ti.node_types[g_idx].name);
+
+		// msg = g.greet() — dot expr resolves greet() return type from member_cache
+		uint msg_idx = find_decl(pr, "msg");
+		assert(msg_idx != 0, "should find 'msg'");
+		assert(ti.has_type[msg_idx], "msg should have type");
+		assert(ti.node_types[msg_idx].name == "String",
+			"msg should be String, got '%s'", ti.node_types[msg_idx].name);
+	};
+}
+
+fn void cross_file_no_workspace_returns_unknown() @test {
+	@pool() {
+		// Without workspace, cross-file type stays UNKNOWN
+		String src = "fun main() { val u = User(\"Alice\", 30) }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint u_idx = find_decl(pr, "u");
+		assert(u_idx != 0, "should find 'u'");
+		// Without workspace, User is unknown — should NOT have a type
+		assert(!ti.has_type[u_idx] || ti.node_types[u_idx].kind == UNKNOWN,
+			"u should be UNKNOWN without workspace");
 	};
 }

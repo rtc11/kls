@@ -1159,3 +1159,65 @@ fn void class_property_not_flagged() @test {
 		}
 	};
 }
+
+// ── Val reassignment tests ────────────────────────────────────────
+
+fn void val_reassignment_detected() @test {
+	@pool() {
+		String content =
+`fun main() {
+    val x = 1
+    x = 2
+}`;
+		Object* result = build_test_diagnostics(content);
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg.contains("Val cannot be reassigned")) {
+				found = true;
+				int severity = diag.get_int("severity")!!;
+				assert(severity == 1, "expected Error severity (1), got %d", severity);
+			}
+		}
+		assert(found, "expected 'Val cannot be reassigned' diagnostic");
+	};
+}
+
+fn void var_reassignment_not_flagged() @test {
+	@pool() {
+		String content =
+`fun main() {
+    var x = 1
+    x = 2
+}`;
+		Object* result = build_test_diagnostics(content);
+
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Val cannot be reassigned"),
+				"var reassignment should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void val_reassignment_compound_operator() @test {
+	@pool() {
+		String content =
+`fun main() {
+    val x = 1
+    x += 2
+}`;
+		Object* result = build_test_diagnostics(content);
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg.contains("Val cannot be reassigned")) found = true;
+		}
+		assert(found, "expected val reassignment diagnostic for compound operator");
+	};
+}

@@ -562,3 +562,218 @@ fn void dot_completion_workspace_null_workspace() @test {
 		assert(result != null, "expected completion result with null workspace");
 	};
 }
+
+// ── Dot completion via cross-file type inference (no explicit annotation) ──
+
+fn void dot_completion_inferred_cross_file_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class with members in another file
+		String model_content = "class User(val name: String, val age: Int) {\n    fun greet(): String = \"hi\"\n}";
+		ws.index_file("file:///models.kt", model_content);
+		store.open("file:///models.kt", "kotlin", 1, model_content);
+
+		// Wire workspace into document store for cross-file type resolution
+		store.workspace = &ws;
+
+		// Current file: val u = User(...) — type inferred, no explicit annotation
+		String content = "fun main() {\n    val u = User(\"Alice\", 30)\n    u.\n}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 2, 6);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_name = false;
+		bool found_age = false;
+		bool found_greet = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "name") found_name = true;
+			if (label == "age") found_age = true;
+			if (label == "greet") found_greet = true;
+		}
+		assert(found_name, "expected 'name' member from inferred User type");
+		assert(found_age, "expected 'age' member from inferred User type");
+		assert(found_greet, "expected 'greet' member from inferred User type");
+	};
+}
+
+// ── Annotation completion ─────────────────────────────────────────
+
+fn void annotation_completion_offers_kotlin_annotations() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Cursor right after @
+		String content = "@\nfun test() {}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 1);
+		Object* result = completion::handle_completion(&store, null, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_deprecated = false;
+		bool found_suppress = false;
+		bool found_test = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "Deprecated") found_deprecated = true;
+			if (label == "Suppress") found_suppress = true;
+			if (label == "Test") found_test = true;
+		}
+		assert(found_deprecated, "expected 'Deprecated' in annotation completions");
+		assert(found_suppress, "expected 'Suppress' in annotation completions");
+		assert(found_test, "expected 'Test' in annotation completions");
+	};
+}
+
+fn void annotation_completion_filters_by_prefix() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Cursor after @Dep
+		String content = "@Dep\nfun test() {}";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 4);
+		Object* result = completion::handle_completion(&store, null, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_deprecated = false;
+		bool found_test = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "Deprecated") found_deprecated = true;
+			if (label == "Test") found_test = true;
+		}
+		assert(found_deprecated, "expected 'Deprecated' filtered by prefix 'Dep'");
+		// Test should NOT match since prefix is "Dep"
+	};
+}
+
+// ── Import path completion ────────────────────────────────────────
+
+fn void import_completion_offers_packages() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index files with packages
+		ws.index_file("file:///models.kt", "package com.example.models\n\nclass User {}");
+		ws.index_file("file:///service.kt", "package com.example.service\n\nclass UserService {}");
+
+		// Typing "import com."
+		String content = "import com.";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 11);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_example = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "example") found_example = true;
+		}
+		assert(found_example, "expected 'example' package segment");
+	};
+}
+
+fn void import_completion_offers_classes() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///models.kt", "package com.example\n\nclass User {}\nclass Account {}");
+
+		// Typing "import com.example."
+		String content = "import com.example.";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 19);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_user = false;
+		bool found_account = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "User") found_user = true;
+			if (label == "Account") found_account = true;
+		}
+		assert(found_user, "expected 'User' in import completions");
+		assert(found_account, "expected 'Account' in import completions");
+	};
+}
+
+fn void import_completion_filters_by_prefix() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///models.kt", "package com.example\n\nclass User {}\nclass Account {}");
+
+		// Typing "import com.example.Us"
+		String content = "import com.example.Us";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 21);
+		Object* result = completion::handle_completion(&store, &ws, params);
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_user = false;
+		bool found_account = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "User") found_user = true;
+			if (label == "Account") found_account = true;
+		}
+		assert(found_user, "expected 'User' filtered by 'Us' prefix");
+		assert(!found_account, "Account should not match 'Us' prefix");
+	};
+}

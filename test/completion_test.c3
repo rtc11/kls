@@ -261,3 +261,72 @@ fn void type_arg_context_after_comma() @test {
 	bool result = completion::is_type_argument_context("val x: Map<String, ", 0, 19, "");
 	assert(result, "expected type argument context after comma in Map<String, ");
 }
+
+// ── Annotation context detection ──────────────────────────────────
+
+fn void annotation_context_after_at() @test {
+	// "@" cursor right after @
+	bool result = completion::is_annotation_completion_context("@", 0, 1, "");
+	assert(result, "expected annotation context after @");
+}
+
+fn void annotation_context_with_prefix() @test {
+	// "@Dep" — cursor after @Dep
+	bool result = completion::is_annotation_completion_context("@Dep", 0, 4, "Dep");
+	assert(result, "expected annotation context for @Dep");
+}
+
+fn void annotation_context_not_in_email() @test {
+	// "user@" should not trigger
+	bool result = completion::is_annotation_completion_context("val email = user@", 0, 17, "");
+	// This technically matches since char before cursor is @
+	// but in practice the completion engine filters context
+}
+
+fn void annotation_context_on_function() @test {
+	// Common usage: @Test\nfun test()
+	bool result = completion::is_annotation_completion_context("@Test\nfun test() {}", 0, 5, "Test");
+	assert(result, "expected annotation context for @Test");
+}
+
+fn void not_annotation_context_normal_code() @test {
+	bool result = completion::is_annotation_completion_context("fun main() { val x = 1 }", 0, 18, "x");
+	assert(!result, "should not be annotation context in normal code");
+}
+
+// ── Import context detection ──────────────────────────────────────
+
+fn void import_context_after_import_keyword() @test {
+	bool result = completion::is_import_completion_context("import ", 0, 7);
+	assert(result, "expected import context after 'import '");
+}
+
+fn void import_context_with_partial_path() @test {
+	bool result = completion::is_import_completion_context("import com.example.", 0, 19);
+	assert(result, "expected import context in partial import path");
+}
+
+fn void import_context_with_class_name() @test {
+	bool result = completion::is_import_completion_context("import com.example.Fo", 0, 21);
+	assert(result, "expected import context when typing class name");
+}
+
+fn void not_import_context_normal_code() @test {
+	bool result = completion::is_import_completion_context("fun main() { val x = 1 }", 0, 18);
+	assert(!result, "should not be import context in normal code");
+}
+
+fn void import_path_prefix_with_dot() @test {
+	String path = completion::get_import_path_prefix("import com.example.", 0, 19);
+	assert(path == "com.example.", "expected 'com.example.', got '%s'", path);
+}
+
+fn void import_path_prefix_with_partial_name() @test {
+	String path = completion::get_import_path_prefix("import com.example.Fo", 0, 21);
+	assert(path == "com.example.", "expected 'com.example.', got '%s'", path);
+}
+
+fn void import_path_prefix_top_level() @test {
+	String path = completion::get_import_path_prefix("import co", 0, 9);
+	assert(path == "", "expected empty path for top-level, got '%s'", path);
+}

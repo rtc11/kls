@@ -4,6 +4,27 @@ import kls::kotlin::ast;
 import kls::kotlin::token;
 import kls::kotlin::lexer;
 import std::core::string;
+import kls::workspace;
+import kls::kotlin::symbols;
+
+// ── Cross-file type resolution support ─────────────────────────────
+
+WorkspaceIndex* g_workspace;
+
+/**
+ * Set the workspace index for cross-file type resolution.
+ * Call before resolve_types() to enable workspace-aware inference.
+ */
+fn void set_workspace(WorkspaceIndex* ws) {
+	g_workspace = ws;
+}
+
+/**
+ * Clear the workspace pointer (optional cleanup).
+ */
+fn void clear_workspace() {
+	g_workspace = null;
+}
 
 // ── Type representation ────────────────────────────────────────────
 
@@ -467,7 +488,13 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	// in Phase 5, but the filter chain needs another expression pass)
 	resolve_expression_types(pr, info);
 
-	// Phase 7: Resolve destructuring component types
+	// Phase 7: Final initializer+expression pass for cross-file chains
+	// (e.g., val u = User(...); val n = u.name — n's DOT_EXPR resolved
+	// in Phase 6, but n's PROPERTY_DECL needs one more initializer pass)
+	resolve_initializer_types(pr, info);
+	resolve_expression_types(pr, info);
+
+	// Phase 8: Resolve destructuring component types
 	// val (a, b) = pair -> a: Pair.component1, b: Pair.component2
 	// for ((k, v) in map) -> k: Map.Entry.component1, v: Map.Entry.component2
 	resolve_destructuring_types(pr, info);
@@ -941,6 +968,19 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		current = scope.parent;
 	}
 
+	// Cross-file: query workspace for class/object types
+	if (g_workspace != null) {
+		if (try indices = g_workspace.lookup_by_name(node.name)) {
+			for (usz i = 0; i < indices.len(); i++) {
+				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
+				if (sym.kind == symbols::SymbolKind.CLASS || sym.kind == symbols::SymbolKind.INTERFACE ||
+				    sym.kind == symbols::SymbolKind.OBJECT) {
+					return { .kind = SIMPLE, .name = sym.name };
+				}
+			}
+		}
+	}
+
 	return TYPE_UNKNOWN;
 }
 
@@ -1369,6 +1409,30 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		return { .kind = SIMPLE, .name = candidate.name };
 	}
 
+	// Cross-file: query workspace for constructor calls and function return types
+	if (g_workspace != null) {
+		if (try indices = g_workspace.lookup_by_name(node.name)) {
+			for (usz i = 0; i < indices.len(); i++) {
+				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
+				// Constructor call: class name matches
+				if (sym.kind == symbols::SymbolKind.CLASS || sym.kind == symbols::SymbolKind.OBJECT) {
+					return { .kind = SIMPLE, .name = sym.name };
+				}
+			}
+		}
+
+		// Method call on a receiver: g.greet() — resolve via receiver type + member cache
+		TypeRef receiver_type = find_call_receiver_type(pr, info, idx);
+		if (receiver_type.kind != UNKNOWN && receiver_type.name.len > 0) {
+			// Try hardcoded stdlib first
+			TypeRef member_result = resolve_member_type(receiver_type, node.name);
+			if (member_result.kind != UNKNOWN) return member_result;
+			// Try workspace member cache
+			member_result = resolve_workspace_member_type(receiver_type, node.name);
+			if (member_result.kind != UNKNOWN) return member_result;
+		}
+	}
+
 	return TYPE_UNKNOWN;
 }
 
@@ -1480,7 +1544,17 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 
 	if (receiver_type.kind == UNKNOWN) return TYPE_UNKNOWN;
 
-	return resolve_member_type(receiver_type, node.name);
+	// Try hardcoded stdlib member resolution first
+	TypeRef result = resolve_member_type(receiver_type, node.name);
+	if (result.kind != UNKNOWN) return result;
+
+	// Cross-file: look up member from workspace member_cache
+	if (g_workspace != null) {
+		result = resolve_workspace_member_type(receiver_type, node.name);
+		if (result.kind != UNKNOWN) return result;
+	}
+
+	return TYPE_UNKNOWN;
 }
 
 // ── Generic type argument propagation helpers ──────────────────────
@@ -1799,6 +1873,65 @@ fn TypeRef resolve_member_type_with_supertypes(TypeRef receiver, String member_n
 
 		TypeRef result = resolve_member_type(super_ref, member_name);
 		if (result.kind != UNKNOWN) return result;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Resolve a member type from the workspace member cache.
+ * Looks up the receiver type name in the member cache and finds
+ * a matching member declaration, returning its type_text as a TypeRef.
+ * Also checks supertypes of the receiver class.
+ */
+fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
+	if (g_workspace == null) return TYPE_UNKNOWN;
+	String type_name = receiver.name;
+	if (type_name.len == 0) return TYPE_UNKNOWN;
+
+	// Direct lookup in member cache
+	if (try members = g_workspace.member_cache.get_ref(type_name)) {
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = &(*members)[i];
+			if (m.name == member_name) {
+				if (m.type_text.len > 0) {
+					return parse_type_text(m.type_text);
+				}
+				// Function with no explicit return type — assume Unit
+				if (m.node_kind == FUN_DECL) return TYPE_UNIT;
+				return TYPE_UNKNOWN;
+			}
+		}
+	}
+
+	// Check supertypes of this class via workspace index
+	if (try indices = g_workspace.lookup_by_name(type_name)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
+			if (sym.supertype_count > 0) {
+				for (usz s = 0; s < sym.supertype_count; s++) {
+					String st = sym.supertypes[s];
+					if (st.len == 0) continue;
+					// Try stdlib resolution with the supertype
+					TypeRef super_ref = { .kind = SIMPLE, .name = st };
+					TypeRef result = resolve_member_type(super_ref, member_name);
+					if (result.kind != UNKNOWN) return result;
+					// Try workspace member cache for the supertype
+					if (try super_members = g_workspace.member_cache.get_ref(st)) {
+						for (usz j = 0; j < super_members.len(); j++) {
+							MemberDecl* m = &(*super_members)[j];
+							if (m.name == member_name) {
+								if (m.type_text.len > 0) {
+									return parse_type_text(m.type_text);
+								}
+								if (m.node_kind == FUN_DECL) return TYPE_UNIT;
+								return TYPE_UNKNOWN;
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	return TYPE_UNKNOWN;

@@ -125,6 +125,12 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		add_unused_local_diagnostics(diagnostics, content, ast);
 	}
 
+	// ── Val reassignment (Error) ─────────────────────────────────
+	// Flag assignments to val-declared local variables.
+	if (lexer_error_count == 0 && ast != null) {
+		add_val_reassignment_diagnostics(diagnostics, content, ast);
+	}
+
 	return diagnostics;
 }
 
@@ -1272,4 +1278,97 @@ fn void add_unused_local_diagnostics(Object* diagnostics, String content, ParseR
 			diagnostics.push(diag);
 		}
 	}
+}
+
+// ── Val reassignment diagnostics ──────────────────────────────────
+
+/**
+ * Detect assignments to val-declared local variables (which are immutable).
+ * Scans for ASSIGNMENT_EXPR nodes whose LHS NAME_EXPR matches a val in scope.
+ * Emits Error severity diagnostic: "Val cannot be reassigned".
+ */
+fn void add_val_reassignment_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != ASSIGNMENT_EXPR) continue;
+
+		// Find LHS: first child should be a NAME_EXPR
+		String assigned_name = "";
+		uint lhs_idx = 0;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) {
+				if (ast.nodes[j].kind == NAME_EXPR && ast.nodes[j].name.len > 0) {
+					assigned_name = ast.nodes[j].name;
+					lhs_idx = j;
+				}
+				break; // first child only
+			}
+		}
+		if (assigned_name.len == 0) continue;
+
+		// Search upward from the assignment for a val PROPERTY_DECL with matching name
+		if (find_val_in_scope(ast, i, assigned_name)) {
+			AstNode* lhs = &ast.nodes[lhs_idx];
+			Object* diag = object::new_obj(tmem);
+
+			Object* range = object::new_obj(tmem);
+			Object* start = object::new_obj(tmem);
+			start.set("line", (int)lhs.start_line);
+			start.set("character", (int)lhs.start_col);
+			Object* end_pos = object::new_obj(tmem);
+			end_pos.set("line", (int)lhs.end_line);
+			end_pos.set("character", (int)lhs.end_col);
+			range.set("start", start);
+			range.set("end", end_pos);
+
+			diag.set("range", range);
+			diag.set("severity", 1); // DiagnosticSeverity.Error
+			diag.set("source", "kls");
+			diag.set("message", "Val cannot be reassigned");
+
+			diagnostics.push(diag);
+		}
+	}
+}
+
+/**
+ * Check if an assignment target name matches a val (non-var) PROPERTY_DECL
+ * in the enclosing scope. Returns true if reassignment is illegal.
+ */
+fn bool find_val_in_scope(ParseResult* ast, uint assignment_idx, String name) {
+	uint scope_idx = ast::NO_PARENT;
+	uint current = assignment_idx;
+	while (current != ast::NO_PARENT) {
+		AstNode* p = &ast.nodes[current];
+		if (p.kind == FUN_DECL || p.kind == LAMBDA_EXPR || p.kind == INIT_BLOCK ||
+		    p.kind == FILE || p.kind == CLASS_DECL || p.kind == INTERFACE_DECL ||
+		    p.kind == OBJECT_DECL) {
+			scope_idx = current;
+			break;
+		}
+		current = p.parent;
+	}
+	if (scope_idx == ast::NO_PARENT) return false;
+
+	for (uint j = 0; j < ast.node_count; j++) {
+		AstNode* candidate = &ast.nodes[j];
+		if (candidate.kind != PROPERTY_DECL) continue;
+		if (candidate.name != name) continue;
+		if ((candidate.mod_flags & ast::MOD_VAR) != 0) continue;
+		if (j >= assignment_idx) continue;
+
+		uint cand_scope = candidate.parent;
+		while (cand_scope != ast::NO_PARENT) {
+			if (cand_scope == scope_idx) return true;
+			AstNode* cs = &ast.nodes[cand_scope];
+			if (cs.kind == FUN_DECL || cs.kind == LAMBDA_EXPR || cs.kind == FILE ||
+			    cs.kind == CLASS_DECL || cs.kind == INTERFACE_DECL ||
+			    cs.kind == OBJECT_DECL || cs.kind == INIT_BLOCK) {
+				break;
+			}
+			cand_scope = cs.parent;
+		}
+	}
+
+	return false;
 }

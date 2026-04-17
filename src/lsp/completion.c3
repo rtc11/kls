@@ -69,11 +69,17 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	String prefix = get_prefix_at_position(doc.content, line, character);
 
+	// Check if we're in an import path context (after 'import ') — checked first, takes priority over dot
+	bool is_import_context = is_import_completion_context(doc.content, line, character);
+
 	// Check if we're in a dot-completion context (after . or ?.)
-	bool is_dot_context = is_dot_completion_context(doc.content, line, character, prefix);
+	bool is_dot_context = !is_import_context && is_dot_completion_context(doc.content, line, character, prefix);
 
 	// Check if we're inside type argument angle brackets: List<|>
-	bool is_type_arg_context = !is_dot_context && is_type_argument_context(doc.content, line, character, prefix);
+	bool is_type_arg_context = !is_dot_context && !is_import_context && is_type_argument_context(doc.content, line, character, prefix);
+
+	// Check if we're in an annotation context (after @)
+	bool is_annotation_context = !is_dot_context && !is_import_context && is_annotation_completion_context(doc.content, line, character, prefix);
 
 	// Build completion items
 	Object* items = object::new_obj(tmem);
@@ -86,6 +92,23 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	if (is_type_arg_context) {
 		// Type argument context: offer types, type params, star projection
 		add_type_argument_completions(items, store, uri, doc.content, line, character, prefix);
+	}
+
+	if (is_annotation_context) {
+		// Annotation context: offer annotation types
+		add_annotation_completions(items, workspace, prefix);
+	}
+
+	if (is_import_context) {
+		// Import context: offer package paths and class names
+		String import_path = get_import_path_prefix(doc.content, line, character);
+		add_import_completions(items, workspace, import_path, prefix);
+
+		// Build CompletionList (skip normal completions in import context)
+		Object* result = object::new_obj(tmem);
+		result.set("isIncomplete", false);
+		result.set("items", items);
+		return result;
 	}
 
 	// Always add general completions (keywords, identifiers, etc.)
@@ -418,6 +441,336 @@ fn bool is_type_argument_context(String content, uint line, uint character, Stri
 		}
 	}
 	return false;
+}
+
+/**
+ * Check if cursor is in an annotation context (after @).
+ * Detects: @|, @Pre|fix
+ */
+fn bool is_annotation_completion_context(String content, uint line, uint character, String prefix) {
+	long byte_offset = hover::position_to_offset(content, line, character);
+	if (byte_offset <= 0) return false;
+
+	usz pos = (usz)byte_offset - prefix.len;
+	if (pos == 0) return false;
+
+	// The character before the prefix should be @
+	if (content[pos - 1] == '@') return true;
+
+	return false;
+}
+
+/**
+ * Check if cursor is in an import statement context.
+ * Returns true when the current line starts with 'import '.
+ */
+fn bool is_import_completion_context(String content, uint line, uint character) {
+	// Find the line start
+	uint current_line = 0;
+	usz line_start = 0;
+	for (usz i = 0; i < content.len; i++) {
+		if (current_line == line) {
+			line_start = i;
+			break;
+		}
+		if (content[i] == '\n') current_line++;
+	}
+
+	// Extract the line text up to cursor
+	usz cursor_pos = line_start + character;
+	if (cursor_pos > content.len) cursor_pos = content.len;
+	String line_text = content[line_start:cursor_pos - line_start];
+
+	// Skip leading whitespace
+	usz idx = 0;
+	while (idx < line_text.len && (line_text[idx] == ' ' || line_text[idx] == '\t')) idx++;
+
+	// Check for "import " prefix
+	String remaining = line_text[idx..];
+	if (remaining.len >= 7 && remaining[:7] == "import ") return true;
+
+	return false;
+}
+
+/**
+ * Extract the import path prefix typed so far.
+ * For "import com.example." returns "com.example."
+ * For "import com.example.Fo" returns "com.example."
+ * The prefix (last partial segment) is handled by the standard prefix logic.
+ */
+fn String get_import_path_prefix(String content, uint line, uint character) {
+	// Find line start
+	uint current_line = 0;
+	usz line_start = 0;
+	for (usz i = 0; i < content.len; i++) {
+		if (current_line == line) {
+			line_start = i;
+			break;
+		}
+		if (content[i] == '\n') current_line++;
+	}
+
+	usz cursor_pos = line_start + character;
+	if (cursor_pos > content.len) cursor_pos = content.len;
+	String line_text = content[line_start:cursor_pos - line_start];
+
+	// Find "import " and extract path after it
+	usz idx = 0;
+	while (idx < line_text.len && (line_text[idx] == ' ' || line_text[idx] == '\t')) idx++;
+	if (line_text.len < idx + 7) return "";
+	String after_import = line_text[idx + 7..];
+
+	// Find last '.' — everything up to and including it is the path prefix
+	bool found_dot = false;
+	usz last_dot = 0;
+	for (usz i = after_import.len; i > 0; i--) {
+		if (after_import[i - 1] == '.') {
+			last_dot = i;
+			found_dot = true;
+			break;
+		}
+	}
+
+	if (found_dot) {
+		return after_import[:last_dot]; // includes trailing dot
+	}
+
+	// No dot — return empty (top-level packages)
+	return "";
+}
+
+/**
+ * Add import path completions from workspace symbols and dependencies.
+ * `import_path` is the path prefix (e.g., "com.example."), may be empty.
+ * `prefix` is the last partial segment being typed (e.g., "Fo").
+ */
+fn void add_import_completions(Object* items, WorkspaceIndex* workspace, String import_path, String prefix) {
+	if (workspace == null) return;
+
+	// Collect unique next segments to offer
+	// Use a simple dedup approach: track offered labels
+	bool[256] offered;
+	for (usz i = 0; i < 256; i++) offered[i] = false;
+	usz offered_count = 0;
+	String[256] offered_labels;
+
+	// Search workspace symbols
+	for (usz i = 0; i < workspace.symbols.len(); i++) {
+		WorkspaceSymbol* sym = &workspace.symbols[i];
+		if (sym.name.len == 0) continue;
+
+		// Build full qualified name: package.Name
+		DString fqn;
+		fqn.tinit();
+		if (sym.package_name.len > 0) {
+			fqn.appendf("%s.%s", sym.package_name, sym.name);
+		} else {
+			fqn.appendf("%s", sym.name);
+		}
+		String fqn_str = fqn.str_view();
+
+		// Check if fqn starts with import_path
+		if (import_path.len > 0 && !fqn_str.starts_with(import_path)) continue;
+
+		// Get the part after import_path
+		String remainder = fqn_str[import_path.len..];
+		if (remainder.len == 0) continue;
+
+		// Find next segment (up to next '.')
+		String next_segment;
+		bool is_package = false;
+		usz dot_pos = remainder.len;
+		for (usz j = 0; j < remainder.len; j++) {
+			if (remainder[j] == '.') {
+				dot_pos = j;
+				break;
+			}
+		}
+		if (dot_pos < remainder.len) {
+			next_segment = remainder[:dot_pos];
+			is_package = true;
+		} else {
+			next_segment = remainder;
+			is_package = false;
+		}
+
+		if (next_segment.len == 0) continue;
+		if (prefix.len > 0 && !next_segment.starts_with(prefix)) continue;
+		if (prefix.len > 0 && next_segment == prefix) continue;
+
+		// Dedup
+		bool already = false;
+		for (usz j = 0; j < offered_count; j++) {
+			if (offered_labels[j] == next_segment) {
+				already = true;
+				break;
+			}
+		}
+		if (already) continue;
+		if (offered_count < 256) {
+			offered_labels[offered_count] = next_segment;
+			offered_count++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", next_segment);
+		if (is_package) {
+			item.set("kind", COMPLETION_KIND_MODULE);  // 9 = Module
+			item.set("detail", "package");
+		} else {
+			item.set("kind", sym.lsp_kind);
+			if (sym.package_name.len > 0) {
+				item.set("detail", sym.package_name);
+			}
+		}
+		items.push(item);
+	}
+
+	// Also search dependency index for package completions
+	if (workspace.dep_index.initialized) {
+		add_dep_import_completions(items, &workspace.dep_index, import_path, prefix,
+			offered_labels[..], &offered_count);
+	}
+}
+
+/**
+ * Add import completions from dependency index (JARs).
+ */
+fn void add_dep_import_completions(Object* items, DependencyIndex* dep_index,
+		String import_path, String prefix, String[] offered_labels, usz* offered_count) {
+	for (usz i = 0; i < dep_index.symbols.len(); i++) {
+		DepSymbol* sym = &dep_index.symbols[i];
+		if (sym.name.len == 0) continue;
+
+		// Build FQN
+		DString fqn;
+		fqn.tinit();
+		if (sym.package_name.len > 0) {
+			fqn.appendf("%s.%s", sym.package_name, sym.name);
+		} else {
+			fqn.appendf("%s", sym.name);
+		}
+		String fqn_str = fqn.str_view();
+
+		if (import_path.len > 0 && !fqn_str.starts_with(import_path)) continue;
+
+		String remainder = fqn_str[import_path.len..];
+		if (remainder.len == 0) continue;
+
+		String next_segment;
+		bool is_package = false;
+		usz dot_pos = remainder.len;
+		for (usz j = 0; j < remainder.len; j++) {
+			if (remainder[j] == '.') {
+				dot_pos = j;
+				break;
+			}
+		}
+		if (dot_pos < remainder.len) {
+			next_segment = remainder[:dot_pos];
+			is_package = true;
+		} else {
+			next_segment = remainder;
+		}
+
+		if (next_segment.len == 0) continue;
+		if (prefix.len > 0 && !next_segment.starts_with(prefix)) continue;
+		if (prefix.len > 0 && next_segment == prefix) continue;
+
+		// Dedup
+		bool already = false;
+		for (usz j = 0; j < *offered_count; j++) {
+			if (offered_labels[j] == next_segment) {
+				already = true;
+				break;
+			}
+		}
+		if (already) continue;
+		if (*offered_count < 256) {
+			offered_labels[*offered_count] = next_segment;
+			(*offered_count)++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", next_segment);
+		if (is_package) {
+			item.set("kind", COMPLETION_KIND_MODULE);
+			item.set("detail", "package");
+		} else {
+			item.set("kind", (int)sym.kind);
+			if (sym.package_name.len > 0) {
+				item.set("detail", sym.package_name);
+			}
+		}
+		items.push(item);
+	}
+}
+
+/**
+ * Add annotation completion items. Offers well-known Kotlin annotations
+ * plus annotation classes from workspace and dependencies.
+ */
+fn void add_annotation_completions(Object* items, WorkspaceIndex* workspace, String prefix) {
+	// Well-known Kotlin annotations
+	String[*] kotlin_annotations = {
+		"Deprecated", "JvmStatic", "JvmOverloads", "JvmField", "JvmName",
+		"Suppress", "OptIn", "RequiresOptIn",
+		"Target", "Retention", "Repeatable", "MustBeDocumented",
+		"Throws", "Synchronized", "Volatile", "Transient",
+		"Strictfp", "JvmRecord", "JvmInline",
+	};
+
+	foreach (name : kotlin_annotations) {
+		if (prefix.len > 0 && !name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && name == prefix) continue;
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", name);
+		item.set("kind", COMPLETION_KIND_CLASS); // annotations are classes
+		item.set("detail", "annotation");
+		item.set("sortText", "0"); // prioritize annotations in this context
+		items.push(item);
+	}
+
+	// Android/JUnit/common framework annotations
+	String[*] framework_annotations = {
+		"Test", "Before", "After", "BeforeEach", "AfterEach",
+		"Override", "FunctionalInterface",
+		"Serializable", "Parcelize",
+	};
+
+	foreach (name : framework_annotations) {
+		if (prefix.len > 0 && !name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && name == prefix) continue;
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", name);
+		item.set("kind", COMPLETION_KIND_CLASS);
+		item.set("detail", "annotation");
+		item.set("sortText", "1");
+		items.push(item);
+	}
+
+	// Workspace annotation classes
+	if (workspace != null) {
+		for (usz i = 0; i < workspace.symbols.len(); i++) {
+			WorkspaceSymbol* sym = &workspace.symbols[i];
+			if (sym.name.len == 0) continue;
+			if (sym.kind != SymbolKind.CLASS) continue;
+			// Check if it's an annotation class (has annotation modifier or name convention)
+			// We can't easily check mod_flags from WorkspaceSymbol, so include all classes
+			// that are capitalized (annotation classes are always PascalCase)
+			if (prefix.len > 0 && !sym.name.starts_with(prefix)) continue;
+			if (prefix.len > 0 && sym.name == prefix) continue;
+
+			Object* item = object::new_obj(tmem);
+			item.set("label", sym.name);
+			item.set("kind", COMPLETION_KIND_CLASS);
+			item.set("detail", "class");
+			item.set("sortText", "2");
+			items.push(item);
+		}
+	}
 }
 
 /**

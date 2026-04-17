@@ -6,6 +6,7 @@ import kls::kotlin::parser;
 import kls::kotlin::types;
 import kls::kotlin::incremental;
 import kls::kotlin::token_cache;
+import kls::workspace;
 
 const usz MAX_SEMANTIC_DATA = 81920; // 16384 tokens * 5 ints
 
@@ -29,10 +30,12 @@ struct Document {
 
 struct DocumentStore {
 	HashMap{String, Document} docs;
+	WorkspaceIndex* workspace;     // optional, set for cross-file type resolution
 }
 
 fn void DocumentStore.init(DocumentStore* self) {
 	self.docs.init(mem);
+	self.workspace = null;
 }
 
 fn void DocumentStore.free(DocumentStore* self) {
@@ -395,7 +398,11 @@ fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
 			parser::parse(doc.content, doc.cached_ast);
 		}
 		doc.cached_types = mem::new(TypeInfo);
+		if (self.workspace != null) {
+			types::set_workspace(self.workspace);
+		}
 		types::resolve_types(doc.cached_ast, doc.cached_types);
+		types::clear_workspace();
 	}
 
 	return doc.cached_types;
