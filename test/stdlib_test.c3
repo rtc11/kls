@@ -187,11 +187,13 @@ fn void stdlib_completions_have_documentation() @test {
 			Object* item = items.get_at(i);
 			String label = item.get_string("label")!!;
 			if (label == "println") {
-				Object* doc_obj = item.get("documentation")!!;
-				String doc_kind = doc_obj.get_string("kind")!!;
-				assert(doc_kind == "markdown", "expected documentation kind 'markdown', got '%s'", doc_kind);
-				String doc_value = doc_obj.get_string("value")!!;
-				assert(doc_value.contains("println"), "expected documentation to contain 'println'");
+				// Documentation is deferred to completionItem/resolve.
+				// Check that data field has resolve info.
+				Object* data = item.get("data")!!;
+				String source = data.get_string("source")!!;
+				assert(source == "stdlib", "expected data source 'stdlib', got '%s'", source);
+				String name = data.get_string("name")!!;
+				assert(name == "println", "expected data name 'println', got '%s'", name);
 				return;
 			}
 		}
@@ -299,4 +301,61 @@ fn void extension_method_has_receiver() @test {
 		}
 	}
 	assert(found_with_receiver, "expected at least one map overload with a receiver");
+}
+
+fn void completion_resolve_stdlib_adds_documentation() @test {
+	@pool() {
+		// Build a completion item with data like add_stdlib_completions would
+		Object* item = object::new_obj(tmem);
+		item.set("label", "println");
+		item.set("kind", completion::COMPLETION_KIND_FUNCTION);
+		item.set("detail", "kotlin.io");
+
+		Object* data = object::new_obj(tmem);
+		data.set("source", "stdlib");
+		data.set("name", "println");
+		data.set("package", "kotlin.io");
+		item.set("data", data);
+
+		// Resolve should add documentation
+		Object* resolved = completion::handle_completion_resolve(null, item);
+		Object* doc_obj = resolved.get("documentation")!!;
+		String doc_kind = doc_obj.get_string("kind")!!;
+		assert(doc_kind == "markdown", "expected markdown, got '%s'", doc_kind);
+		String doc_value = doc_obj.get_string("value")!!;
+		assert(doc_value.contains("println"), "expected doc to contain 'println'");
+	};
+}
+
+fn void completion_resolve_member_adds_signature() @test {
+	@pool() {
+		Object* item = object::new_obj(tmem);
+		item.set("label", "length");
+		item.set("kind", completion::COMPLETION_KIND_PROPERTY);
+
+		Object* data = object::new_obj(tmem);
+		data.set("source", "member");
+		data.set("name", "length");
+		data.set("signature", "val length: Int");
+		item.set("data", data);
+
+		Object* resolved = completion::handle_completion_resolve(null, item);
+		Object* doc_obj = resolved.get("documentation")!!;
+		String doc_value = doc_obj.get_string("value")!!;
+		assert(doc_value.contains("val length: Int"), "expected signature in doc");
+	};
+}
+
+fn void completion_resolve_no_data_returns_item_unchanged() @test {
+	@pool() {
+		Object* item = object::new_obj(tmem);
+		item.set("label", "myVar");
+		item.set("kind", completion::COMPLETION_KIND_VARIABLE);
+
+		Object* resolved = completion::handle_completion_resolve(null, item);
+		// No data -> no documentation added
+		assert(resolved == item, "expected same item returned");
+		Object* doc = resolved.get("documentation") ?? null;
+		assert(doc == null, "expected no documentation for item without data");
+	};
 }

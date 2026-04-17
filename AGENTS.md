@@ -44,7 +44,7 @@ kls/
       lifecycle.c3            # kls::lsp::lifecycle - initialize, shutdown handlers
       sync.c3                 # kls::lsp::sync - didOpen, didChange, didClose (triggers diagnostics)
       capabilities.c3         # kls::lsp::capabilities - server capability declarations
-      diagnostics.c3          # kls::lsp::diagnostics - publishDiagnostics (lexer + parser errors)
+      diagnostics.c3          # kls::lsp::diagnostics - publishDiagnostics (lexer + parser errors, unused imports/locals, deprecated usage)
       hover.c3                # kls::lsp::hover - textDocument/hover (keywords, AST signatures, dep docs)
       completion.c3           # kls::lsp::completion - textDocument/completion (keywords, identifiers, cross-file)
       definition.c3           # kls::lsp::definition - textDocument/definition (scope-aware, cross-file, dep sources)
@@ -52,6 +52,7 @@ kls/
       document_symbols.c3     # kls::lsp::document_symbols - textDocument/documentSymbol (hierarchical)
       semantic_tokens.c3      # kls::lsp::semantic_tokens - textDocument/semanticTokens/full (AST-enhanced)
       code_actions.c3         # kls::lsp::code_actions - textDocument/codeAction (quickfixes, organize imports)
+      execute_command.c3      # kls::lsp::execute_command - workspace/executeCommand (run main, run test)
       progress.c3             # kls::lsp::progress - $/progress (work done progress reporting)
       type_definition.c3      # kls::lsp::type_definition - textDocument/typeDefinition
       code_lens.c3            # kls::lsp::code_lens - textDocument/codeLens (Run main, Run Test)
@@ -66,6 +67,7 @@ kls/
       workspace_symbols.c3    # kls::lsp::workspace_symbols - workspace/symbol (fuzzy query)
       document_highlight.c3   # kls::lsp::document_highlight - textDocument/documentHighlight (read/write)
       call_hierarchy.c3       # kls::lsp::call_hierarchy - textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, callHierarchy/outgoingCalls
+      document_link.c3        # kls::lsp::document_link - textDocument/documentLink (URLs in comments, import paths)
     kotlin/
       token.c3                # kls::kotlin::token - Token enum, Token/TokenSpan structs
       lexer.c3                # kls::kotlin::lexer - Kotlin source tokenizer (next + next_all modes)
@@ -115,7 +117,9 @@ kls/
     type_hierarchy_test.c3    # Type hierarchy tests
     workspace_symbols_test.c3 # Workspace symbols tests
     document_highlight_test.c3 # Document highlight tests
+    document_link_test.c3     # Document link tests
     call_hierarchy_test.c3    # Call hierarchy tests
+    execute_command_test.c3   # Execute command tests
     javadoc_test.c3           # Javadoc extraction tests
     classfile_test.c3         # Class file parser tests
     stdlib_test.c3            # Stdlib symbol tests
@@ -300,7 +304,7 @@ Content-Length: <byte-count>\r\n
 2. **Document sync**: didOpen / didChange / didClose (full sync)
 3. **Diagnostics**: publishDiagnostics (lexer + parser errors)
 4. **Hover**: textDocument/hover (keywords, AST signatures, dep Javadoc/KDoc)
-5. **Completion**: textDocument/completion (keywords, identifiers, cross-file, stdlib, deps)
+5. **Completion**: textDocument/completion (keywords, identifiers, cross-file, stdlib, deps) + completionItem/resolve (lazy docs)
 6. **Go to definition**: textDocument/definition (scope-aware, cross-file, dep source navigation)
 7. **Find references**: textDocument/references (lexer-based, AST filtering, cross-file)
 8. **Document symbols**: textDocument/documentSymbol (hierarchical)
@@ -308,7 +312,7 @@ Content-Length: <byte-count>\r\n
 10. **Code actions**: textDocument/codeAction (quickfixes, organize imports)
 11. **Type definition**: textDocument/typeDefinition (jump to type of symbol)
 12. **Code lens**: textDocument/codeLens (Run main, Run Test on @Test)
-13. **Formatting**: textDocument/formatting (whitespace, indent, blank lines)
+13. **Formatting**: textDocument/formatting + textDocument/rangeFormatting + textDocument/onTypeFormatting (whitespace, indent, blank lines, auto-indent)
 14. **Inlay hints**: textDocument/inlayHint (param names at call sites, type hints for val/var)
 15. **Selection range**: textDocument/selectionRange (AST-based expand/shrink)
 16. **Signature help**: textDocument/signatureHelp (active param index)
@@ -320,6 +324,8 @@ Content-Length: <byte-count>\r\n
 22. **Type hierarchy**: textDocument/prepareTypeHierarchy, typeHierarchy/supertypes, typeHierarchy/subtypes
 23. **Progress**: $/progress (work done progress reporting)
 24. **Call hierarchy**: textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, callHierarchy/outgoingCalls
+25. **Execute command**: workspace/executeCommand (kotlin.runMain, kotlin.runTest via Gradle/Maven/kotlinc)
+26. **Document link**: textDocument/documentLink (URLs in comments, import paths to workspace files)
 
 ## Kotlin Grammar Reference
 

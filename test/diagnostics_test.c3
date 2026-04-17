@@ -89,7 +89,7 @@ fn void valid_operators_produce_no_errors() @test {
 	@pool() {
 		// All valid Kotlin operators -- should produce no lexer errors.
 		// Wrap them in a function body so the parser is happy too.
-		Object* result = build_test_diagnostics("fun f() { val x = 1 && true || false }");
+		Object* result = build_test_diagnostics("fun f() { val _x = 1 && true || false }");
 		assert(result.is_indexable());
 		if (result.is_array()) {
 			assert(result.get_len() == 0);
@@ -139,7 +139,7 @@ fn void unused_import_gets_unnecessary_tag() @test {
 	@pool() {
 		Object* result = build_test_diagnostics(
 			`import com.example.Foo
-fun main() { val x = 42 }`
+fun main() { val _x = 42 }`
 		);
 		assert(result.is_array());
 		assert(result.get_len() == 1, "expected 1 diagnostic, got %d", (int)result.get_len());
@@ -164,7 +164,7 @@ fn void used_import_has_no_diagnostic() @test {
 	@pool() {
 		Object* result = build_test_diagnostics(
 			`import com.example.Foo
-fun main() { val x: Foo = Foo() }`
+fun main() { val _x: Foo = Foo() }`
 		);
 		assert(result.is_indexable());
 		if (result.is_array()) {
@@ -177,7 +177,7 @@ fn void wildcard_import_not_flagged() @test {
 	@pool() {
 		Object* result = build_test_diagnostics(
 			`import com.example.*
-fun main() { val x = 42 }`
+fun main() { val _x = 42 }`
 		);
 		assert(result.is_indexable());
 		if (result.is_array()) {
@@ -191,7 +191,7 @@ fn void aliased_import_used_by_alias() @test {
 		// Import is aliased; the alias name is used in the code
 		Object* result = build_test_diagnostics(
 			`import com.example.Bar as Baz
-fun main() { val x: Baz = Baz() }`
+fun main() { val _x: Baz = Baz() }`
 		);
 		assert(result.is_indexable());
 		if (result.is_array()) {
@@ -205,7 +205,7 @@ fn void aliased_import_unused() @test {
 		// Import is aliased but the alias name is never used
 		Object* result = build_test_diagnostics(
 			`import com.example.Bar as Baz
-fun main() { val x = 42 }`
+fun main() { val _x = 42 }`
 		);
 		assert(result.is_array());
 		assert(result.get_len() == 1, "expected 1 diagnostic for unused alias, got %d", (int)result.get_len());
@@ -223,7 +223,7 @@ fn void multiple_imports_some_unused() @test {
 			`import com.example.Foo
 import com.example.Bar
 import com.example.Baz
-fun main() { val x: Foo = Foo(); val y: Baz = Baz() }`
+fun main() { val _x: Foo = Foo(); val _y: Baz = Baz() }`
 		);
 		assert(result.is_array());
 		// Only Bar is unused
@@ -255,7 +255,7 @@ fn void import_name_in_other_import_not_counted() @test {
 		Object* result = build_test_diagnostics(
 			`import com.example.Foo
 import com.other.Foo.Bar
-fun main() { val x: Bar = Bar() }`
+fun main() { val _x: Bar = Bar() }`
 		);
 		assert(result.is_array());
 		// The first import (Foo) is unused -- its name only appears inside
@@ -296,7 +296,7 @@ fn void single_segment_import_unused() @test {
 		// Single-segment import (no dots)
 		Object* result = build_test_diagnostics(
 			`import Foo
-fun main() { val x = 42 }`
+fun main() { val _x = 42 }`
 		);
 		assert(result.is_array());
 		assert(result.get_len() == 1, "expected 1 diagnostic for unused single-segment import, got %d", (int)result.get_len());
@@ -513,7 +513,7 @@ fn void class_decl_name_in_scope_no_diagnostic() @test {
 		// A class declared in the same file should be resolvable
 		Object* result = build_diagnostics_with_workspace(
 			`class Foo
-fun main() { val x = Foo() }`
+fun main() { val _x = Foo() }`
 		);
 		assert(result.is_indexable());
 		for (usz i = 0; i < result.get_len(); i++) {
@@ -980,6 +980,182 @@ object Topics {
 			String msg = diag.get_string("message") ?? "";
 			assert(!msg.contains("Unresolved reference: 'bytes'"),
 				"star-imported workspace function should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+// ── Deprecated usage diagnostic tests ─────────────────────────────
+
+fn void deprecated_function_usage_gets_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`@Deprecated("use newFoo instead")
+fun oldFoo() {}
+
+fun main() { oldFoo() }`
+		);
+		assert(result.is_array());
+		bool found_deprecated = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg.contains("deprecated")) {
+				found_deprecated = true;
+				assert(diag.get_int("severity")!! == 4, "deprecated should be Hint severity");
+				Object* tags = diag.get("tags")!!;
+				assert(tags.is_array());
+				assert(tags.get_len() == 1);
+				assert(tags.get_int_at(0)!! == 2, "expected DiagnosticTag.Deprecated (2)");
+			}
+		}
+		assert(found_deprecated, "expected a deprecated diagnostic for oldFoo usage");
+	};
+}
+
+fn void deprecated_class_usage_gets_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`@Deprecated("use NewClass")
+class OldClass
+
+fun main() { val _x = OldClass() }`
+		);
+		assert(result.is_array());
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg.contains("'OldClass' is deprecated")) {
+				found = true;
+				Object* tags = diag.get("tags")!!;
+				assert(tags.get_int_at(0)!! == 2);
+			}
+		}
+		assert(found, "expected deprecated diagnostic for OldClass");
+	};
+}
+
+fn void non_deprecated_no_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun normalFun() {}
+fun main() { normalFun() }`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("deprecated"), "no deprecated diagnostics expected, got: %s", msg);
+		}
+	};
+}
+
+// ── Unused local variable diagnostic tests ────────────────────────
+
+fn void unused_val_gets_unnecessary_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    val unused = 42
+}`
+		);
+		assert(result.is_array());
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg.contains("'unused' is never used")) {
+				found = true;
+				assert(diag.get_int("severity")!! == 4, "unused local should be Hint");
+				Object* tags = diag.get("tags")!!;
+				assert(tags.get_int_at(0)!! == 1, "expected DiagnosticTag.Unnecessary (1)");
+				assert(msg.contains("Value"), "val should say 'Value', got: %s", msg);
+			}
+		}
+		assert(found, "expected unused local diagnostic");
+	};
+}
+
+fn void unused_var_says_variable() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var unused = 42
+}`
+		);
+		assert(result.is_array());
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			if (msg.contains("'unused' is never used")) {
+				found = true;
+				assert(msg.contains("Variable"), "var should say 'Variable', got: %s", msg);
+			}
+		}
+		assert(found, "expected unused var diagnostic");
+	};
+}
+
+fn void used_local_no_diagnostic() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    val x = 42
+    println(x)
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("is never used"), "used local should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void underscore_prefix_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    val _ignored = 42
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("is never used"), "_prefix should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void top_level_val_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`val topLevel = 42`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("is never used"), "top-level val should not be flagged, got: %s", msg);
+		}
+	};
+}
+
+fn void class_property_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class Foo {
+    val bar = 42
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("is never used"), "class property should not be flagged, got: %s", msg);
 		}
 	};
 }

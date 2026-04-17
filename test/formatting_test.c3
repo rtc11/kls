@@ -336,3 +336,298 @@ fn void combined_formatting() @test {
 			"combined formatting failed, got '%s'", new_text);
 	};
 }
+
+// ── Range formatting ─────────────────────────────────────────────
+
+fn Object* make_range_params(String uri, int tab_size, bool insert_spaces,
+	int start_line, int start_char, int end_line, int end_char) {
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+
+	Object* opts = object::new_obj(tmem);
+	opts.set("tabSize", tab_size);
+	opts.set("insertSpaces", insert_spaces);
+
+	Object* start_pos = object::new_obj(tmem);
+	start_pos.set("line", start_line);
+	start_pos.set("character", start_char);
+
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", end_line);
+	end_pos.set("character", end_char);
+
+	Object* range = object::new_obj(tmem);
+	range.set("start", start_pos);
+	range.set("end", end_pos);
+
+	Object* params = object::new_obj(tmem);
+	params.set("textDocument", td);
+	params.set("options", opts);
+	params.set("range", range);
+	return params;
+}
+
+fn void range_format_unknown_document_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		Object* params = make_range_params("file:///unknown.kt", 4, true, 0, 0, 0, 10);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result == null, "expected null for unknown document");
+	};
+}
+
+fn void range_format_trims_trailing_whitespace() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {\n    val x = 1   \n    val y = 2\n}\n";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Format only line 1 (the line with trailing whitespace)
+		Object* params = make_range_params("file:///test.kt", 4, true, 1, 0, 1, 20);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result != null, "expected non-null result");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "    val x = 1\n", "expected trimmed, got '%s'", new_text);
+	};
+}
+
+fn void range_format_normalizes_indent_in_range() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Tab-indented content, format lines 1-2 with insertSpaces=true
+		String content = "fun main() {\n\tval x = 1\n\tval y = 2\n}\n";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_range_params("file:///test.kt", 4, true, 1, 0, 2, 10);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result != null, "expected non-null result");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "    val x = 1\n    val y = 2\n", "expected spaces, got '%s'", new_text);
+	};
+}
+
+fn void range_format_no_change_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {\n    val x = 1\n}\n";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_range_params("file:///test.kt", 4, true, 1, 0, 1, 10);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result == null, "expected null when no changes needed");
+	};
+}
+
+fn void range_format_single_line() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {   \n}\n";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_range_params("file:///test.kt", 4, true, 0, 0, 0, 20);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result != null, "expected non-null result");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "fun main() {\n", "expected trimmed, got '%s'", new_text);
+	};
+}
+
+fn void range_format_does_not_add_final_newline() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Last line has no newline; range formatting should not add one
+		String content = "fun main() {\n    val x = 1   \n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Format middle line only
+		Object* params = make_range_params("file:///test.kt", 4, true, 1, 0, 1, 20);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result != null, "expected non-null result");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "    val x = 1\n", "expected trimmed without extra newline, got '%s'", new_text);
+	};
+}
+
+fn void range_format_fixes_over_indented_line_in_interface() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// "fun connect" has two tabs (over-indented), others have one tab
+		String content = "interface Streams : AutoCloseable {\n\t\tfun connect()\n\tfun ready(): Boolean\n}\n";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Format line 1 (the over-indented line)
+		Object* params = make_range_params("file:///test.kt", 4, false, 1, 0, 1, 20);
+		Object* result = formatting::handle_range_formatting(&store, params);
+		assert(result != null, "expected non-null result for over-indented line");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "\tfun connect()\n", "expected single tab indent, got '%s'", new_text);
+	};
+}
+
+// ── On-type formatting ───────────────────────────────────────────
+
+fn Object* make_on_type_params(String uri, int line, int character, String ch,
+	int tab_size, bool insert_spaces) {
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+
+	Object* pos = object::new_obj(tmem);
+	pos.set("line", line);
+	pos.set("character", character);
+
+	Object* opts = object::new_obj(tmem);
+	opts.set("tabSize", tab_size);
+	opts.set("insertSpaces", insert_spaces);
+
+	Object* params = object::new_obj(tmem);
+	params.set("textDocument", td);
+	params.set("position", pos);
+	params.set("ch", ch);
+	params.set("options", opts);
+	return params;
+}
+
+fn void on_type_newline_after_brace() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// User typed Enter after '{', cursor now on line 1
+		String content = "fun main() {\n\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_on_type_params("file:///test.kt", 1, 0, "\n", 4, true);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result != null, "expected edits");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "    ", "expected 4-space indent, got '%s'", new_text);
+	};
+}
+
+fn void on_type_newline_maintains_indent() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Previous line has 4-space indent, new line should match
+		String content = "fun main() {\n    val x = 1\n\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on line 2 (empty line after "val x = 1")
+		Object* params = make_on_type_params("file:///test.kt", 2, 0, "\n", 4, true);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result != null, "expected edits");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "    ", "expected 4-space indent, got '%s'", new_text);
+	};
+}
+
+fn void on_type_newline_no_indent_at_top() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "package com.example\n\n";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Line 0 has no indent, so line 1 should have no indent -> null
+		Object* params = make_on_type_params("file:///test.kt", 1, 0, "\n", 4, true);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result == null, "expected null when indent already correct");
+	};
+}
+
+fn void on_type_close_brace_deindents() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// User typed '}' on line 2 with wrong indent
+		String content = "fun main() {\n    val x = 1\n    }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_on_type_params("file:///test.kt", 2, 5, "}", 4, true);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result != null, "expected edits for deindent");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "", "expected 0-space indent (deindent to match 'fun'), got '%s'", new_text);
+	};
+}
+
+fn void on_type_close_brace_already_correct() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {\n    val x = 1\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_on_type_params("file:///test.kt", 2, 1, "}", 4, true);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result == null, "expected null when indent already correct");
+	};
+}
+
+fn void on_type_unknown_document() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		Object* params = make_on_type_params("file:///unknown.kt", 1, 0, "\n", 4, true);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result == null, "expected null for unknown document");
+	};
+}
+
+fn void on_type_newline_with_tabs() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {\n\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_on_type_params("file:///test.kt", 1, 0, "\n", 4, false);
+		Object* result = formatting::handle_on_type_formatting(&store, params);
+		assert(result != null, "expected edits");
+
+		String new_text = get_new_text(result);
+		assert(new_text == "\t", "expected tab indent, got '%s'", new_text);
+	};
+}

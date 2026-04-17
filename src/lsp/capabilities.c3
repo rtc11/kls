@@ -2,6 +2,7 @@ module kls::lsp::capabilities;
 
 import std::collections::object;
 import kls::lsp::semantic_tokens;
+import kls::lsp::execute_command;
 
 /**
  * Build the server capabilities object for the initialize response.
@@ -29,6 +30,7 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	Object* trigger_chars = object::new_obj(tmem);
 	trigger_chars.push(object::new_string(".", tmem));
 	completion_opts.set("triggerCharacters", trigger_chars);
+	completion_opts.set("resolveProvider", true);
 	caps.set("completionProvider", completion_opts);
 
 	// Signature help support
@@ -74,8 +76,16 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Selection range support (smart selection expand/shrink)
 	caps.set("selectionRangeProvider", true);
 
-	// Document formatting support
+	// Document formatting support (full + range + on-type)
 	caps.set("documentFormattingProvider", true);
+	caps.set("documentRangeFormattingProvider", true);
+
+	Object* on_type_opts = object::new_obj(tmem);
+	on_type_opts.set("firstTriggerCharacter", "\n");
+	Object* more_triggers = object::new_obj(tmem);
+	more_triggers.push(object::new_string("}", tmem));
+	on_type_opts.set("moreTriggerCharacter", more_triggers);
+	caps.set("documentOnTypeFormattingProvider", on_type_opts);
 
 	// Code action support (quick fixes + organize imports)
 	Object* code_action_opts = object::new_obj(tmem);
@@ -93,11 +103,17 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Inlay hint support
 	caps.set("inlayHintProvider", true);
 
+	// Document link support (URLs + import paths)
+	caps.set("documentLinkProvider", true);
+
 	// Call hierarchy support (prepare + incoming/outgoing)
 	caps.set("callHierarchyProvider", true);
 
 	// Type hierarchy support (prepare + supertypes/subtypes)
 	caps.set("typeHierarchyProvider", true);
+
+	// Execute command support (run main, run test)
+	caps.set("executeCommandProvider", execute_command::build_execute_command_options());
 
 	// Workspace capabilities
 	Object* workspace_caps = object::new_obj(tmem);

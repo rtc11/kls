@@ -52,7 +52,7 @@ const String[] KOTLIN_KEYWORDS = {
 /**
  * Handle textDocument/completion request.
  * Returns a CompletionList JSON object with keyword, identifier, and
- * workspace completions.
+ * workspace completions. Documentation is omitted; use completionItem/resolve.
  */
 fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!!;
@@ -122,6 +122,130 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	result.set("items", items);
 
 	return result;
+}
+
+/**
+ * Handle completionItem/resolve request.
+ * Populates the documentation field based on the item's data.
+ * Returns the enriched completion item.
+ */
+fn Object* handle_completion_resolve(WorkspaceIndex* workspace, Object* item) {
+	Object* data = item.get("data") ?? null;
+	if (data == null) return item;
+
+	String source = data.get_string("source") ?? "";
+	String name = data.get_string("name") ?? "";
+
+	if (source == "stdlib") {
+		String pkg = data.get_string("package") ?? "";
+		resolve_stdlib_doc(item, name, pkg);
+	} else if (source == "jdk") {
+		String pkg = data.get_string("package") ?? "";
+		resolve_jdk_doc(item, name, pkg);
+	} else if (source == "dep") {
+		String pkg = data.get_string("package") ?? "";
+		resolve_dep_doc(item, workspace, name, pkg);
+	} else if (source == "member") {
+		String signature = data.get_string("signature") ?? "";
+		resolve_member_doc(item, signature);
+	}
+
+	return item;
+}
+
+fn void resolve_stdlib_doc(Object* item, String name, String pkg) {
+	StdlibSymbol*[128] matches;
+	usz count = stdlib::lookup_by_prefix(name, &matches);
+	for (usz i = 0; i < count; i++) {
+		StdlibSymbol* sym = matches[i];
+		if (sym.name == name && sym.package_name == pkg) {
+			Object* doc_obj = object::new_obj(tmem);
+			doc_obj.set("kind", "markdown");
+			DString doc_val;
+			doc_val.tinit();
+			doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+			if (sym.doc.len > 0) {
+				doc_val.appendf("\n\n%s", sym.doc);
+			}
+			doc_obj.set("value", doc_val.str_view());
+			item.set("documentation", doc_obj);
+			return;
+		}
+	}
+	// Also check all symbols by name (for receiver-scoped matches)
+	StdlibSymbol*[64] recv_matches;
+	usz recv_count = stdlib::lookup_all_by_name(name, &recv_matches);
+	for (usz i = 0; i < recv_count; i++) {
+		StdlibSymbol* sym = recv_matches[i];
+		if (sym.name == name && sym.package_name == pkg) {
+			Object* doc_obj = object::new_obj(tmem);
+			doc_obj.set("kind", "markdown");
+			DString doc_val;
+			doc_val.tinit();
+			doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+			if (sym.doc.len > 0) {
+				doc_val.appendf("\n\n%s", sym.doc);
+			}
+			doc_obj.set("value", doc_val.str_view());
+			item.set("documentation", doc_obj);
+			return;
+		}
+	}
+}
+
+fn void resolve_jdk_doc(Object* item, String name, String pkg) {
+	StdlibSymbol*[128] matches;
+	usz count = jdk_symbols::lookup_by_prefix(name, &matches);
+	for (usz i = 0; i < count; i++) {
+		StdlibSymbol* sym = matches[i];
+		if (sym.name == name && sym.package_name == pkg) {
+			Object* doc_obj = object::new_obj(tmem);
+			doc_obj.set("kind", "markdown");
+			DString doc_val;
+			doc_val.tinit();
+			doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+			if (sym.doc.len > 0) {
+				doc_val.appendf("\n\n%s", sym.doc);
+			}
+			doc_obj.set("value", doc_val.str_view());
+			item.set("documentation", doc_obj);
+			return;
+		}
+	}
+}
+
+fn void resolve_dep_doc(Object* item, WorkspaceIndex* workspace, String name, String pkg) {
+	if (workspace == null || !workspace.dep_index.initialized) return;
+
+	DepSymbol*[128] matches;
+	usz count = workspace.dep_index.lookup_by_prefix(name, &matches);
+	for (usz i = 0; i < count; i++) {
+		DepSymbol* sym = matches[i];
+		if (sym.name == name && sym.package_name == pkg) {
+			Object* doc_obj = object::new_obj(tmem);
+			doc_obj.set("kind", "markdown");
+			DString doc_val;
+			doc_val.tinit();
+			doc_val.appendf("```kotlin\n%s\n```", sym.signature);
+			if (sym.class_name.len > 0) {
+				doc_val.appendf("\n\n*%s* (%s)", sym.package_name, sym.class_name);
+			}
+			doc_obj.set("value", doc_val.str_view());
+			item.set("documentation", doc_obj);
+			return;
+		}
+	}
+}
+
+fn void resolve_member_doc(Object* item, String signature) {
+	if (signature.len == 0) return;
+	Object* doc_obj = object::new_obj(tmem);
+	doc_obj.set("kind", "markdown");
+	DString doc_val;
+	doc_val.tinit();
+	doc_val.appendf("```kotlin\n%s\n```", signature);
+	doc_obj.set("value", doc_val.str_view());
+	item.set("documentation", doc_obj);
 }
 
 /**
@@ -454,15 +578,13 @@ fn void add_dot_completions(Object* items, DocumentStore* store, WorkspaceIndex*
 		item.set("kind", m.kind);
 		item.set("detail", m.detail);
 
-		// Add documentation with signature
+		// Data for lazy resolve (type member)
 		if (m.signature.len > 0) {
-			Object* doc_obj = object::new_obj(tmem);
-			doc_obj.set("kind", "markdown");
-			DString doc_val;
-			doc_val.tinit();
-			doc_val.appendf("```kotlin\n%s\n```", m.signature);
-			doc_obj.set("value", doc_val.str_view());
-			item.set("documentation", doc_obj);
+			Object* data = object::new_obj(tmem);
+			data.set("source", "member");
+			data.set("name", m.name);
+			data.set("signature", m.signature);
+			item.set("data", data);
 		}
 
 		items.push(item);
@@ -673,13 +795,11 @@ fn void add_members_from_class_ast(Object* items, ParseResult* pr, String class_
 
 			String sig_str = sig.str_view();
 			if (sig_str.len > 0) {
-				Object* doc_obj = object::new_obj(tmem);
-				doc_obj.set("kind", "markdown");
-				DString doc_val;
-				doc_val.tinit();
-				doc_val.appendf("```kotlin\n%s\n```", sig_str);
-				doc_obj.set("value", doc_val.str_view());
-				item.set("documentation", doc_obj);
+				Object* data = object::new_obj(tmem);
+				data.set("source", "member");
+				data.set("name", child.name);
+				data.set("signature", sig_str);
+				item.set("data", data);
 			}
 
 			items.push(item);
@@ -794,13 +914,11 @@ fn void add_members_from_cache(Object* items, List{MemberDecl}* members, String 
 
 		String sig_str = sig.str_view();
 		if (sig_str.len > 0) {
-			Object* doc_obj = object::new_obj(tmem);
-			doc_obj.set("kind", "markdown");
-			DString doc_val;
-			doc_val.tinit();
-			doc_val.appendf("```kotlin\n%s\n```", sig_str);
-			doc_obj.set("value", doc_val.str_view());
-			item.set("documentation", doc_obj);
+			Object* data = object::new_obj(tmem);
+			data.set("source", "member");
+			data.set("name", m.name);
+			data.set("signature", sig_str);
+			item.set("data", data);
 		}
 
 		items.push(item);
@@ -953,16 +1071,12 @@ fn void add_stdlib_receiver_completions(Object* items, TypeRef* receiver_type, S
 		item.set("kind", stdlib_kind_to_completion_kind(sym.kind));
 		item.set("detail", sym.package_name);
 
-		Object* doc_obj = object::new_obj(tmem);
-		doc_obj.set("kind", "markdown");
-		DString doc_val;
-		doc_val.tinit();
-		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
-		if (sym.doc.len > 0) {
-			doc_val.appendf("\n\n%s", sym.doc);
-		}
-		doc_obj.set("value", doc_val.str_view());
-		item.set("documentation", doc_obj);
+		// Data for lazy resolve
+		Object* data = object::new_obj(tmem);
+		data.set("source", "stdlib");
+		data.set("name", sym.name);
+		data.set("package", sym.package_name);
+		item.set("data", data);
 
 		items.push(item);
 	}
@@ -1117,17 +1231,12 @@ fn void add_stdlib_completions(Object* items, String prefix) {
 		item.set("kind", stdlib_kind_to_completion_kind(sym.kind));
 		item.set("detail", sym.package_name);
 
-		// Add documentation with signature
-		Object* doc_obj = object::new_obj(tmem);
-		doc_obj.set("kind", "markdown");
-		DString doc_val;
-		doc_val.tinit();
-		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
-		if (sym.doc.len > 0) {
-			doc_val.appendf("\n\n%s", sym.doc);
-		}
-		doc_obj.set("value", doc_val.str_view());
-		item.set("documentation", doc_obj);
+		// Data for lazy resolve
+		Object* data = object::new_obj(tmem);
+		data.set("source", "stdlib");
+		data.set("name", sym.name);
+		data.set("package", sym.package_name);
+		item.set("data", data);
 
 		items.push(item);
 	}
@@ -1182,17 +1291,12 @@ fn void add_jdk_completions(Object* items, String prefix) {
 		item.set("kind", stdlib_kind_to_completion_kind(sym.kind));
 		item.set("detail", sym.package_name);
 
-		// Add documentation with signature
-		Object* doc_obj = object::new_obj(tmem);
-		doc_obj.set("kind", "markdown");
-		DString doc_val;
-		doc_val.tinit();
-		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
-		if (sym.doc.len > 0) {
-			doc_val.appendf("\n\n%s", sym.doc);
-		}
-		doc_obj.set("value", doc_val.str_view());
-		item.set("documentation", doc_obj);
+		// Data for lazy resolve
+		Object* data = object::new_obj(tmem);
+		data.set("source", "jdk");
+		data.set("name", sym.name);
+		data.set("package", sym.package_name);
+		item.set("data", data);
 
 		items.push(item);
 	}
@@ -1262,17 +1366,12 @@ fn void add_dependency_completions(Object* items, DependencyIndex* dep_index, St
 		item.set("kind", jar_index::dep_kind_to_completion_kind(sym.kind));
 		item.set("detail", sym.package_name);
 
-		// Add documentation with signature
-		Object* doc_obj = object::new_obj(tmem);
-		doc_obj.set("kind", "markdown");
-		DString doc_val;
-		doc_val.tinit();
-		doc_val.appendf("```kotlin\n%s\n```", sym.signature);
-		if (sym.class_name.len > 0) {
-			doc_val.appendf("\n\n*%s* (%s)", sym.package_name, sym.class_name);
-		}
-		doc_obj.set("value", doc_val.str_view());
-		item.set("documentation", doc_obj);
+		// Data for lazy resolve
+		Object* data = object::new_obj(tmem);
+		data.set("source", "dep");
+		data.set("name", sym.name);
+		data.set("package", sym.package_name);
+		item.set("data", data);
 
 		items.push(item);
 	}

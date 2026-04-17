@@ -134,7 +134,7 @@ fn void valid_code_no_actions() @test {
 		store.init();
 		defer store.free();
 
-		String content = "fun main() { val x = 42 }";
+		String content = "fun main() { val _x = 42 }";
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -155,7 +155,7 @@ fn void unused_import_returns_remove_action() @test {
 		defer store.free();
 
 		String content = `import com.example.Foo
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -185,7 +185,7 @@ fn void unused_import_edit_deletes_full_line() @test {
 		defer store.free();
 
 		String content = `import com.example.Foo
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -217,7 +217,7 @@ fn void unused_import_action_is_preferred() @test {
 		defer store.free();
 
 		String content = `import com.example.Foo
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -242,7 +242,7 @@ fn void two_unused_imports_returns_organize_action() @test {
 
 		String content = `import com.example.Foo
 import com.example.Bar
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -281,7 +281,7 @@ fn void single_unused_import_also_has_organize_action() @test {
 		defer store.free();
 
 		String content = `import com.example.Foo
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -305,7 +305,7 @@ fn void organize_imports_works_without_cursor_on_import() @test {
 
 		String content = `import com.example.Foo
 import com.example.Bar
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		// Client sends NO diagnostics (cursor is on line 2, not on imports)
@@ -547,7 +547,7 @@ fn void only_filter_quickfix() @test {
 
 		String content = `import com.example.Foo
 import com.example.Bar
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -575,7 +575,7 @@ fn void only_filter_source_organize_imports() @test {
 
 		String content = `import com.example.Foo
 import com.example.Bar
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -599,7 +599,7 @@ fn void action_links_to_diagnostics() @test {
 		defer store.free();
 
 		String content = `import com.example.Foo
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
@@ -671,7 +671,7 @@ fn void only_filter_source_parent_matches_organize() @test {
 
 		String content = `import com.example.Foo
 import com.example.Bar
-fun main() { val x = 42 }`;
+fun main() { val _x = 42 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
