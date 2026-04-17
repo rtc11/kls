@@ -93,6 +93,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Inlay hint support
 	caps.set("inlayHintProvider", true);
 
+	// Call hierarchy support (prepare + incoming/outgoing)
+	caps.set("callHierarchyProvider", true);
+
 	// Workspace capabilities
 	Object* workspace_caps = object::new_obj(tmem);
 	Object* file_operations = object::new_obj(tmem);

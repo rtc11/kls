@@ -26,6 +26,7 @@ import kls::lsp::formatting;
 import kls::lsp::code_actions;
 import kls::lsp::code_lens;
 import kls::lsp::inlay_hints;
+import kls::lsp::call_hierarchy;
 import kls::lsp::diagnostics;
 import kls::lsp::progress;
 import kls::workspace;
@@ -321,6 +322,30 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/rename":
 			if (params != null) {
 				Object* result = rename::handle_rename(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/prepareCallHierarchy":
+			if (params != null) {
+				Object* result = call_hierarchy::handle_prepare(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "callHierarchy/incomingCalls":
+			if (params != null) {
+				Object* result = call_hierarchy::handle_incoming_calls(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "callHierarchy/outgoingCalls":
+			if (params != null) {
+				Object* result = call_hierarchy::handle_outgoing_calls(&self.documents, &self.workspace, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
