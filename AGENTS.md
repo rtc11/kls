@@ -65,6 +65,7 @@ kls/
       type_hierarchy.c3       # kls::lsp::type_hierarchy - textDocument/prepareTypeHierarchy, typeHierarchy/supertypes, typeHierarchy/subtypes
       workspace_symbols.c3    # kls::lsp::workspace_symbols - workspace/symbol (fuzzy query)
       document_highlight.c3   # kls::lsp::document_highlight - textDocument/documentHighlight (read/write)
+      call_hierarchy.c3       # kls::lsp::call_hierarchy - textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, callHierarchy/outgoingCalls
     kotlin/
       token.c3                # kls::kotlin::token - Token enum, Token/TokenSpan structs
       lexer.c3                # kls::kotlin::lexer - Kotlin source tokenizer (next + next_all modes)
@@ -114,6 +115,7 @@ kls/
     type_hierarchy_test.c3    # Type hierarchy tests
     workspace_symbols_test.c3 # Workspace symbols tests
     document_highlight_test.c3 # Document highlight tests
+    call_hierarchy_test.c3    # Call hierarchy tests
     javadoc_test.c3           # Javadoc extraction tests
     classfile_test.c3         # Class file parser tests
     stdlib_test.c3            # Stdlib symbol tests
@@ -317,6 +319,7 @@ Content-Length: <byte-count>\r\n
 21. **Document highlight**: textDocument/documentHighlight (read/write classification)
 22. **Type hierarchy**: textDocument/prepareTypeHierarchy, typeHierarchy/supertypes, typeHierarchy/subtypes
 23. **Progress**: $/progress (work done progress reporting)
+24. **Call hierarchy**: textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, callHierarchy/outgoingCalls
 
 ## Kotlin Grammar Reference
 

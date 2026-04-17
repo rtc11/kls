@@ -52,6 +52,60 @@ fn Object* make_item_params(String name, String uri, int line, int col) {
 	return params;
 }
 
+// ── prepareCallHierarchy: unknown document returns null ────────────
+
+fn void prepare_unknown_document_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		Object* params = make_params("file:///unknown.kt", 0, 0);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		assert(result == null, "expected null for unknown document");
+	};
+}
+
+// ── prepareCallHierarchy: cursor on keyword returns null ───────────
+
+fn void prepare_on_keyword_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
+		Object* params = make_params("file:///test.kt", 0, 0); // on "fun"
+		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		assert(result == null, "expected null for keyword");
+	};
+}
+
+// ── prepareCallHierarchy: has correct selectionRange ──────────────
+
+fn void prepare_has_selection_range() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun hello() {}");
+		Object* params = make_params("file:///test.kt", 0, 4);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+
+		assert(result != null, "expected result");
+		Object* item = result.get_at(0);
+
+		Object* sel = item.get("selectionRange")!!;
+		Object* sel_start = sel.get("start")!!;
+		int sel_char = sel_start.get_int("character")!!;
+		Object* sel_end = sel.get("end")!!;
+		int sel_end_char = sel_end.get_int("character")!!;
+		assert(sel_char == 4, "expected selectionRange start char 4, got %d", sel_char);
+		assert(sel_end_char == 9, "expected selectionRange end char 9, got %d", sel_end_char);
+	};
+}
+
 // ── prepareCallHierarchy: cursor on function declaration ───────────
 
 fn void prepare_on_function_declaration() @test {
@@ -224,5 +278,123 @@ fun main() { greet(); greet() }`;
 		Object* call0 = result.get_at(0);
 		Object* ranges = call0.get("fromRanges")!!;
 		assert(ranges.get_len() == 2, "expected 2 fromRanges, got %d", (int)ranges.get_len());
+	};
+}
+
+// ── incomingCalls: no callers returns null ─────────────────────────
+
+fn void incoming_calls_no_callers() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun lonely() {}");
+
+		Object* params = make_item_params("lonely", "file:///test.kt", 0, 4);
+		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params);
+
+		assert(result == null, "expected null for no callers");
+	};
+}
+
+// ── incomingCalls: cross-file via workspace ────────────────────────
+// Note: cross-file incoming calls requires workspace name_index to map
+// target function name to files declaring it. The scan then parses those
+// files for CALL_EXPR nodes. Callers in files that only *reference* (not
+// declare) the name are not found — this is a known limitation.
+
+fn void incoming_calls_cross_file() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Both files declare a function named "doWork" — workspace finds both URIs
+		store.open("file:///a.kt", "kotlin", 1, "fun doWork() {}");
+
+		// Second file also has doWork (overload) AND calls it from wrapper
+		String b_content =
+`fun doWork(x: Int) {}
+fun wrapper() {
+    doWork()
+}`;
+		store.open("file:///b.kt", "kotlin", 1, b_content);
+		ws.index_file("file:///b.kt", b_content);
+
+		Object* params = make_item_params("doWork", "file:///a.kt", 0, 4);
+		Object* result = call_hierarchy::handle_incoming_calls(&store, &ws, params);
+
+		assert(result != null, "expected cross-file incoming calls");
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* inc = result.get_at(i);
+			Object* from = inc.get("from")!!;
+			String from_name = from.get_string("name")!!;
+			if (from_name == "wrapper") found = true;
+		}
+		assert(found, "expected 'wrapper' as cross-file caller");
+	};
+}
+
+// ── prepareCallHierarchy: cross-file via workspace ────────────────
+
+fn void prepare_cross_file() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///other.kt", "fun remoteFunc() {}");
+
+		String content =
+`fun main() {
+    remoteFunc()
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 1, 4);
+		Object* result = call_hierarchy::handle_prepare(&store, &ws, params);
+
+		assert(result != null, "expected cross-file prepare result");
+		Object* item = result.get_at(0);
+		String name = item.get_string("name")!!;
+		assert(name == "remoteFunc", "expected 'remoteFunc', got '%s'", name);
+	};
+}
+
+// ── outgoingCalls: repeated calls to same target grouped ──────────
+
+fn void outgoing_calls_repeated_grouped() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun helper() {}
+fun main() {
+    helper()
+    helper()
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_item_params("main", "file:///test.kt", 1, 4);
+		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params);
+
+		assert(result != null, "expected outgoing calls");
+		assert(result.get_len() == 1, "expected 1 outgoing (grouped), got %d", (int)result.get_len());
+
+		Object* outgoing = result.get_at(0);
+		Object* from_ranges = outgoing.get("fromRanges")!!;
+		assert(from_ranges.get_len() == 2, "expected 2 fromRanges, got %d", (int)from_ranges.get_len());
 	};
 }
