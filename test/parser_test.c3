@@ -2918,6 +2918,22 @@ fn void parse_fun_function_type_nullable_param() @test {
 	};
 }
 
+fn void parse_intersection_type_definitely_non_nullable() @test {
+	@pool() {
+		String content = `fun <T> foo(x: T & Any): T & Any { return x }`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for intersection type T & Any, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_intersection_type_in_generic_bound() @test {
+	@pool() {
+		String content = `class Foo<V>(private val topic: Topic<K, V & Any>)`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for intersection type in generic arg, got %d", (int)r.error_count);
+	};
+}
+
 fn void parse_data_class_with_string_template_defaults() @test {
 	@pool() {
 		String content =

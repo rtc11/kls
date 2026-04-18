@@ -712,7 +712,7 @@ fn Token Lexer.lex_operator(Lexer* self, usz start, uint start_line, uint start_
 			return self.make_token_at(SUB, start, start_line, start_col);
 		case '&':
 			if (self.peek() == '&') { self.advance(); return self.make_token_at(CONJ, start, start_line, start_col); }
-			return self.make_token_at(ERROR, start, start_line, start_col);
+			return self.make_token_at(AMP, start, start_line, start_col);
 		case '|':
 			if (self.peek() == '|') { self.advance(); return self.make_token_at(DISJ, start, start_line, start_col); }
 			return self.make_token_at(ERROR, start, start_line, start_col);

@@ -20,7 +20,7 @@ faultdef NO_RECEIVER;
  * Supported actions:
  *   - "Remove unused import" (quickfix) for each unused import diagnostic
  *   - "Remove all unused imports" (source.organizeImports) computed from full document
- *   - "Replace '&' with '&&'" / "'|' with '||'" (quickfix) for operator errors
+ *   - "Replace '|' with '||'" (quickfix) for operator errors
  *   - "Insert missing '<delim>'" (quickfix) for Expected ')', '}', '>' errors
  *   - "Import <pkg>.<name>" (quickfix) for unresolved references
  */
@@ -253,21 +253,18 @@ fn Object* build_organize_imports_action(String uri, Object*[] diags) {
 	return action;
 }
 
-// ── Quick fix: replace & with && or | with || ────────────────────
+// ── Quick fix: replace | with || ─────────────────────────────────
 
 /**
- * If the diagnostic message indicates a lone '&' or '|', offer to
- * replace it with '&&' or '||' respectively.
+ * If the diagnostic message indicates a lone '|', offer to
+ * replace it with '||'.
  */
 fn Object* try_fix_operator(String uri, Object* diag, String message) {
-	// Messages look like: "Unexpected character: '&'" or "Unexpected character: '|'"
+	// Messages look like: "Unexpected character: '|'"
 	String replacement;
 	String title;
 
-	if (message.contains("'&'")) {
-		replacement = "&&";
-		title = "Replace '&' with '&&'";
-	} else if (message.contains("'|'")) {
+	if (message.contains("'|'")) {
 		replacement = "||";
 		title = "Replace '|' with '||'";
 	} else {

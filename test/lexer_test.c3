@@ -559,6 +559,11 @@ fn void mod_assign() @test {
 	assert(tok.kind == MOD_ASSIGN);
 }
 
+fn void amp() @test {
+	Token tok = first("&");
+	assert(tok.kind == AMP);
+}
+
 fn void conj() @test {
 	Token tok = first("&&");
 	assert(tok.kind == CONJ);

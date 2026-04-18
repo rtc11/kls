@@ -27,8 +27,8 @@ fn void empty_content_returns_empty_array() @test {
 
 fn void single_error_returns_one_diagnostic() @test {
 	@pool() {
-		// Lone '&' is an error token in Kotlin
-		Object* result = diagnostics::build_diagnostics_array("&", null);
+		// Lone '~' is an error token in Kotlin
+		Object* result = diagnostics::build_diagnostics_array("~", null);
 		assert(result.is_array());
 		assert(result.get_len() == 1);
 
@@ -36,7 +36,7 @@ fn void single_error_returns_one_diagnostic() @test {
 		assert(diag.get_int("severity")!! == 1); // Error
 
 		String message = diag.get_string("message")!!;
-		assert(message.contains("&"));
+		assert(message.contains("~"));
 
 		String source = diag.get_string("source")!!;
 		assert(source == "kls");
@@ -45,8 +45,8 @@ fn void single_error_returns_one_diagnostic() @test {
 
 fn void multiple_errors_returns_multiple_diagnostics() @test {
 	@pool() {
-		// Both '&' and '|' alone are error tokens
-		Object* result = diagnostics::build_diagnostics_array("& |", null);
+		// Both '~' and '|' alone are error tokens
+		Object* result = diagnostics::build_diagnostics_array("~ |", null);
 		assert(result.is_array());
 		assert(result.get_len() == 2);
 	};
@@ -54,8 +54,8 @@ fn void multiple_errors_returns_multiple_diagnostics() @test {
 
 fn void error_position_is_correct() @test {
 	@pool() {
-		// "val x = &" -- the '&' is at line 0, col 8
-		Object* result = diagnostics::build_diagnostics_array("val x = &", null);
+		// "val x = ~" -- the '~' is at line 0, col 8
+		Object* result = diagnostics::build_diagnostics_array("val x = ~", null);
 		assert(result.is_array());
 		assert(result.get_len() == 1);
 
@@ -73,7 +73,7 @@ fn void error_position_is_correct() @test {
 
 fn void error_on_second_line_has_correct_line() @test {
 	@pool() {
-		Object* result = diagnostics::build_diagnostics_array("val x = 1\n&", null);
+		Object* result = diagnostics::build_diagnostics_array("val x = 1\n~", null);
 		assert(result.is_array());
 		assert(result.get_len() == 1);
 
@@ -100,13 +100,13 @@ fn void valid_operators_produce_no_errors() @test {
 fn void mixed_valid_and_invalid_code() @test {
 	@pool() {
 		// Mix of valid tokens and one error
-		Object* result = diagnostics::build_diagnostics_array("fun main() { & }", null);
+		Object* result = diagnostics::build_diagnostics_array("fun main() { ~ }", null);
 		assert(result.is_array());
 		assert(result.get_len() == 1);
 
 		Object* diag = result.get_at(0);
 		String message = diag.get_string("message")!!;
-		assert(message.contains("&"));
+		assert(message.contains("~"));
 	};
 }
 
@@ -280,10 +280,10 @@ fn void no_unused_import_when_lexer_errors_present() @test {
 		// When there are lexer errors, unused import analysis is skipped
 		Object* result = diagnostics::build_diagnostics_array(
 			`import com.example.Foo
-fun main() { & }`, null
+fun main() { ~ }`, null
 		);
 		assert(result.is_array());
-		// Should only have lexer error for '&', no unused import diagnostic
+		// Should only have lexer error for '~', no unused import diagnostic
 		for (usz i = 0; i < result.get_len(); i++) {
 			Object* diag = result.get_at(i);
 			assert(diag.get_int("severity")!! != 4, "should not have Hint diagnostics when lexer errors present");

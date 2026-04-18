@@ -120,6 +120,7 @@ enum TokenKind : int {
 	SUB,           // -
 	INCR,          // ++
 	DECR,          // --
+	AMP,           // &
 	CONJ,          // &&
 	DISJ,          // ||
 	EXCL,          // !

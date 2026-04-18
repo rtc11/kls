@@ -258,6 +258,8 @@ const StdlibSymbol[*] STDLIB_SYMBOLS = {
 	{ "MatchResult", "interface MatchResult", "kotlin.text", "", "Represents the results of a single regular expression match.", INTERFACE },
 	{ "StringBuilder", "class StringBuilder : CharSequence, Appendable", "kotlin.text", "", "A mutable sequence of characters for building strings efficiently.", CLASS },
 	{ "Appendable", "interface Appendable", "kotlin.text", "", "An object to which characters and character sequences can be appended.", INTERFACE },
+	{ "Charset", "abstract class Charset", "kotlin.text", "", "A named mapping between characters and bytes.", CLASS },
+	{ "Charsets", "object Charsets", "kotlin.text", "", "Provides constants for standard charsets. UTF_8, US_ASCII, ISO_8859_1, UTF_16, UTF_16BE, UTF_16LE, UTF_32, UTF_32BE, UTF_32LE.", OBJECT },
 	{ "Result", "class Result<out T>", "kotlin", "", "A discriminated union that encapsulates a successful outcome or a failure.", CLASS },
 	{ "Exception", "open class Exception : Throwable", "kotlin", "", "The base class for all exceptions.", CLASS },
 	{ "RuntimeException", "open class RuntimeException : Exception", "kotlin", "", "The base class for runtime exceptions.", CLASS },

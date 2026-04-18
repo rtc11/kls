@@ -364,7 +364,7 @@ fun main() { val _x = 42 }`;
 	};
 }
 
-// ── Test: replace & with && ──────────────────────────────────────
+// ── Test: & is valid (intersection type operator), no fix offered ──
 
 fn void replace_ampersand_with_double_ampersand() @test {
 	@pool() {
@@ -376,33 +376,13 @@ fn void replace_ampersand_with_double_ampersand() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
-		// Should have at least one diagnostic for '&'
+		// '&' is now a valid token (intersection type operator), no diagnostic expected
 		bool found_ampersand = false;
 		for (sz i = 0; i < diags.get_len(); i++) {
 			String msg = diags.get_at(i).get_string("message") ?? "";
 			if (msg.contains("'&'")) found_ampersand = true;
 		}
-		assert(found_ampersand, "expected diagnostic for '&'");
-
-		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
-
-		// Find the ampersand fix action
-		bool found_fix = false;
-		for (sz i = 0; i < result.get_len(); i++) {
-			String title = get_action_title(result, (usz)i);
-			if (title == "Replace '&' with '&&'") {
-				found_fix = true;
-
-				Object* workspace_edit = get_action_edit(result, (usz)i);
-				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
-				assert(edits != null);
-				assert(edits.get_len() == 1);
-				assert(get_edit_new_text(edits, 0) == "&&", "expected '&&'");
-				break;
-			}
-		}
-		assert(found_fix, "expected 'Replace & with &&' action");
+		assert(!found_ampersand, "& should not produce a diagnostic");
 	};
 }
 

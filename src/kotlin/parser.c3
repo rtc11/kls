@@ -3297,6 +3297,11 @@ fn void Parser.skip_type_ref(Parser* self) {
 			}
 		}
 
+		// Intersection type (definitely non-nullable): T & Any
+		if (self.eat(AMP)) {
+			self.skip_type_ref();
+		}
+
 		return;
 	}
 
