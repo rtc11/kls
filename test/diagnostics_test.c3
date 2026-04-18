@@ -1160,6 +1160,24 @@ fn void class_property_not_flagged() @test {
 	};
 }
 
+fn void destructuring_decl_not_flagged_unused() @test {
+	@pool() {
+		String content =
+`fun main() {
+    val (a, b) = Pair(1, 2)
+    println(a)
+    println(b)
+}`;
+		Object* result = build_test_diagnostics(content);
+
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("(destructuring)"), "destructuring decl should not be flagged unused, got: %s", msg);
+		}
+	};
+}
+
 // ── Val reassignment tests ────────────────────────────────────────
 
 fn void val_reassignment_detected() @test {

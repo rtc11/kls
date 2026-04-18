@@ -1607,6 +1607,9 @@ fn void add_unused_local_diagnostics(Object* diagnostics, String content, ParseR
 		if (!is_local_property(ast, i)) continue;
 		if (n.name.len == 0) continue;
 
+		// Skip destructuring declarations (synthetic name)
+		if (n.name == "(destructuring)") continue;
+
 		// Skip names starting with '_' (intentionally unused convention)
 		if (n.name[0] == '_') continue;
 
