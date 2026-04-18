@@ -1295,6 +1295,24 @@ fn void val_reassignment_compound_operator() @test {
 	};
 }
 
+fn void named_arg_not_flagged_as_val_reassignment() @test {
+	@pool() {
+		String content =
+`fun main() {
+    val msg = "hello"
+    val res = Foo(msg = msg)
+}`;
+		Object* result = build_test_diagnostics(content);
+
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Val cannot be reassigned"),
+				"named argument should not be flagged as val reassignment, got: %s", msg);
+		}
+	};
+}
+
 // ── Type mismatch diagnostic tests ───────────────────────────────
 
 fn bool has_diagnostic_containing(Object* result, String needle) {

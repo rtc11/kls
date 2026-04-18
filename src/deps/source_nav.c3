@@ -328,6 +328,56 @@ fn String? find_source_entry_in_jar(String source_jar_path, String package_name,
 		}
 	}
 
+	// Fallback: search for any source file in the same package that contains the class name.
+	// This handles cases where a class is defined in a differently-named file
+	// (e.g., EngineConnectorBuilder is in EngineConnectorConfig.kt).
+	if (package_name.len > 0 && class_name.len > 0) {
+		DString pkg_path;
+		pkg_path.tinit();
+		for (usz i = 0; i < package_name.len; i++) {
+			if (package_name[i] == '.') {
+				pkg_path.appendf("/");
+			} else {
+				pkg_path.appendf("%c", package_name[i]);
+			}
+		}
+		String pkg_suffix = pkg_path.str_view();
+
+		for (usz i = 0; i < entry_count; i++) {
+			if (try entry = archive.stat_at(i)) {
+				if (entry.is_directory) continue;
+				if (!entry.name.ends_with(".kt") && !entry.name.ends_with(".java")) continue;
+				// Check if this entry is in the right package
+				if (!entry.name.contains(pkg_suffix)) continue;
+
+				// Read file content and search for class/interface/object declaration
+				char[] data;
+				if (try d = archive.read_file_all(tmem, entry.name)) {
+					data = d;
+				} else {
+					continue;
+				}
+				String content = (String)data;
+				// Search for "class ClassName" or "interface ClassName" etc.
+				DString p1; p1.tinit();
+				p1.appendf("class %s", class_name);
+				if (content.contains(p1.str_view())) {
+					return entry.name.tcopy();
+				}
+				DString p2; p2.tinit();
+				p2.appendf("interface %s", class_name);
+				if (content.contains(p2.str_view())) {
+					return entry.name.tcopy();
+				}
+				DString p3; p3.tinit();
+				p3.appendf("object %s", class_name);
+				if (content.contains(p3.str_view())) {
+					return entry.name.tcopy();
+				}
+			}
+		}
+	}
+
 	return SOURCE_NOT_FOUND~;
 }
 

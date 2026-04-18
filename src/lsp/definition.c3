@@ -100,21 +100,22 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 		}
 	}
 
-	// ── Import-aware dependency lookup ───────────────────────────
-	// If the file has an explicit import for this name (e.g., import com.example.Foo),
-	// try the dependency index first, filtered by the import's package. This prevents
-	// navigating to a same-named class in a different workspace package.
+	// ── Cross-file lookup via workspace index ────────────────────
+	// Workspace symbols take priority over dependency symbols, because
+	// the user's own code is the most relevant navigation target.
 	if (workspace != null) {
-		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
-			log::debug("[def] found via explicit import dep lookup");
+		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri, pr)) {
+			log::debug("[def] found via workspace index");
 			return result;
 		}
 	}
 
-	// ── Cross-file fallback via workspace index ──────────────────
+	// ── Import-aware dependency lookup ───────────────────────────
+	// If the file has an explicit import for this name (e.g., import com.example.Foo),
+	// try the dependency index, filtered by the import's package.
 	if (workspace != null) {
-		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri, pr)) {
-			log::debug("[def] found via workspace index");
+		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
+			log::debug("[def] found via explicit import dep lookup");
 			return result;
 		}
 	}
@@ -1072,8 +1073,13 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 			chosen = imported_file_func_match;
 		} else if (imported_func_match != null) {
 			chosen = imported_func_match;
+		} else if (imported_file_match != null) {
+			// Constructor call: Foo() where Foo is a CLASS, not FUNCTION
+			chosen = imported_file_match;
+		} else if (imported_match != null) {
+			chosen = imported_match;
 		} else if (!has_explicit) {
-			chosen = func_match;
+			chosen = func_match != null ? func_match : first_match;
 		}
 	} else {
 		if (imported_file_match != null) {

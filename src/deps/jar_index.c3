@@ -38,7 +38,7 @@ struct DepSymbol {
 
 // ── Dependency index ───────────────────────────────────────────────
 
-const usz MAX_DEP_SYMBOLS = 65536;
+const usz MAX_DEP_SYMBOLS = 524288;
 
 struct DependencyIndex {
 	List{DepSymbol} symbols;

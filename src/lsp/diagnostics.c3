@@ -1684,6 +1684,9 @@ fn void add_val_reassignment_diagnostics(Object* diagnostics, String content, Pa
 		AstNode* n = &ast.nodes[i];
 		if (n.kind != ASSIGNMENT_EXPR) continue;
 
+		// Skip named arguments: assignment inside a CALL_EXPR (e.g. foo(name = value))
+		if (n.parent != ast::NO_PARENT && ast.nodes[n.parent].kind == CALL_EXPR) continue;
+
 		// Find LHS: first child should be a NAME_EXPR
 		String assigned_name = "";
 		uint lhs_idx = 0;
