@@ -1006,7 +1006,7 @@ fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, Workspace
 		for (uint i = 0; i < ast.node_count; i++) {
 			if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == DOT_EXPR) {
 				uint dot_idx = i;
-				// Find NAME_EXPR child of DOT_EXPR (the receiver)
+				// Find NAME_EXPR child of DOT_EXPR (variable receiver: someVar.apply { ... })
 				for (uint j = 0; j < ast.node_count; j++) {
 					if (ast.nodes[j].parent == dot_idx && ast.nodes[j].kind == NAME_EXPR) {
 						String recv_name = ast.nodes[j].name;
@@ -1016,6 +1016,16 @@ fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, Workspace
 						// If we can't resolve the variable type, try using the name directly
 						// as a class name (e.g., Foo.apply { ... })
 						if (is_class_name(ast, recv_name, workspace)) return recv_name;
+						break;
+					}
+				}
+				// Find CALL_EXPR child of DOT_EXPR (constructor receiver: Foo().apply { ... })
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == dot_idx && ast.nodes[j].kind == CALL_EXPR) {
+						String ctor_name = ast.nodes[j].name;
+						if (ctor_name.len > 0 && is_class_name(ast, ctor_name, workspace)) {
+							return ctor_name;
+						}
 						break;
 					}
 				}
@@ -1109,7 +1119,7 @@ fn String find_variable_type_name(ParseResult* ast, uint scope_idx, String var_n
 
 /**
  * Check if a name refers to a class/interface/object declaration
- * in the same file or in the workspace.
+ * in the same file, workspace, or dependency index.
  */
 fn bool is_class_name(ParseResult* ast, String name, WorkspaceIndex* workspace) {
 	// Check same-file AST
@@ -1131,6 +1141,16 @@ fn bool is_class_name(ParseResult* ast, String name, WorkspaceIndex* workspace) 
 					sym.kind == symbols::SymbolKind.OBJECT) {
 					return true;
 				}
+			}
+		}
+
+		// Check dependency index (e.g. EngineConnectorBuilder from Ktor)
+		DepSymbol*[4] dep_matches;
+		usz dep_count = workspace.dep_index.lookup_by_name(name, &dep_matches);
+		for (usz i = 0; i < dep_count; i++) {
+			if (dep_matches[i].kind == DEP_CLASS || dep_matches[i].kind == DEP_INTERFACE ||
+				dep_matches[i].kind == DEP_ENUM) {
+				return true;
 			}
 		}
 	}
