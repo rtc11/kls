@@ -268,6 +268,39 @@ fn int to_lsp_symbol_kind(NodeKind kind) {
 	}
 }
 
+/**
+ * Check if a node kind is an expression.
+ */
+fn bool is_expression(NodeKind kind) {
+	switch (kind) {
+		case NAME_EXPR:
+		case LITERAL_EXPR:
+		case THIS_EXPR:
+		case SUPER_EXPR:
+		case PAREN_EXPR:
+		case CALL_EXPR:
+		case DOT_EXPR:
+		case INDEX_EXPR:
+		case PREFIX_EXPR:
+		case POSTFIX_EXPR:
+		case BINARY_EXPR:
+		case ASSIGNMENT_EXPR:
+		case LAMBDA_EXPR:
+		case CALLABLE_REF_EXPR:
+		case STRING_TEMPLATE_EXPR:
+		case OBJECT_EXPR:
+		case SPREAD_EXPR:
+		case TYPE_CHECK_EXPR:
+		case TYPE_CAST_EXPR:
+		case IF_EXPR:
+		case WHEN_EXPR:
+		case TRY_EXPR:
+			return true;
+		default:
+			return false;
+	}
+}
+
 faultdef NOT_FOUND;
 
 /**

@@ -54,6 +54,18 @@ fn Object* handle_inlay_hints(DocumentStore* store, WorkspaceIndex* workspace, O
 	// Collect type annotation hints from PROPERTY_DECL nodes
 	collect_type_hints(hints, pr, ti, doc.content, start_line, end_line);
 
+	// Collect return type hints from FUN_DECL nodes without explicit return type
+	collect_return_type_hints(hints, pr, ti, doc.content, start_line, end_line);
+
+	// Collect implicit `it` hints for lambdas without explicit params
+	collect_lambda_it_hints(hints, pr, doc.content, start_line, end_line);
+
+	// Collect chain type hints for long DOT_EXPR chains
+	collect_chain_type_hints(hints, pr, ti, doc.content, start_line, end_line);
+
+	// Collect smart cast hints after `is` checks
+	collect_smart_cast_hints(hints, pr, doc.content, start_line, end_line);
+
 	if (hints.get_len() == 0) {
 		return null;
 	}
@@ -454,6 +466,519 @@ fn String? infer_literal_type(AstNode* node, String content) {
 	}
 
 	return ast::NOT_FOUND~;
+}
+
+// ── Return type hints ──────────────────────────────────────────
+
+/**
+ * Emit return type hints for FUN_DECL nodes without explicit return type.
+ * Infers from expression body or single return statement.
+ */
+fn void collect_return_type_hints(Object* hints, ParseResult* pr, TypeInfo* ti, String content, uint start_line, uint end_line) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.kind != FUN_DECL) continue;
+
+		// Filter by range
+		if (node.start_line > end_line || node.end_line < start_line) continue;
+
+		// Skip if already has explicit return type
+		if (node.type_text.len > 0) continue;
+
+		// Skip if no name (anonymous functions handled separately)
+		if (node.name.len == 0) continue;
+
+		// Try to infer return type from body
+		String return_type = "";
+		if (try rt = infer_fun_return_type(pr, ti, i, content)) {
+			return_type = rt;
+		} else {
+			continue;
+		}
+
+		// Skip Unit — not useful to show
+		if (return_type == "Unit") continue;
+
+		// Find position: after closing ')' of parameter list
+		uint hint_line;
+		uint hint_col;
+		if (try pos = find_fun_paren_close(content, node)) {
+			hint_line = pos.line;
+			hint_col = pos.col + 1; // after ')'
+		} else {
+			continue;
+		}
+
+		// Range filter
+		if (hint_line < start_line || hint_line > end_line) continue;
+
+		DString label;
+		label.tinit();
+		label.appendf(": %s", return_type);
+
+		Object* hint = object::new_obj(tmem);
+		Object* position = object::new_obj(tmem);
+		position.set("line", (int)hint_line);
+		position.set("character", (int)hint_col);
+		hint.set("position", position);
+		hint.set("label", label.str_view());
+		hint.set("kind", HINT_KIND_TYPE);
+		hint.set("paddingLeft", true);
+
+		hints.push(hint);
+	}
+}
+
+struct LineCol {
+	uint line;
+	uint col;
+}
+
+/**
+ * Find the closing ')' of a FUN_DECL's parameter list.
+ */
+fn LineCol? find_fun_paren_close(String content, AstNode* fun_node) {
+	uint scan_start = fun_node.name_offset + fun_node.name_len;
+	if (scan_start >= content.len) return ast::NOT_FOUND~;
+
+	Lexer lex = lexer::init(content[scan_start..]);
+	int depth = 0;
+	bool found_open = false;
+
+	while (true) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) break;
+
+		uint abs_offset = scan_start + tok.offset;
+
+		if (tok.kind == LANGLE && !found_open) {
+			// Skip generic type params
+			depth++;
+		} else if (tok.kind == RANGLE && !found_open && depth > 0) {
+			depth--;
+		} else if (tok.kind == LPAREN && depth == 0) {
+			found_open = true;
+			depth = 1;
+		} else if (tok.kind == LPAREN && found_open) {
+			depth++;
+		} else if (tok.kind == RPAREN && found_open) {
+			depth--;
+			if (depth == 0) {
+				return {
+					.line = offset_to_line(content, abs_offset),
+					.col = offset_to_col(content, abs_offset)
+				};
+			}
+		} else if (tok.kind == LCURL && !found_open) {
+			// Hit function body before finding parens (e.g., `fun main { }`)
+			break;
+		}
+	}
+
+	return ast::NOT_FOUND~;
+}
+
+/**
+ * Infer return type of a FUN_DECL from its body.
+ * Handles expression body (`= expr`) and single return statement.
+ */
+fn String? infer_fun_return_type(ParseResult* pr, TypeInfo* ti, uint fun_idx, String content) {
+	// Look for children: BLOCK or expression body
+	AstNode* block = null;
+	AstNode* expr_child = null;
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind == PARAM || child.kind == TYPE_PARAM || child.kind == TYPE_REF) continue;
+
+		if (child.kind == BLOCK) {
+			block = child;
+		} else if (ast::is_expression(child.kind)) {
+			expr_child = child;
+		}
+	}
+
+	// Expression body: `fun foo() = expr`
+	if (expr_child != null) {
+		uint expr_idx = ast::node_index(pr, expr_child);
+		return infer_expr_type_string(pr, ti, expr_idx, expr_child, content);
+	}
+
+	// Block body: look for single RETURN_EXPR
+	if (block != null) {
+		uint block_idx = ast::node_index(pr, block);
+		AstNode* return_expr = null;
+		uint return_count = 0;
+
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != block_idx) continue;
+			if (child.kind == RETURN_EXPR) {
+				return_expr = child;
+				return_count++;
+			}
+		}
+
+		// Only infer if single return
+		if (return_count == 1 && return_expr != null) {
+			// Find the expression child of RETURN_EXPR
+			uint ret_idx = ast::node_index(pr, return_expr);
+			for (uint j = 0; j < pr.node_count; j++) {
+				AstNode* child = &pr.nodes[j];
+				if (child.parent != ret_idx) continue;
+				if (ast::is_expression(child.kind)) {
+					uint child_idx = ast::node_index(pr, child);
+					return infer_expr_type_string(pr, ti, child_idx, child, content);
+				}
+			}
+		}
+
+		// No return → Unit (but we skip Unit in caller)
+		if (return_count == 0) {
+			return "Unit";
+		}
+	}
+
+	return ast::NOT_FOUND~;
+}
+
+/**
+ * Get type string for an expression node, using TypeInfo or heuristics.
+ */
+fn String? infer_expr_type_string(ParseResult* pr, TypeInfo* ti, uint idx, AstNode* node, String content) {
+	// Try TypeInfo first
+	if (ti != null && ti.has_type[idx]) {
+		TypeRef tr = ti.node_types[idx];
+		if (tr.kind != UNKNOWN) {
+			if (tr.full_text.len > 0) return tr.full_text;
+			if (tr.name.len > 0) return tr.name;
+		}
+	}
+
+	// Heuristic fallback
+	switch (node.kind) {
+		case LITERAL_EXPR:
+			return infer_literal_type(node, content);
+
+		case CALL_EXPR:
+			if (node.name.len > 0) {
+				char first = node.name[0];
+				if (first >= 'A' && first <= 'Z') return node.name;
+				if (try decl = definition::find_definition_in_ast(pr, node.name, node.name_offset, true)) {
+					if (decl.type_text.len > 0) return decl.type_text;
+				}
+			}
+
+		case NAME_EXPR:
+			if (node.name.len > 0) {
+				if (try decl = definition::find_definition_in_ast(pr, node.name, node.name_offset, false)) {
+					if (decl.type_text.len > 0) return decl.type_text;
+				}
+			}
+
+		case STRING_TEMPLATE_EXPR:
+			return "String";
+
+		default:
+			break;
+	}
+
+	return ast::NOT_FOUND~;
+}
+
+// ── Smart cast hints ───────────────────────────────────────────
+
+/**
+ * Show smart cast type hints on variable usages after `is` checks.
+ * For `if (x is Foo) { x.bar() }`, shows `(Foo)` before `x` in the body.
+ */
+fn void collect_smart_cast_hints(Object* hints, ParseResult* pr, String content, uint start_line, uint end_line) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.kind != IF_EXPR) continue;
+
+		// Filter by range
+		if (node.start_line > end_line || node.end_line < start_line) continue;
+
+		// Find TYPE_CHECK_EXPR child (condition)
+		// IF_EXPR children: [condition, then_block, (else_block)]
+		uint condition_idx = pr.node_count; // sentinel
+		uint then_block_idx = pr.node_count;
+		uint child_order = 0;
+
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != i) continue;
+			if (child_order == 0) {
+				condition_idx = j;
+			} else if (child_order == 1) {
+				then_block_idx = j;
+			}
+			child_order++;
+		}
+
+		if (condition_idx >= pr.node_count || then_block_idx >= pr.node_count) continue;
+
+		// Condition must be TYPE_CHECK_EXPR with "is" (not "!is")
+		AstNode* cond = &pr.nodes[condition_idx];
+		String var_name = "";
+		String cast_type = "";
+
+		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "is") {
+			cast_type = cond.type_text;
+			// Find subject NAME_EXPR child
+			for (uint j = 0; j < pr.node_count; j++) {
+				if (pr.nodes[j].parent != condition_idx) continue;
+				if (pr.nodes[j].kind == NAME_EXPR && pr.nodes[j].name.len > 0) {
+					var_name = pr.nodes[j].name;
+					break;
+				}
+			}
+		}
+
+		if (var_name.len == 0 || cast_type.len == 0) continue;
+
+		// Find NAME_EXPR references to var_name inside then_block
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* ref_node = &pr.nodes[j];
+			if (ref_node.kind != NAME_EXPR) continue;
+			if (ref_node.name != var_name) continue;
+
+			// Must be descendant of then_block
+			if (!is_descendant_of(pr, j, then_block_idx)) continue;
+
+			// Filter by range
+			if (ref_node.name_line < start_line || ref_node.name_line > end_line) continue;
+
+			DString label;
+			label.tinit();
+			label.appendf("(%s)", cast_type);
+
+			Object* hint = object::new_obj(tmem);
+			Object* position = object::new_obj(tmem);
+			position.set("line", (int)ref_node.name_line);
+			position.set("character", (int)ref_node.name_col);
+			hint.set("position", position);
+			hint.set("label", label.str_view());
+			hint.set("kind", HINT_KIND_TYPE);
+			hint.set("paddingRight", true);
+
+			hints.push(hint);
+		}
+	}
+}
+
+// ── Chain type hints ───────────────────────────────────────────
+
+/**
+ * Show intermediate type hints on method chains of 3+ calls.
+ * For `a.b().c().d()`, shows type after `.b()` and `.c()`.
+ */
+fn void collect_chain_type_hints(Object* hints, ParseResult* pr, TypeInfo* ti, String content, uint start_line, uint end_line) {
+	if (ti == null) return;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.kind != DOT_EXPR) continue;
+
+		// Filter by range
+		if (node.start_line > end_line || node.end_line < start_line) continue;
+
+		// Only show hints for intermediate DOT_EXPRs in chains of 3+.
+		// A DOT_EXPR is "intermediate" if:
+		// 1. Its parent is a CALL_EXPR whose parent is another DOT_EXPR (chain continues up)
+		// 2. It has a child that is a CALL_EXPR/DOT_EXPR (chain continues down)
+		// Count chain depth from this node downward
+		uint depth = count_chain_depth(pr, i);
+		if (depth < 3) continue;
+
+		// This DOT_EXPR is intermediate if parent chain goes up further
+		// (i.e., it's NOT the outermost DOT_EXPR in the chain)
+		if (node.parent < pr.node_count) {
+			AstNode* parent = &pr.nodes[node.parent];
+			// Parent should be CALL_EXPR
+			if (parent.kind == CALL_EXPR && parent.parent < pr.node_count) {
+				AstNode* grandparent = &pr.nodes[parent.parent];
+				if (grandparent.kind != DOT_EXPR) {
+					// This is the outermost — skip (final result type is obvious)
+					continue;
+				}
+			} else {
+				continue; // Not in a call chain
+			}
+		}
+
+		// Get the type of this DOT_EXPR's enclosing CALL_EXPR
+		uint call_idx = node.parent;
+		if (call_idx >= pr.node_count) continue;
+		if (!ti.has_type[call_idx]) continue;
+
+		TypeRef tr = ti.node_types[call_idx];
+		if (tr.kind == UNKNOWN) continue;
+
+		String type_name = "";
+		if (tr.full_text.len > 0) {
+			type_name = tr.full_text;
+		} else if (tr.name.len > 0) {
+			type_name = tr.name;
+		} else {
+			continue;
+		}
+
+		// Position: after the closing ')' of the call
+		AstNode* call_node = &pr.nodes[call_idx];
+		uint hint_line = call_node.end_line;
+		uint hint_col = call_node.end_col;
+
+		if (hint_line < start_line || hint_line > end_line) continue;
+
+		DString label;
+		label.tinit();
+		label.appendf(": %s", type_name);
+
+		Object* hint = object::new_obj(tmem);
+		Object* position = object::new_obj(tmem);
+		position.set("line", (int)hint_line);
+		position.set("character", (int)hint_col);
+		hint.set("position", position);
+		hint.set("label", label.str_view());
+		hint.set("kind", HINT_KIND_TYPE);
+		hint.set("paddingLeft", true);
+
+		hints.push(hint);
+	}
+}
+
+/**
+ * Count chain depth starting from a DOT_EXPR node going downward.
+ * Returns number of dot segments in the chain.
+ */
+fn uint count_chain_depth(ParseResult* pr, uint dot_idx) {
+	uint depth = 1;
+
+	// Walk down: find child that is CALL_EXPR or NAME_EXPR
+	// If child is CALL_EXPR, look for its DOT_EXPR child
+	uint current = dot_idx;
+	while (current < pr.node_count) {
+		bool found_next = false;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != current) continue;
+
+			if (pr.nodes[j].kind == CALL_EXPR) {
+				// Look for DOT_EXPR child of this CALL_EXPR
+				for (uint k = 0; k < pr.node_count; k++) {
+					if (pr.nodes[k].parent != j) continue;
+					if (pr.nodes[k].kind == DOT_EXPR) {
+						depth++;
+						current = k;
+						found_next = true;
+						break;
+					}
+				}
+				break;
+			} else if (pr.nodes[j].kind == DOT_EXPR) {
+				depth++;
+				current = j;
+				found_next = true;
+				break;
+			}
+		}
+		if (!found_next) break;
+	}
+
+	// Also walk up
+	current = dot_idx;
+	while (current < pr.node_count) {
+		uint parent = pr.nodes[current].parent;
+		if (parent >= pr.node_count) break;
+		if (pr.nodes[parent].kind == CALL_EXPR) {
+			uint gp = pr.nodes[parent].parent;
+			if (gp < pr.node_count && pr.nodes[gp].kind == DOT_EXPR) {
+				depth++;
+				current = gp;
+				continue;
+			}
+		}
+		break;
+	}
+
+	return depth;
+}
+
+// ── Lambda `it` hints ──────────────────────────────────────────
+
+/**
+ * Emit an `it` parameter hint for lambdas without explicit parameters.
+ * Shows "it" hint at the opening `{` of the lambda.
+ */
+fn void collect_lambda_it_hints(Object* hints, ParseResult* pr, String content, uint start_line, uint end_line) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.kind != LAMBDA_EXPR) continue;
+
+		// Filter by range
+		if (node.start_line > end_line || node.end_line < start_line) continue;
+
+		// Check if lambda has explicit PARAM children
+		bool has_params = false;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.kind == PARAM) {
+				has_params = true;
+				break;
+			}
+		}
+
+		// Only show hint for implicit `it` lambdas
+		if (has_params) continue;
+
+		// Check that lambda body references `it` (avoid noise on empty lambdas)
+		bool uses_it = false;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i && !is_descendant_of(pr, j, i)) continue;
+			if (child.kind == NAME_EXPR && child.name == "it") {
+				uses_it = true;
+				break;
+			}
+		}
+
+		if (!uses_it) continue;
+
+		// Position: after the opening '{', before body
+		// Hint at start_line, start_col + 1 (after '{')
+		uint hint_line = node.start_line;
+		uint hint_col = node.start_col + 1;
+
+		if (hint_line < start_line || hint_line > end_line) continue;
+
+		Object* hint = object::new_obj(tmem);
+		Object* position = object::new_obj(tmem);
+		position.set("line", (int)hint_line);
+		position.set("character", (int)hint_col);
+		hint.set("position", position);
+		hint.set("label", "it");
+		hint.set("kind", HINT_KIND_PARAMETER);
+		hint.set("paddingLeft", true);
+		hint.set("paddingRight", true);
+
+		hints.push(hint);
+	}
+}
+
+/**
+ * Check if node at `child_idx` is a descendant of node at `ancestor_idx`.
+ */
+fn bool is_descendant_of(ParseResult* pr, uint child_idx, uint ancestor_idx) {
+	uint current = child_idx;
+	while (current < pr.node_count) {
+		uint parent = pr.nodes[current].parent;
+		if (parent == ancestor_idx) return true;
+		if (parent == ast::NO_PARENT || parent >= current) return false;
+		current = parent;
+	}
+	return false;
 }
 
 // ── Utility helpers ────────────────────────────────────────────────

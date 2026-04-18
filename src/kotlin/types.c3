@@ -857,16 +857,29 @@ fn TypeRef get_iteration_element_type(TypeRef collection_type) {
 
 	return TYPE_UNKNOWN;
 }
+
 fn void resolve_expression_types(ParseResult* pr, TypeInfo* info) {
 	// Multiple passes to propagate types through chains
 	for (int pass = 0; pass < 3; pass++) {
 		for (uint i = 0; i < pr.node_count; i++) {
-			if (info.has_type[i]) continue;
+			// On later passes, retry GENERIC nodes with 0 type args
+			bool is_retry = false;
+			if (info.has_type[i]) {
+				if (pass > 0 && info.node_types[i].kind == GENERIC &&
+				    info.node_types[i].type_arg_count == 0) {
+					is_retry = true;
+				} else {
+					continue;
+				}
+			}
 
 			AstNode* node = &pr.nodes[i];
 			TypeRef resolved = resolve_single_expression(pr, info, i, node);
 
 			if (resolved.kind != UNKNOWN) {
+				if (is_retry && resolved.kind == GENERIC && resolved.type_arg_count == 0) {
+					continue;
+				}
 				info.node_types[i] = resolved;
 				info.has_type[i] = true;
 			}
@@ -925,6 +938,9 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 
 		case ASSIGNMENT_EXPR:
 			return TYPE_UNIT;
+
+		case TRY_EXPR:
+			return resolve_try_expr_type(pr, info, idx, node);
 
 		default:
 			return TYPE_UNKNOWN;
@@ -1177,6 +1193,40 @@ fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, Stri
 			}
 		}
 
+		// When subject smart cast: when (x) { is String -> x.length }
+		if (parent.kind == WHEN_ENTRY) {
+			// Parent of WHEN_ENTRY is WHEN_EXPR
+			uint when_idx = parent.parent;
+			if (when_idx < pr.node_count && pr.nodes[when_idx].kind == WHEN_EXPR) {
+				// Find subject of when (first child NAME_EXPR)
+				String subject_name = "";
+				for (uint j = 0; j < pr.node_count; j++) {
+					if (pr.nodes[j].parent != when_idx) continue;
+					if (pr.nodes[j].kind == NAME_EXPR) {
+						subject_name = pr.nodes[j].name;
+						break;
+					}
+					// Also handle PAREN_EXPR wrapping a NAME_EXPR
+					if (pr.nodes[j].kind == PAREN_EXPR) {
+						for (uint k = 0; k < pr.node_count; k++) {
+							if (pr.nodes[k].parent == j && pr.nodes[k].kind == NAME_EXPR) {
+								subject_name = pr.nodes[k].name;
+								break;
+							}
+						}
+						break;
+					}
+					break;
+				}
+
+				if (subject_name == name) {
+					// Check if this WHEN_ENTRY has an `is Type` condition
+					TypeRef narrowed = find_when_entry_type_check(pr, parent_idx, name);
+					if (narrowed.kind != UNKNOWN) return narrowed;
+				}
+			}
+		}
+
 		current = parent_idx;
 	}
 
@@ -1236,6 +1286,29 @@ fn String? get_is_check_variable_name(ParseResult* pr, uint check_idx) {
 		}
 	}
 	return ast::NOT_FOUND~;
+}
+
+/**
+ * Find an `is Type` condition in a WHEN_ENTRY node.
+ * Scans the WHEN_ENTRY's children (conditions come before the body)
+ * for a TYPE_CHECK_EXPR with extra_text "is".
+ */
+fn TypeRef find_when_entry_type_check(ParseResult* pr, uint entry_idx, String name) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != entry_idx) continue;
+		AstNode* child = &pr.nodes[j];
+
+		// Direct `is Type` condition
+		if (child.kind == TYPE_CHECK_EXPR && child.extra_text == "is") {
+			if (child.type_text.len > 0) {
+				return parse_type_text(child.type_text);
+			}
+		}
+
+		// Comma-separated conditions: check each TYPE_CHECK_EXPR
+		// (conditions are direct children of WHEN_ENTRY before the body)
+	}
+	return TYPE_UNKNOWN;
 }
 
 /**
@@ -1433,6 +1506,14 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		}
 	}
 
+	// Trailing lambda pattern: CALL_EXPR wraps DOT_EXPR + LAMBDA_EXPR
+	// Use the DOT_EXPR child's resolved type (the method call result)
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && pr.nodes[j].kind == DOT_EXPR && info.has_type[j]) {
+			return info.node_types[j];
+		}
+	}
+
 	return TYPE_UNKNOWN;
 }
 
@@ -1470,9 +1551,15 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 		String container = base.name;
 
 		// For Map, the arg is typically a Pair (from `to` infix)
-		if (container == "Map" && first_arg_type.name == "Pair") {
-			// Map<K, V> - we don't have the Pair type args resolved yet
-			// Just return Map as-is
+		if ((container == "Map" || container == "MutableMap" || container == "HashMap" || container == "LinkedHashMap")
+		    && first_arg_type.name == "Pair") {
+			if (first_arg_type.type_arg_count >= 2) {
+				base.type_arg_count = 2;
+				base.type_arg_names[0] = first_arg_type.type_arg_names[0];
+				base.type_arg_names[1] = first_arg_type.type_arg_names[1];
+				base.type_arg_nullable[0] = first_arg_type.type_arg_nullable[0];
+				base.type_arg_nullable[1] = first_arg_type.type_arg_nullable[1];
+			}
 			return base;
 		}
 
@@ -1493,14 +1580,23 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
  * Resolve well-known stdlib factory/constructor calls.
  */
 fn TypeRef resolve_known_call(String name) {
-	if (name == "listOf" || name == "mutableListOf" || name == "arrayListOf" || name == "emptyList") {
+	if (name == "listOf" || name == "emptyList") {
 		return { .kind = GENERIC, .name = "List" };
 	}
-	if (name == "setOf" || name == "mutableSetOf" || name == "hashSetOf" || name == "linkedSetOf" || name == "emptySet") {
+	if (name == "mutableListOf" || name == "arrayListOf") {
+		return { .kind = GENERIC, .name = "MutableList" };
+	}
+	if (name == "setOf" || name == "emptySet") {
 		return { .kind = GENERIC, .name = "Set" };
 	}
-	if (name == "mapOf" || name == "mutableMapOf" || name == "hashMapOf" || name == "linkedMapOf" || name == "emptyMap") {
+	if (name == "mutableSetOf" || name == "hashSetOf" || name == "linkedSetOf") {
+		return { .kind = GENERIC, .name = "MutableSet" };
+	}
+	if (name == "mapOf" || name == "emptyMap") {
 		return { .kind = GENERIC, .name = "Map" };
+	}
+	if (name == "mutableMapOf" || name == "hashMapOf" || name == "linkedMapOf") {
+		return { .kind = GENERIC, .name = "MutableMap" };
 	}
 	if (name == "arrayOf" || name == "emptyArray") {
 		return { .kind = GENERIC, .name = "Array" };
@@ -1526,6 +1622,114 @@ fn TypeRef resolve_known_call(String name) {
 	return TYPE_UNKNOWN;
 }
 
+// ── Lambda body type inference helpers ──────────────────────────────
+
+/**
+ * Find the trailing LAMBDA_EXPR sibling of a DOT_EXPR inside a CALL_EXPR.
+ * Returns the type of the lambda's last expression (body return type).
+ *
+ * AST structure: CALL_EXPR → { DOT_EXPR, LAMBDA_EXPR }
+ */
+fn TypeRef find_trailing_lambda_body_type(ParseResult* pr, TypeInfo* info, uint dot_idx) {
+	uint parent = pr.nodes[dot_idx].parent;
+	if (parent >= pr.node_count || pr.nodes[parent].kind != CALL_EXPR) return TYPE_UNKNOWN;
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != parent) continue;
+		if (pr.nodes[j].kind == LAMBDA_EXPR) {
+			return last_expr_type_in(pr, info, j, true);
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * For HOFs like map/flatMap/mapNotNull, infer the return collection type
+ * from the trailing lambda's body type.
+ */
+fn TypeRef infer_hof_return_type(ParseResult* pr, TypeInfo* info, uint dot_idx,
+		TypeRef receiver_type, String method_name) {
+	TypeRef body_type = find_trailing_lambda_body_type(pr, info, dot_idx);
+	if (body_type.kind == UNKNOWN) return TYPE_UNKNOWN;
+
+	if (method_name == "map" || method_name == "mapNotNull") {
+		TypeRef result = { .kind = GENERIC, .name = "List", .type_arg_count = 1 };
+		result.type_arg_names[0] = body_type.name;
+		result.type_arg_nullable[0] = method_name == "map" ? body_type.nullable : false;
+		return result;
+	}
+
+	if (method_name == "flatMap") {
+		if (body_type.kind == GENERIC && body_type.type_arg_count > 0) {
+			TypeRef result = { .kind = GENERIC, .name = "List", .type_arg_count = 1 };
+			result.type_arg_names[0] = body_type.type_arg_names[0];
+			result.type_arg_nullable[0] = body_type.type_arg_nullable[0];
+			return result;
+		}
+		return { .kind = GENERIC, .name = "List" };
+	}
+
+	if (method_name == "associate") {
+		if (body_type.name == "Pair" && body_type.type_arg_count >= 2) {
+			TypeRef result = { .kind = GENERIC, .name = "Map", .type_arg_count = 2 };
+			result.type_arg_names[0] = body_type.type_arg_names[0];
+			result.type_arg_names[1] = body_type.type_arg_names[1];
+			result.type_arg_nullable[0] = body_type.type_arg_nullable[0];
+			result.type_arg_nullable[1] = body_type.type_arg_nullable[1];
+			return result;
+		}
+		return { .kind = GENERIC, .name = "Map" };
+	}
+
+	if (method_name == "associateWith") {
+		TypeRef result = { .kind = GENERIC, .name = "Map" };
+		if (receiver_type.type_arg_count > 0) {
+			result.type_arg_count = 2;
+			result.type_arg_names[0] = receiver_type.type_arg_names[0];
+			result.type_arg_nullable[0] = receiver_type.type_arg_nullable[0];
+			result.type_arg_names[1] = body_type.name;
+			result.type_arg_nullable[1] = body_type.nullable;
+		}
+		return result;
+	}
+
+	if (method_name == "associateBy" || method_name == "groupBy") {
+		TypeRef result = { .kind = GENERIC, .name = "Map" };
+		if (body_type.kind != UNKNOWN) {
+			result.type_arg_count = 2;
+			result.type_arg_names[0] = body_type.name;
+			result.type_arg_nullable[0] = body_type.nullable;
+			if (method_name == "groupBy") {
+				result.type_arg_names[1] = "List";
+			} else if (receiver_type.type_arg_count > 0) {
+				result.type_arg_names[1] = receiver_type.type_arg_names[0];
+				result.type_arg_nullable[1] = receiver_type.type_arg_nullable[0];
+			}
+		}
+		return result;
+	}
+
+	if (method_name == "mapKeys" && body_type.kind != UNKNOWN && receiver_type.type_arg_count >= 2) {
+		TypeRef result = { .kind = GENERIC, .name = "Map", .type_arg_count = 2 };
+		result.type_arg_names[0] = body_type.name;
+		result.type_arg_nullable[0] = body_type.nullable;
+		result.type_arg_names[1] = receiver_type.type_arg_names[1];
+		result.type_arg_nullable[1] = receiver_type.type_arg_nullable[1];
+		return result;
+	}
+
+	if (method_name == "mapValues" && body_type.kind != UNKNOWN && receiver_type.type_arg_count >= 2) {
+		TypeRef result = { .kind = GENERIC, .name = "Map", .type_arg_count = 2 };
+		result.type_arg_names[0] = receiver_type.type_arg_names[0];
+		result.type_arg_nullable[0] = receiver_type.type_arg_nullable[0];
+		result.type_arg_names[1] = body_type.name;
+		result.type_arg_nullable[1] = body_type.nullable;
+		return result;
+	}
+
+	return TYPE_UNKNOWN;
+}
+
 // ── Dot expression resolution ──────────────────────────────────────
 
 fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
@@ -1546,7 +1750,25 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 
 	// Try hardcoded stdlib member resolution first
 	TypeRef result = resolve_member_type(receiver_type, node.name);
-	if (result.kind != UNKNOWN) return result;
+	if (result.kind != UNKNOWN) {
+		// For HOFs that transform elements, try to infer return type from lambda body
+		if (result.kind == GENERIC && result.type_arg_count == 0) {
+			TypeRef lambda_result = infer_hof_return_type(pr, info, idx, receiver_type, node.name);
+			if (lambda_result.kind != UNKNOWN) return lambda_result;
+		}
+		return result;
+	}
+
+	// Scope functions: let/run return lambda body type
+	if (node.name == "let" || node.name == "run") {
+		TypeRef lambda_body = find_trailing_lambda_body_type(pr, info, idx);
+		if (lambda_body.kind != UNKNOWN) return lambda_body;
+	}
+
+	// In-file extension function resolution
+	// Look for `fun ReceiverType.name(): ReturnType` in same file
+	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, node.name);
+	if (ext_result.kind != UNKNOWN) return ext_result;
 
 	// Cross-file: look up member from workspace member_cache
 	if (g_workspace != null) {
@@ -1554,6 +1776,41 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 		if (result.kind != UNKNOWN) return result;
 	}
 
+	return TYPE_UNKNOWN;
+}
+
+// ── In-file extension function resolution ──────────────────────────
+
+/**
+ * Look for extension functions/properties in the current file's AST.
+ * Matches `fun ReceiverType.name(): ReturnType` declarations.
+ */
+fn TypeRef resolve_in_file_extension(ParseResult* pr, TypeInfo* info, TypeRef receiver, String member_name) {
+	String recv_name = receiver.name;
+	if (recv_name.len == 0) return TYPE_UNKNOWN;
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* node = &pr.nodes[j];
+		if (node.kind != FUN_DECL && node.kind != PROPERTY_DECL) continue;
+		if (node.name != member_name) continue;
+		if (node.extra_text.len == 0) continue;  // not an extension
+
+		// Match receiver type: extract simple name from extra_text
+		String ext_recv = node.extra_text;
+		usz end = 0;
+		while (end < ext_recv.len && ext_recv[end] != '<' && ext_recv[end] != '?' && ext_recv[end] != '.') {
+			end++;
+		}
+		if (end == 0) continue;
+		if (ext_recv[:end] != recv_name) continue;
+
+		// Found matching extension
+		if (node.type_text.len > 0) {
+			return parse_type_text(node.type_text);
+		}
+		if (node.kind == FUN_DECL) return TYPE_UNIT;
+		return TYPE_UNKNOWN;
+	}
 	return TYPE_UNKNOWN;
 }
 
@@ -1904,30 +2161,57 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 		}
 	}
 
-	// Check supertypes of this class via workspace index
+	// Walk supertype chain transitively (up to 32 levels to prevent cycles)
+	String[32] queue;
+	usz queue_len = 0;
+	String[32] visited;
+	usz visited_len = 0;
+
+	// Seed queue with direct supertypes
 	if (try indices = g_workspace.lookup_by_name(type_name)) {
 		for (usz i = 0; i < indices.len(); i++) {
 			WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
-			if (sym.supertype_count > 0) {
-				for (usz s = 0; s < sym.supertype_count; s++) {
-					String st = sym.supertypes[s];
-					if (st.len == 0) continue;
-					// Try stdlib resolution with the supertype
-					TypeRef super_ref = { .kind = SIMPLE, .name = st };
-					TypeRef result = resolve_member_type(super_ref, member_name);
-					if (result.kind != UNKNOWN) return result;
-					// Try workspace member cache for the supertype
-					if (try super_members = g_workspace.member_cache.get_ref(st)) {
-						for (usz j = 0; j < super_members.len(); j++) {
-							MemberDecl* m = &(*super_members)[j];
-							if (m.name == member_name) {
-								if (m.type_text.len > 0) {
-									return parse_type_text(m.type_text);
-								}
-								if (m.node_kind == FUN_DECL) return TYPE_UNIT;
-								return TYPE_UNKNOWN;
-							}
-						}
+			for (usz s = 0; s < sym.supertype_count && queue_len < 32; s++) {
+				if (sym.supertypes[s].len > 0) {
+					queue[queue_len++] = sym.supertypes[s];
+				}
+			}
+		}
+	}
+
+	while (queue_len > 0 && visited_len < 32) {
+		String st = queue[0];
+		for (usz i = 1; i < queue_len; i++) queue[i-1] = queue[i];
+		queue_len--;
+
+		bool already = false;
+		for (usz i = 0; i < visited_len; i++) {
+			if (visited[i] == st) { already = true; break; }
+		}
+		if (already) continue;
+		visited[visited_len++] = st;
+
+		TypeRef super_ref = { .kind = SIMPLE, .name = st };
+		TypeRef result = resolve_member_type(super_ref, member_name);
+		if (result.kind != UNKNOWN) return result;
+
+		if (try super_members = g_workspace.member_cache.get_ref(st)) {
+			for (usz j = 0; j < super_members.len(); j++) {
+				MemberDecl* m = &(*super_members)[j];
+				if (m.name == member_name) {
+					if (m.type_text.len > 0) return parse_type_text(m.type_text);
+					if (m.node_kind == FUN_DECL) return TYPE_UNIT;
+					return TYPE_UNKNOWN;
+				}
+			}
+		}
+
+		if (try indices = g_workspace.lookup_by_name(st)) {
+			for (usz i = 0; i < indices.len(); i++) {
+				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
+				for (usz s = 0; s < sym.supertype_count && queue_len < 32; s++) {
+					if (sym.supertypes[s].len > 0) {
+						queue[queue_len++] = sym.supertypes[s];
 					}
 				}
 			}
@@ -1936,8 +2220,6 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 
 	return TYPE_UNKNOWN;
 }
-
-// ── Binary expression resolution ───────────────────────────────────
 
 fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	String op = node.extra_text;
@@ -1983,7 +2265,28 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 	}
 
 	// Infix function calls
-	if (op == "to") return { .kind = GENERIC, .name = "Pair" };
+	if (op == "to") {
+		TypeRef left_t = TYPE_UNKNOWN;
+		TypeRef right_t = TYPE_UNKNOWN;
+		uint child_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx) {
+				if (child_count == 0 && info.has_type[j]) left_t = info.node_types[j];
+				if (child_count == 1 && info.has_type[j]) right_t = info.node_types[j];
+				child_count++;
+				if (child_count >= 2) break;
+			}
+		}
+		TypeRef pair = { .kind = GENERIC, .name = "Pair" };
+		if (left_t.kind != UNKNOWN && right_t.kind != UNKNOWN) {
+			pair.type_arg_count = 2;
+			pair.type_arg_names[0] = left_t.name;
+			pair.type_arg_names[1] = right_t.name;
+			pair.type_arg_nullable[0] = left_t.nullable;
+			pair.type_arg_nullable[1] = right_t.nullable;
+		}
+		return pair;
+	}
 	if (op == "until" || op == "downTo") return { .kind = SIMPLE, .name = "IntRange" };
 
 	return TYPE_UNKNOWN;
@@ -2126,12 +2429,88 @@ fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 	return result;
 }
 
-fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+// ── Try/catch expression resolution ────────────────────────────────
+
+/**
+ * try { expr } catch(e: T) { expr } finally { ... }
+ * Type = common_type(try body, catch bodies). Finally ignored for type.
+ */
+fn TypeRef resolve_try_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	TypeRef result = TYPE_UNKNOWN;
+	bool found_try_body = false;
+	bool found_catch = false;
+
 	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+		if (pr.nodes[j].parent != idx) continue;
+
+		if (pr.nodes[j].kind == CATCH_CLAUSE) {
+			found_catch = true;
+			// Find body expression type (skip PARAM nodes, descend into BLOCK)
+			TypeRef catch_type = last_expr_type_in(pr, info, j, true);
+			if (catch_type.kind != UNKNOWN) {
+				if (result.kind == UNKNOWN) {
+					result = catch_type;
+				} else {
+					result = common_type(result, catch_type);
+				}
+			}
+		} else if (!found_try_body && !found_catch) {
+			// First non-catch child = try body (may be BLOCK)
+			found_try_body = true;
+			TypeRef body_type = TYPE_UNKNOWN;
+			if (pr.nodes[j].kind == BLOCK) {
+				body_type = last_expr_type_in(pr, info, j, false);
+			} else if (info.has_type[j]) {
+				body_type = info.node_types[j];
+			}
+			if (body_type.kind != UNKNOWN) {
+				if (result.kind == UNKNOWN) {
+					result = body_type;
+				} else {
+					result = common_type(result, body_type);
+				}
+			}
+		}
+		// Any non-catch child after catch = finally block, skip for type
+	}
+	return result;
+}
+
+/**
+ * Find last expression type inside a parent node.
+ * Descends into BLOCK children. Skips PARAM nodes when skip_params is true.
+ */
+fn TypeRef last_expr_type_in(ParseResult* pr, TypeInfo* info, uint parent_idx, bool skip_params) {
+	TypeRef last_type = TYPE_UNKNOWN;
+	for (uint k = 0; k < pr.node_count; k++) {
+		if (pr.nodes[k].parent != parent_idx) continue;
+		if (skip_params && pr.nodes[k].kind == PARAM) continue;
+		if (pr.nodes[k].kind == BLOCK) {
+			TypeRef block_type = last_expr_type_in(pr, info, k, false);
+			if (block_type.kind != UNKNOWN) last_type = block_type;
+		} else if (info.has_type[k]) {
+			last_type = info.node_types[k];
+		}
+	}
+	return last_type;
+}
+
+fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	// First child = receiver, second = index expression
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx) {
+			// This is the receiver (first child)
+			if (!info.has_type[j]) return TYPE_UNKNOWN;
 			TypeRef receiver = info.node_types[j];
 			if (receiver.name == "String") return TYPE_CHAR;
 			if (receiver.kind == GENERIC && receiver.type_arg_count > 0) {
+				// Map<K,V>[key] → V? (nullable because key may be absent)
+				if ((receiver.name == "Map" || receiver.name == "MutableMap" ||
+				     receiver.name == "HashMap" || receiver.name == "LinkedHashMap")
+				    && receiver.type_arg_count >= 2) {
+					return { .kind = SIMPLE, .name = receiver.type_arg_names[1], .nullable = true };
+				}
+				// List<T>[i] → T, etc.
 				return { .kind = SIMPLE, .name = receiver.type_arg_names[0] };
 			}
 			break;
@@ -2182,6 +2561,431 @@ fn int numeric_rank(TypeRef t) {
 	if (t.name == "Short") return 2;
 	if (t.name == "Byte") return 1;
 	return 0;
+}
+
+// ── Type assignability ────────────────────────────────────────────
+
+/**
+ * Hardcoded stdlib supertype table.
+ * Each entry: { type_name, { supertype1, supertype2, ... } }
+ * BFS walk to check transitive supertypes.
+ */
+const usz MAX_STDLIB_SUPERS = 4;
+
+struct StdlibSupertypeEntry {
+	String name;
+	String[MAX_STDLIB_SUPERS] supertypes;
+	usz super_count;
+}
+
+const StdlibSupertypeEntry[*] STDLIB_SUPERTYPES = {
+	// Primitives → Number → Comparable → Any
+	{ "Int",                { "Number", "Comparable", "Any", "" },                    3 },
+	{ "Long",               { "Number", "Comparable", "Any", "" },                    3 },
+	{ "Short",              { "Number", "Comparable", "Any", "" },                    3 },
+	{ "Byte",               { "Number", "Comparable", "Any", "" },                    3 },
+	{ "Float",              { "Number", "Comparable", "Any", "" },                    3 },
+	{ "Double",             { "Number", "Comparable", "Any", "" },                    3 },
+	{ "Number",             { "Comparable", "Any", "", "" },                          2 },
+	{ "Boolean",            { "Comparable", "Any", "", "" },                          2 },
+	{ "Char",               { "Comparable", "Any", "", "" },                          2 },
+	{ "String",             { "CharSequence", "Comparable", "Any", "" },              3 },
+	{ "CharSequence",       { "Any", "", "", "" },                                    1 },
+	{ "Comparable",         { "Any", "", "", "" },                                    1 },
+	// Unsigned
+	{ "UInt",               { "Comparable", "Any", "", "" },                          2 },
+	{ "ULong",              { "Comparable", "Any", "", "" },                          2 },
+	{ "UShort",             { "Comparable", "Any", "", "" },                          2 },
+	{ "UByte",              { "Comparable", "Any", "", "" },                          2 },
+	// Collections
+	{ "Iterable",           { "Any", "", "", "" },                                    1 },
+	{ "Collection",         { "Iterable", "Any", "", "" },                            2 },
+	{ "List",               { "Collection", "Iterable", "Any", "" },                  3 },
+	{ "Set",                { "Collection", "Iterable", "Any", "" },                  3 },
+	{ "MutableIterable",    { "Iterable", "Any", "", "" },                            2 },
+	{ "MutableCollection",  { "Collection", "MutableIterable", "Iterable", "Any" },   4 },
+	{ "MutableList",        { "List", "MutableCollection", "", "" },                  2 },
+	{ "MutableSet",         { "Set", "MutableCollection", "", "" },                   2 },
+	{ "ArrayList",          { "MutableList", "List", "Any", "" },                     3 },
+	{ "LinkedList",         { "MutableList", "List", "Any", "" },                     3 },
+	{ "HashSet",            { "MutableSet", "Set", "Any", "" },                       3 },
+	{ "LinkedHashSet",      { "MutableSet", "Set", "Any", "" },                       3 },
+	{ "Sequence",           { "Any", "", "", "" },                                    1 },
+	// Maps
+	{ "Map",                { "Any", "", "", "" },                                    1 },
+	{ "MutableMap",         { "Map", "Any", "", "" },                                 2 },
+	{ "HashMap",            { "MutableMap", "Map", "Any", "" },                       3 },
+	{ "LinkedHashMap",      { "MutableMap", "Map", "Any", "" },                       3 },
+	// Pair / Triple
+	{ "Pair",               { "Any", "", "", "" },                                    1 },
+	{ "Triple",             { "Any", "", "", "" },                                    1 },
+	// Exceptions
+	{ "Throwable",          { "Any", "", "", "" },                                    1 },
+	{ "Exception",          { "Throwable", "Any", "", "" },                           2 },
+	{ "RuntimeException",   { "Exception", "Throwable", "Any", "" },                  3 },
+	{ "IllegalArgumentException",  { "RuntimeException", "Exception", "Throwable", "" },  3 },
+	{ "IllegalStateException",     { "RuntimeException", "Exception", "Throwable", "" },  3 },
+	{ "NullPointerException",      { "RuntimeException", "Exception", "Throwable", "" },  3 },
+	{ "IndexOutOfBoundsException", { "RuntimeException", "Exception", "Throwable", "" },  3 },
+	{ "UnsupportedOperationException", { "RuntimeException", "Exception", "Throwable", "" }, 3 },
+	{ "NoSuchElementException",    { "RuntimeException", "Exception", "Throwable", "" },  3 },
+	{ "ConcurrentModificationException", { "RuntimeException", "Exception", "Throwable", "" }, 3 },
+	{ "Error",              { "Throwable", "Any", "", "" },                           2 },
+	// Other
+	{ "Unit",               { "Any", "", "", "" },                                    1 },
+	{ "Array",              { "Any", "", "", "" },                                    1 },
+	{ "IntArray",           { "Any", "", "", "" },                                    1 },
+	{ "LongArray",          { "Any", "", "", "" },                                    1 },
+	{ "DoubleArray",        { "Any", "", "", "" },                                    1 },
+	{ "FloatArray",         { "Any", "", "", "" },                                    1 },
+	{ "ByteArray",          { "Any", "", "", "" },                                    1 },
+	{ "ShortArray",         { "Any", "", "", "" },                                    1 },
+	{ "BooleanArray",       { "Any", "", "", "" },                                    1 },
+	{ "CharArray",          { "Any", "", "", "" },                                    1 },
+	{ "Enum",               { "Comparable", "Any", "", "" },                          2 },
+	{ "Regex",              { "Any", "", "", "" },                                    1 },
+};
+
+/**
+ * Hardcoded generic variance table.
+ * 0 = invariant, 1 = covariant (out), -1 = contravariant (in)
+ */
+const usz MAX_VARIANCE_PARAMS = 2;
+
+struct VarianceEntry {
+	String name;
+	int[MAX_VARIANCE_PARAMS] variance;  // per type param
+	usz param_count;
+}
+
+const VarianceEntry[*] GENERIC_VARIANCE = {
+	{ "List",               { 1, 0 },   1 },  // List<out E>
+	{ "Set",                { 1, 0 },   1 },  // Set<out E>
+	{ "Collection",         { 1, 0 },   1 },  // Collection<out E>
+	{ "Iterable",           { 1, 0 },   1 },  // Iterable<out T>
+	{ "Sequence",           { 1, 0 },   1 },  // Sequence<out T>
+	{ "Map",                { 0, 1 },   2 },  // Map<K, out V>
+	{ "Map.Entry",          { 0, 1 },   2 },  // Map.Entry<K, out V>
+	{ "Comparable",         { -1, 0 },  1 },  // Comparable<in T>
+	// Mutable collections: invariant
+	{ "MutableList",        { 0, 0 },   1 },
+	{ "MutableSet",         { 0, 0 },   1 },
+	{ "MutableCollection",  { 0, 0 },   1 },
+	{ "MutableIterable",    { 0, 0 },   1 },
+	{ "MutableMap",         { 0, 0 },   2 },
+	{ "ArrayList",          { 0, 0 },   1 },
+	{ "HashSet",            { 0, 0 },   1 },
+	{ "HashMap",            { 0, 0 },   2 },
+	{ "LinkedHashMap",      { 0, 0 },   2 },
+	{ "Array",              { 0, 0 },   1 },  // Array is invariant in Kotlin
+	{ "Pair",               { 0, 0 },   2 },  // Pair<A, B> invariant
+	{ "Triple",             { 0, 0 },   2 },  // Triple<A, B> -- only 2 tracked
+};
+
+/**
+ * Check if source type is assignable to target type.
+ * Follows Kotlin's type system rules:
+ * - No implicit numeric widening (Int NOT assignable to Long)
+ * - T assignable to T?, but not vice versa
+ * - Nothing is subtype of everything
+ * - Any is supertype of everything
+ * - Stdlib hierarchy + workspace supertypes (BFS)
+ * - Generic variance (covariant, contravariant, invariant)
+ * - Function type variance (contravariant params, covariant return)
+ */
+fn bool is_assignable_to(TypeRef source, TypeRef target) {
+	// UNKNOWN: permissive to avoid false positives
+	if (source.kind == UNKNOWN || target.kind == UNKNOWN) return true;
+
+	// Nothing is subtype of everything
+	if (source.kind == NOTHING || source.name == "Nothing") {
+		// Nothing (non-nullable) assignable to any type
+		if (!source.nullable) return true;
+		// Nothing? (null literal) only assignable to nullable types
+		return target.nullable;
+	}
+
+	// Unit: anything assignable to Unit (Kotlin allows ignoring return values)
+	if (target.kind == UNIT || target.name == "Unit") return true;
+
+	// Any target: supertype of everything
+	if (target.name == "Any") {
+		if (target.nullable) return true;           // Any? accepts everything
+		return !source.nullable;                    // Any accepts non-nullable only
+	}
+
+	// Numeric literal widening: Kotlin allows integer literals to widen
+	// Int -> Long, Float -> Double, Byte -> Short/Int/Long, Short -> Int/Long
+	if (is_numeric_widening(source.name, target.name)) return true;
+
+	// Same name
+	if (source.name == target.name) {
+		// Nullable check: T? NOT assignable to T, but T assignable to T?
+		if (source.nullable && !target.nullable) return false;
+
+		// Check generic type arguments if both have them
+		if (source.type_arg_count > 0 && target.type_arg_count > 0) {
+			return check_generic_args_assignable(source, target);
+		}
+		return true;
+	}
+
+	// Nullable source to non-nullable target: never OK (different names)
+	if (source.nullable && !target.nullable) {
+		// Exception: Nothing? handled above
+		return false;
+	}
+
+	// Check stdlib supertype hierarchy (BFS)
+	if (is_stdlib_subtype(source.name, target.name)) {
+		// For generic targets, check type args through the hierarchy
+		if (target.type_arg_count > 0) {
+			return check_supertype_generic_args(source, target);
+		}
+		return true;
+	}
+
+	// Function type assignability: contravariant params, covariant return
+	if (source.kind == FUNCTION && target.kind == FUNCTION) {
+		return check_function_type_assignable(source, target);
+	}
+
+	// Permissive for unknown types: if either type is not in our known
+	// stdlib/primitive hierarchy, we can't verify the relationship.
+	// Return true to avoid false positive diagnostics for user/dependency types.
+	if (!is_known_stdlib_type(source.name) || !is_known_stdlib_type(target.name)) {
+		return true;
+	}
+
+	return false;
+}
+
+/**
+ * Check if source numeric type can be widened to target numeric type.
+ * Kotlin allows this for literal values in argument positions.
+ */
+fn bool is_numeric_widening(String source, String target) {
+	if (target == "Long") return source == "Int" || source == "Short" || source == "Byte";
+	if (target == "Int") return source == "Short" || source == "Byte";
+	if (target == "Short") return source == "Byte";
+	if (target == "Double") return source == "Float" || source == "Int" || source == "Long";
+	if (target == "Float") return source == "Int";
+	return false;
+}
+
+/**
+ * Check if a type name is in our known stdlib/primitive type table.
+ * Types not in this table are user/dependency types where we can't
+ * verify subtype relationships.
+ */
+fn bool is_known_stdlib_type(String name) {
+	for (usz i = 0; i < STDLIB_SUPERTYPES.len; i++) {
+		if (STDLIB_SUPERTYPES[i].name == name) return true;
+	}
+	// Also check 'Any' and 'Nothing' which aren't in the table as entries
+	if (name == "Any" || name == "Nothing") return true;
+	return false;
+}
+
+/**
+ * BFS check: is source_name a subtype of target_name in stdlib hierarchy?
+ */
+fn bool is_stdlib_subtype(String source_name, String target_name) {
+	// BFS with visited set (max 32 types to check)
+	String[32] queue;
+	bool[32] visited_flags;
+	String[32] visited_names;
+	usz visited_count = 0;
+	usz q_start = 0;
+	usz q_end = 0;
+
+	queue[q_end++] = source_name;
+
+	while (q_start < q_end && q_start < 32) {
+		String current = queue[q_start++];
+
+		// Check visited
+		bool was_visited = false;
+		for (usz v = 0; v < visited_count; v++) {
+			if (visited_names[v] == current) { was_visited = true; break; }
+		}
+		if (was_visited) continue;
+		if (visited_count < 32) visited_names[visited_count++] = current;
+
+		// Look up in stdlib table
+		for (usz i = 0; i < STDLIB_SUPERTYPES.len; i++) {
+			if (STDLIB_SUPERTYPES[i].name != current) continue;
+
+			for (usz s = 0; s < STDLIB_SUPERTYPES[i].super_count; s++) {
+				String sup = STDLIB_SUPERTYPES[i].supertypes[s];
+				if (sup == target_name) return true;
+				if (q_end < 32) queue[q_end++] = sup;
+			}
+			break;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Check generic type argument assignability respecting variance.
+ * Both source and target have the same container name.
+ */
+fn bool check_generic_args_assignable(TypeRef source, TypeRef target) {
+	// Find variance for this container
+	for (usz i = 0; i < GENERIC_VARIANCE.len; i++) {
+		if (GENERIC_VARIANCE[i].name != source.name) continue;
+
+		usz check_count = GENERIC_VARIANCE[i].param_count;
+		if (check_count > source.type_arg_count) check_count = source.type_arg_count;
+		if (check_count > target.type_arg_count) check_count = target.type_arg_count;
+
+		for (usz p = 0; p < check_count; p++) {
+			String src_arg = source.type_arg_names[p];
+			String tgt_arg = target.type_arg_names[p];
+			bool src_null = source.type_arg_nullable[p];
+			bool tgt_null = target.type_arg_nullable[p];
+
+			if (src_arg == tgt_arg) {
+				// Same name: check nullable direction
+				if (src_null && !tgt_null) return false;
+				continue;
+			}
+
+			// Star projection: always OK
+			if (tgt_arg == "*" || src_arg == "*") continue;
+
+			int variance = GENERIC_VARIANCE[i].variance[p];
+			TypeRef src_type = parse_type_text(src_arg);
+			src_type.nullable = src_null;
+			TypeRef tgt_type = parse_type_text(tgt_arg);
+			tgt_type.nullable = tgt_null;
+
+			if (variance == 1) {
+				// Covariant (out): source arg must be assignable to target arg
+				if (!is_assignable_to(src_type, tgt_type)) return false;
+			} else if (variance == -1) {
+				// Contravariant (in): target arg must be assignable to source arg
+				if (!is_assignable_to(tgt_type, src_type)) return false;
+			} else {
+				// Invariant: must be same type (bidirectional)
+				if (!is_assignable_to(src_type, tgt_type)) return false;
+				if (!is_assignable_to(tgt_type, src_type)) return false;
+			}
+		}
+		return true;
+	}
+
+	// No variance entry found: treat all args as invariant
+	usz check_count = source.type_arg_count;
+	if (check_count > target.type_arg_count) check_count = target.type_arg_count;
+	for (usz p = 0; p < check_count; p++) {
+		if (source.type_arg_names[p] != target.type_arg_names[p]) return false;
+		if (source.type_arg_nullable[p] != target.type_arg_nullable[p]) return false;
+	}
+	return true;
+}
+
+/**
+ * Check generic args when assigning to a supertype with generic params.
+ * E.g. ArrayList<String> assignable to Collection<String> (covariant).
+ */
+fn bool check_supertype_generic_args(TypeRef source, TypeRef target) {
+	// If source has type args, check against target's type args
+	if (source.type_arg_count > 0 && target.type_arg_count > 0) {
+		// Find variance for the TARGET container
+		for (usz i = 0; i < GENERIC_VARIANCE.len; i++) {
+			if (GENERIC_VARIANCE[i].name != target.name) continue;
+
+			usz check_count = GENERIC_VARIANCE[i].param_count;
+			if (check_count > source.type_arg_count) check_count = source.type_arg_count;
+			if (check_count > target.type_arg_count) check_count = target.type_arg_count;
+
+			for (usz p = 0; p < check_count; p++) {
+				String src_arg = source.type_arg_names[p];
+				String tgt_arg = target.type_arg_names[p];
+				bool src_null = source.type_arg_nullable[p];
+				bool tgt_null = target.type_arg_nullable[p];
+
+				if (src_arg == tgt_arg && src_null == tgt_null) continue;
+				if (tgt_arg == "*" || src_arg == "*") continue;
+
+				int variance = GENERIC_VARIANCE[i].variance[p];
+				TypeRef src_type = parse_type_text(src_arg);
+				src_type.nullable = src_null;
+				TypeRef tgt_type = parse_type_text(tgt_arg);
+				tgt_type.nullable = tgt_null;
+
+				if (variance == 1) {
+					if (!is_assignable_to(src_type, tgt_type)) return false;
+				} else if (variance == -1) {
+					if (!is_assignable_to(tgt_type, src_type)) return false;
+				} else {
+					if (!is_assignable_to(src_type, tgt_type)) return false;
+					if (!is_assignable_to(tgt_type, src_type)) return false;
+				}
+			}
+			return true;
+		}
+	}
+	// No type args to check or no variance info: allow
+	return true;
+}
+
+/**
+ * Function type assignability:
+ * - Params are contravariant: target param types must be assignable to source param types
+ * - Return type is covariant: source return must be assignable to target return
+ */
+fn bool check_function_type_assignable(TypeRef source, TypeRef target) {
+	// Param count must match
+	if (source.param_type_count != target.param_type_count) return false;
+
+	// Check params (contravariant)
+	usz param_count = source.param_type_count;
+	for (usz i = 0; i < param_count; i++) {
+		TypeRef src_param = parse_type_text(source.param_type_names[i]);
+		TypeRef tgt_param = parse_type_text(target.param_type_names[i]);
+		// Contravariant: target param must be assignable to source param
+		if (!is_assignable_to(tgt_param, src_param)) return false;
+	}
+
+	// Check return type (covariant)
+	TypeRef src_return = parse_type_text(source.return_type_name);
+	TypeRef tgt_return = parse_type_text(target.return_type_name);
+	if (!is_assignable_to(src_return, tgt_return)) return false;
+
+	return true;
+}
+
+/**
+ * Format a type for diagnostic messages: "Type" or "Type?"
+ */
+fn String format_type_for_diagnostic(TypeRef* t) {
+	if (t.kind == UNKNOWN) return "Unknown";
+	if (t.kind == NOTHING) return t.nullable ? "Nothing?" : "Nothing";
+	if (t.kind == UNIT) return "Unit";
+
+	if (t.type_arg_count > 0) {
+		// Use full_text if available, else build name<args>
+		if (t.full_text.len > 0) {
+			return t.nullable ? string::tformat("%s?", t.full_text) : t.full_text;
+		}
+		DString buf;
+		buf.tinit();
+		buf.appendf("%s<", t.name);
+		for (usz i = 0; i < t.type_arg_count; i++) {
+			if (i > 0) buf.appendf(", ");
+			buf.appendf("%s", t.type_arg_names[i]);
+			if (t.type_arg_nullable[i]) buf.appendf("?");
+		}
+		buf.appendf(">");
+		if (t.nullable) buf.appendf("?");
+		return buf.str_view();
+	}
+
+	return t.nullable ? string::tformat("%s?", t.name) : t.name;
 }
 
 // ── Scope helpers ──────────────────────────────────────────────────

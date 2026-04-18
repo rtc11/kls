@@ -86,6 +86,20 @@ fn Object* handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, O
 		}
 	}
 
+	// ── Quick fix: import all unresolved references at once ─────
+	if (doc != null && workspace != null && ast != null
+		&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+		Object* import_all = try_import_all_unresolved(uri, doc, ast, workspace, client_diagnostics);
+		if (import_all != null) {
+			actions.push(import_all);
+		}
+	}
+
+	// ── Source action: convert to star import ───────────────────
+	if (doc != null && ast != null && is_kind_wanted("source.organizeImports", only_kinds[:only_count])) {
+		add_star_import_actions(actions, uri, ast);
+	}
+
 	// ── Source action: remove ALL unused imports (computed server-side) ──
 	// Don't rely on client-provided diagnostics for this — compute from
 	// the full document so it works regardless of cursor position.
@@ -110,6 +124,31 @@ fn Object* handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, O
 			if (action != null) {
 				actions.push(action);
 			}
+		}
+	}
+
+	// ── Refactor: extract variable ──────────────────────────────
+	if (doc != null && ast != null && is_kind_wanted("refactor.extract", only_kinds[:only_count])) {
+		Object* extract = try_extract_variable(uri, doc, ast, params);
+		if (extract != null) {
+			actions.push(extract);
+		}
+		Object* extract_fn = try_extract_function(uri, doc, ast, params);
+		if (extract_fn != null) {
+			actions.push(extract_fn);
+		}
+	}
+
+	// ── Source: generate data class methods ──────────────────────
+	if (doc != null && ast != null && is_kind_wanted("source.generate", only_kinds[:only_count])) {
+		add_data_class_actions(actions, uri, doc, ast, params);
+	}
+
+	// ── Refactor: convert to expression form ────────────────────
+	if (doc != null && ast != null && is_kind_wanted("refactor.rewrite", only_kinds[:only_count])) {
+		Object* expr_body = try_convert_fun_to_expression_body(uri, doc, ast, params);
+		if (expr_body != null) {
+			actions.push(expr_body);
 		}
 	}
 
@@ -320,6 +359,987 @@ fn Object* try_insert_delimiter(String uri, Object* diag, String message) {
 	action.set("diagnostics", action_diags);
 
 	return action;
+}
+
+// ── Refactor: extract variable ───────────────────────────────────
+
+/**
+ * Build an "Extract variable" code action when the selection exactly
+ * matches an expression AST node. Produces two edits:
+ *   1. Insert `val extractedVar = <expr>\n<indent>` before the containing statement
+ *   2. Replace the expression with `extractedVar`
+ *
+ * Returns null if the selection doesn't match an extractable expression.
+ */
+fn Object* try_extract_variable(String uri, Document* doc, ParseResult* ast, Object* params) {
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+
+	Object* start = range.get("start") ?? null;
+	Object* end_pos = range.get("end") ?? null;
+	if (start == null || end_pos == null) return null;
+
+	uint start_line = (uint)(start.get_int("line") ?? 0);
+	uint start_col = (uint)(start.get_int("character") ?? 0);
+	uint end_line = (uint)(end_pos.get_int("line") ?? 0);
+	uint end_col = (uint)(end_pos.get_int("character") ?? 0);
+
+	// Empty selection → nothing to extract
+	if (start_line == end_line && start_col == end_col) return null;
+
+	long sel_start = document::position_to_byte_offset(doc.content, start_line, start_col);
+	long sel_end = document::position_to_byte_offset(doc.content, end_line, end_col);
+	if (sel_start < 0 || sel_end < 0 || sel_end <= sel_start) return null;
+
+	// Find innermost expression node with exact match on selection
+	uint best_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (!ast::is_expression(n.kind)) continue;
+		if (n.start_offset == (uint)sel_start && n.end_offset == (uint)sel_end) {
+			best_idx = i; // later = deeper = innermost
+		}
+	}
+	if (best_idx == uint.max) return null;
+
+	AstNode* expr = &ast.nodes[best_idx];
+
+	// Skip NAME_EXPR — already a variable reference, no point extracting
+	if (expr.kind == NAME_EXPR) return null;
+
+	// Get expression source text
+	String expr_text = doc.content[(usz)expr.start_offset..(usz)expr.end_offset - 1];
+
+	// Find containing statement: walk parent chain until we find a node
+	// whose parent is a BLOCK or FILE (that node is the statement level)
+	uint stmt_idx = best_idx;
+	while (stmt_idx != 0 && ast.nodes[stmt_idx].parent != ast::NO_PARENT) {
+		uint parent_idx = ast.nodes[stmt_idx].parent;
+		AstNode* parent = &ast.nodes[parent_idx];
+		if (parent.kind == BLOCK || parent.kind == FILE) {
+			break;
+		}
+		stmt_idx = parent_idx;
+	}
+
+	AstNode* stmt = &ast.nodes[stmt_idx];
+
+	// Get indentation: scan content from line start to stmt start_col
+	String indent = "";
+	if (stmt.start_col > 0) {
+		// Find line start by scanning backward from stmt.start_offset
+		usz line_start = (usz)stmt.start_offset;
+		while (line_start > 0 && doc.content[line_start - 1] != '\n') {
+			line_start--;
+		}
+		// Extract leading whitespace
+		usz ws_end = line_start;
+		while (ws_end < doc.content.len && (doc.content[ws_end] == ' ' || doc.content[ws_end] == '\t')) {
+			ws_end++;
+		}
+		if (ws_end > line_start) {
+			indent = doc.content[line_start..ws_end - 1];
+		}
+	}
+
+	// Build insert text: "val extractedVar = <expr>\n<indent>"
+	DString insert_text;
+	insert_text.tinit();
+	insert_text.appendf("val extractedVar = %s\n%s", expr_text, indent);
+
+	// Edit 1: insert before the statement (at statement's start position)
+	Object* insert_start = object::new_obj(tmem);
+	insert_start.set("line", (int)stmt.start_line);
+	insert_start.set("character", (int)stmt.start_col);
+
+	Object* insert_end = object::new_obj(tmem);
+	insert_end.set("line", (int)stmt.start_line);
+	insert_end.set("character", (int)stmt.start_col);
+
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_start);
+	insert_range.set("end", insert_end);
+
+	Object* edit1 = object::new_obj(tmem);
+	edit1.set("range", insert_range);
+	edit1.set("newText", insert_text.str_view());
+
+	// Edit 2: replace expression with "extractedVar"
+	Object* replace_start = object::new_obj(tmem);
+	replace_start.set("line", (int)expr.start_line);
+	replace_start.set("character", (int)expr.start_col);
+
+	Object* replace_end = object::new_obj(tmem);
+	replace_end.set("line", (int)expr.end_line);
+	replace_end.set("character", (int)expr.end_col);
+
+	Object* replace_range = object::new_obj(tmem);
+	replace_range.set("start", replace_start);
+	replace_range.set("end", replace_end);
+
+	Object* edit2 = object::new_obj(tmem);
+	edit2.set("range", replace_range);
+	edit2.set("newText", "extractedVar");
+
+	// Build workspace edit with both edits
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit1);
+	edits.push(edit2);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Extract variable");
+	action.set("kind", "refactor.extract.variable");
+	action.set("edit", workspace_edit);
+
+	return action;
+}
+
+// ── Refactor: extract function ──────────────────────────────────
+
+/**
+ * Build an "Extract function" code action when the selection matches
+ * an expression node or covers complete statement lines.
+ *
+ * Mode A (expression): selection exactly matches an expression AST node.
+ *   Creates `private fun extracted() = <expr>` after the enclosing function.
+ *   Replaces expression with `extracted()`.
+ *
+ * Mode B (statements): selection covers one or more complete lines inside
+ *   a function body. Creates `private fun extracted(<params>) { <lines> }`
+ *   after the enclosing function. Replaces selected lines with `extracted(<args>)`.
+ *   Parameters are detected by finding identifiers in the selected code that
+ *   reference declarations from the enclosing scope (before the selection).
+ *
+ * Returns null if the selection doesn't match either mode.
+ */
+fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Object* params) {
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+
+	Object* start = range.get("start") ?? null;
+	Object* end_pos = range.get("end") ?? null;
+	if (start == null || end_pos == null) return null;
+
+	uint start_line = (uint)(start.get_int("line") ?? 0);
+	uint start_col = (uint)(start.get_int("character") ?? 0);
+	uint end_line = (uint)(end_pos.get_int("line") ?? 0);
+	uint end_col = (uint)(end_pos.get_int("character") ?? 0);
+
+	// Empty selection → nothing to extract
+	if (start_line == end_line && start_col == end_col) return null;
+
+	long sel_start = document::position_to_byte_offset(doc.content, start_line, start_col);
+	long sel_end = document::position_to_byte_offset(doc.content, end_line, end_col);
+	if (sel_start < 0 || sel_end < 0 || sel_end <= sel_start) return null;
+
+	// Try Mode A: exact expression match
+	uint expr_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (!ast::is_expression(n.kind)) continue;
+		if (n.start_offset == (uint)sel_start && n.end_offset == (uint)sel_end) {
+			expr_idx = i;
+		}
+	}
+
+	// Find enclosing function for placement
+	uint enc_fun_idx = find_enclosing_fun(ast, expr_idx != uint.max ? expr_idx : 0, (uint)sel_start);
+	if (enc_fun_idx == ast::NO_PARENT) return null;
+
+	AstNode* enc_fun = &ast.nodes[enc_fun_idx];
+
+	// Get enclosing function indentation
+	String fun_indent = get_line_indent(doc.content, enc_fun.start_offset);
+
+	if (expr_idx != uint.max) {
+		// ── Mode A: expression extraction ──
+		AstNode* expr = &ast.nodes[expr_idx];
+
+		// Skip NAME_EXPR — just a variable reference
+		if (expr.kind == NAME_EXPR) return null;
+
+		String expr_text = doc.content[(usz)expr.start_offset..(usz)expr.end_offset - 1];
+
+		// Build function: "private fun extracted() = <expr>"
+		DString fun_text;
+		fun_text.tinit();
+		fun_text.appendf("\n\n%sprivate fun extracted() = %s", fun_indent, expr_text);
+
+		// Insert after enclosing function
+		Object* insert_start_pos = object::new_obj(tmem);
+		insert_start_pos.set("line", (int)enc_fun.end_line);
+		insert_start_pos.set("character", (int)enc_fun.end_col);
+		Object* insert_end_pos = object::new_obj(tmem);
+		insert_end_pos.set("line", (int)enc_fun.end_line);
+		insert_end_pos.set("character", (int)enc_fun.end_col);
+		Object* insert_range = object::new_obj(tmem);
+		insert_range.set("start", insert_start_pos);
+		insert_range.set("end", insert_end_pos);
+
+		Object* edit1 = object::new_obj(tmem);
+		edit1.set("range", insert_range);
+		edit1.set("newText", fun_text.str_view());
+
+		// Replace expression with "extracted()"
+		Object* replace_start_pos = object::new_obj(tmem);
+		replace_start_pos.set("line", (int)expr.start_line);
+		replace_start_pos.set("character", (int)expr.start_col);
+		Object* replace_end_pos = object::new_obj(tmem);
+		replace_end_pos.set("line", (int)expr.end_line);
+		replace_end_pos.set("character", (int)expr.end_col);
+		Object* replace_range = object::new_obj(tmem);
+		replace_range.set("start", replace_start_pos);
+		replace_range.set("end", replace_end_pos);
+
+		Object* edit2 = object::new_obj(tmem);
+		edit2.set("range", replace_range);
+		edit2.set("newText", "extracted()");
+
+		Object* edits = object::new_obj(tmem);
+		edits.push(edit2);  // replace first (earlier in doc)
+		edits.push(edit1);  // insert after function (later in doc)
+
+		Object* changes = object::new_obj(tmem);
+		changes.set(uri, edits);
+		Object* workspace_edit = object::new_obj(tmem);
+		workspace_edit.set("changes", changes);
+
+		Object* action = object::new_obj(tmem);
+		action.set("title", "Extract function");
+		action.set("kind", "refactor.extract.function");
+		action.set("edit", workspace_edit);
+		return action;
+	}
+
+	// ── Mode B: statement block extraction ──
+	// Selection must cover complete lines inside a function body
+	// Find statement-level nodes that fall within the selection
+	uint enc_block_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BLOCK) continue;
+		if (n.parent == enc_fun_idx) {
+			enc_block_idx = i;
+			break;
+		}
+	}
+	if (enc_block_idx == ast::NO_PARENT || enc_block_idx == uint.max) return null;
+
+	// Collect statement nodes in the block that overlap with selection
+	uint[64] sel_stmts;
+	usz sel_stmt_count = 0;
+	for (uint i = 1; i < ast.node_count && sel_stmt_count < 64; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.parent != enc_block_idx) continue;
+		// Statement overlaps selection if it starts before sel_end and ends after sel_start
+		if (n.start_offset < (uint)sel_end && n.end_offset > (uint)sel_start) {
+			sel_stmts[sel_stmt_count] = i;
+			sel_stmt_count++;
+		}
+	}
+	if (sel_stmt_count == 0) return null;
+
+	// Get the range covering all selected statements
+	AstNode* first_stmt = &ast.nodes[sel_stmts[0]];
+	AstNode* last_stmt = &ast.nodes[sel_stmts[sel_stmt_count - 1]];
+
+	// Get selected code text
+	String selected_text = doc.content[(usz)first_stmt.start_offset..(usz)last_stmt.end_offset - 1];
+
+	// Get statement indentation (for the body of the new function)
+	String stmt_indent = get_line_indent(doc.content, first_stmt.start_offset);
+
+	// Detect free variables: identifiers in selected code that are declared
+	// in the enclosing function before the selection
+	String[32] param_names;
+	String[32] param_types;
+	usz param_count = 0;
+
+	// Collect declarations in enclosing block before selection
+	String[64] enclosing_decl_names;
+	String[64] enclosing_decl_types;
+	usz enclosing_decl_count = 0;
+
+	for (uint i = 1; i < ast.node_count && enclosing_decl_count < 64; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.parent != enc_block_idx && n.parent != enc_fun_idx) continue;
+		if (n.kind != PROPERTY_DECL && n.kind != PARAM) continue;
+		if (n.name.len == 0) continue;
+		// Only declarations before the selection
+		if (n.end_offset > (uint)sel_start) {
+			// PARAM nodes are always "before" (they're function params)
+			if (n.kind != PARAM) continue;
+		}
+		enclosing_decl_names[enclosing_decl_count] = n.name;
+		enclosing_decl_types[enclosing_decl_count] = n.type_text.len > 0 ? n.type_text : "Any";
+		enclosing_decl_count++;
+	}
+
+	// Scan selected text for identifier tokens that match enclosing decls
+	lexer::Lexer lex = lexer::init(selected_text);
+	while (true) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) break;
+		if (tok.kind != IDENTIFIER) continue;
+
+		// Check if this identifier matches an enclosing declaration
+		for (usz d = 0; d < enclosing_decl_count; d++) {
+			if (tok.text != enclosing_decl_names[d]) continue;
+
+			// Check if already added
+			bool already = false;
+			for (usz p = 0; p < param_count; p++) {
+				if (param_names[p] == tok.text) {
+					already = true;
+					break;
+				}
+			}
+			if (!already && param_count < 32) {
+				param_names[param_count] = enclosing_decl_names[d];
+				param_types[param_count] = enclosing_decl_types[d];
+				param_count++;
+			}
+			break;
+		}
+	}
+
+	// Build the new function
+	DString fun_text;
+	fun_text.tinit();
+	fun_text.appendf("\n\n%sprivate fun extracted(", fun_indent);
+	for (usz p = 0; p < param_count; p++) {
+		if (p > 0) fun_text.append(", ");
+		fun_text.appendf("%s: %s", param_names[p], param_types[p]);
+	}
+	fun_text.append(") {\n");
+	// Add the selected code, re-indented to function body level
+	fun_text.appendf("%s", selected_text);
+	if (selected_text.len > 0 && selected_text[selected_text.len - 1] != '\n') {
+		fun_text.append("\n");
+	}
+	fun_text.appendf("%s}", fun_indent);
+
+	// Build the call
+	DString call_text;
+	call_text.tinit();
+	call_text.appendf("%sextracted(", stmt_indent);
+	for (usz p = 0; p < param_count; p++) {
+		if (p > 0) call_text.append(", ");
+		call_text.appendf("%s", param_names[p]);
+	}
+	call_text.append(")");
+
+	// Edit 1: replace selected statements with call
+	Object* replace_start_pos = object::new_obj(tmem);
+	replace_start_pos.set("line", (int)first_stmt.start_line);
+	replace_start_pos.set("character", 0);
+	Object* replace_end_pos = object::new_obj(tmem);
+	replace_end_pos.set("line", (int)last_stmt.end_line);
+	replace_end_pos.set("character", (int)last_stmt.end_col);
+	Object* replace_range = object::new_obj(tmem);
+	replace_range.set("start", replace_start_pos);
+	replace_range.set("end", replace_end_pos);
+
+	Object* edit1 = object::new_obj(tmem);
+	edit1.set("range", replace_range);
+	edit1.set("newText", call_text.str_view());
+
+	// Edit 2: insert new function after enclosing function
+	Object* insert_start_pos = object::new_obj(tmem);
+	insert_start_pos.set("line", (int)enc_fun.end_line);
+	insert_start_pos.set("character", (int)enc_fun.end_col);
+	Object* insert_end_pos2 = object::new_obj(tmem);
+	insert_end_pos2.set("line", (int)enc_fun.end_line);
+	insert_end_pos2.set("character", (int)enc_fun.end_col);
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_start_pos);
+	insert_range.set("end", insert_end_pos2);
+
+	Object* edit2 = object::new_obj(tmem);
+	edit2.set("range", insert_range);
+	edit2.set("newText", fun_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit1);
+	edits.push(edit2);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Extract function");
+	action.set("kind", "refactor.extract.function");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+/**
+ * Find the enclosing FUN_DECL for a given node index or byte offset.
+ * Returns the node index of the FUN_DECL, or NO_PARENT if not inside one.
+ */
+fn uint find_enclosing_fun(ParseResult* ast, uint node_idx, uint byte_offset) {
+	// If we have a specific node, walk its parent chain
+	if (node_idx > 0 && node_idx != uint.max) {
+		uint current = node_idx;
+		while (current != 0 && ast.nodes[current].parent != ast::NO_PARENT) {
+			uint parent_idx = ast.nodes[current].parent;
+			if (ast.nodes[parent_idx].kind == FUN_DECL) return parent_idx;
+			current = parent_idx;
+		}
+	}
+
+	// Fallback: find innermost FUN_DECL containing byte_offset
+	uint best = ast::NO_PARENT;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if (byte_offset >= n.start_offset && byte_offset < n.end_offset) {
+			best = i; // later = deeper = innermost
+		}
+	}
+	return best;
+}
+
+/**
+ * Get the leading whitespace indentation for the line containing the given byte offset.
+ */
+fn String get_line_indent(String content, uint offset) {
+	// Find line start
+	usz line_start = (usz)offset;
+	while (line_start > 0 && content[line_start - 1] != '\n') {
+		line_start--;
+	}
+	// Extract leading whitespace
+	usz ws_end = line_start;
+	while (ws_end < content.len && (content[ws_end] == ' ' || content[ws_end] == '\t')) {
+		ws_end++;
+	}
+	if (ws_end > line_start) {
+		return content[line_start..ws_end - 1];
+	}
+	return "";
+}
+
+// ── Source: generate data class methods ──────────────────────────
+
+/**
+ * Add "Generate toString()", "Generate equals()", "Generate hashCode()"
+ * code actions for data classes at the cursor position that are missing
+ * these methods.
+ */
+fn void add_data_class_actions(Object* actions, String uri, Document* doc, ParseResult* ast, Object* params) {
+	Object* range = params.get("range") ?? null;
+	if (range == null) return;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return;
+
+	// Find data class containing cursor
+	uint class_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != CLASS_DECL) continue;
+		if (n.mod_flags & ast::MOD_DATA == 0) continue;
+		if ((uint)cursor_offset >= n.start_offset && (uint)cursor_offset < n.end_offset) {
+			class_idx = i;
+		}
+	}
+	if (class_idx == uint.max) return;
+
+	AstNode* cls = &ast.nodes[class_idx];
+	String class_name = cls.name;
+	if (class_name.len == 0) return;
+
+	// Collect primary constructor properties (PARAM children of class)
+	String[32] prop_names;
+	String[32] prop_types;
+	usz prop_count = 0;
+
+	for (uint i = 1; i < ast.node_count && prop_count < 32; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.parent != class_idx) continue;
+		if (n.kind != PARAM) continue;
+		if (n.name.len == 0) continue;
+		prop_names[prop_count] = n.name;
+		prop_types[prop_count] = n.type_text.len > 0 ? n.type_text : "Any";
+		prop_count++;
+	}
+	if (prop_count == 0) return;
+
+	// Check which methods already exist
+	bool has_to_string = false;
+	bool has_equals = false;
+	bool has_hash_code = false;
+
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if (n.parent != class_idx) continue;
+		// Also check if parent is a BLOCK child of the class
+		if (n.parent != class_idx) {
+			// Check for FUN_DECL inside BLOCK that is child of class
+			AstNode* p = &ast.nodes[n.parent];
+			if (p.kind != BLOCK || p.parent != class_idx) continue;
+		}
+		if (n.name == "toString") has_to_string = true;
+		if (n.name == "equals") has_equals = true;
+		if (n.name == "hashCode") has_hash_code = true;
+	}
+
+	// Find insertion point: before closing '}' of class body
+	// The class end_offset points past the '}', so end_line/end_col is after '}'
+	// Insert at end_line, col 0 — before the closing brace line
+	uint insert_line = cls.end_line;
+	uint insert_col = 0;
+
+	// Member indentation: class indent + one level
+	String class_indent = get_line_indent(doc.content, cls.start_offset);
+	DString member_indent;
+	member_indent.tinit();
+	member_indent.appendf("%s    ", class_indent);
+	String mind = member_indent.str_view();
+
+	if (!has_to_string) {
+		DString body;
+		body.tinit();
+		body.appendf("\n%soverride fun toString(): String = \"%s(", mind, class_name);
+		for (usz p = 0; p < prop_count; p++) {
+			if (p > 0) body.append(", ");
+			body.appendf("%s=$%s", prop_names[p], prop_names[p]);
+		}
+		body.append(")\"\n");
+
+		Object* action = build_insert_action(uri, "Generate toString()",
+			"source.generate.toString", (int)insert_line, (int)insert_col, body.str_view());
+		actions.push(action);
+	}
+
+	if (!has_equals) {
+		DString body;
+		body.tinit();
+		body.appendf("\n%soverride fun equals(other: Any?): Boolean {\n", mind);
+		body.appendf("%s    if (this === other) return true\n", mind);
+		body.appendf("%s    if (other !is %s) return false\n", mind, class_name);
+		if (prop_count == 1) {
+			body.appendf("%s    return %s == other.%s\n", mind, prop_names[0], prop_names[0]);
+		} else {
+			body.appendf("%s    return ", mind);
+			for (usz p = 0; p < prop_count; p++) {
+				if (p > 0) body.append(" && ");
+				body.appendf("%s == other.%s", prop_names[p], prop_names[p]);
+			}
+			body.append("\n");
+		}
+		body.appendf("%s}\n", mind);
+
+		Object* action = build_insert_action(uri, "Generate equals()",
+			"source.generate.equals", (int)insert_line, (int)insert_col, body.str_view());
+		actions.push(action);
+	}
+
+	if (!has_hash_code) {
+		DString body;
+		body.tinit();
+		body.appendf("\n%soverride fun hashCode(): Int {\n", mind);
+		body.appendf("%s    var result = %s.hashCode()\n", mind, prop_names[0]);
+		for (usz p = 1; p < prop_count; p++) {
+			body.appendf("%s    result = 31 * result + %s.hashCode()\n", mind, prop_names[p]);
+		}
+		body.appendf("%s    return result\n", mind);
+		body.appendf("%s}\n", mind);
+
+		Object* action = build_insert_action(uri, "Generate hashCode()",
+			"source.generate.hashCode", (int)insert_line, (int)insert_col, body.str_view());
+		actions.push(action);
+	}
+}
+
+/**
+ * Build a code action that inserts text at a given position.
+ */
+fn Object* build_insert_action(String uri, String title, String kind, int line, int col, String text) {
+	Object* insert_start = object::new_obj(tmem);
+	insert_start.set("line", line);
+	insert_start.set("character", col);
+	Object* insert_end = object::new_obj(tmem);
+	insert_end.set("line", line);
+	insert_end.set("character", col);
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_start);
+	insert_range.set("end", insert_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", insert_range);
+	edit.set("newText", text);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", title);
+	action.set("kind", kind);
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ── Refactor: convert function to expression body ───────────────
+
+/**
+ * Offer "Convert to expression body" when cursor is on a FUN_DECL whose body
+ * is a BLOCK containing exactly one RETURN_EXPR (or one expression statement).
+ *
+ * Transforms: `fun foo(): Type { return expr }` → `fun foo(): Type = expr`
+ *
+ * The replacement covers from the block start `{` to the function end `}`,
+ * replacing with `= <expr>`.
+ */
+fn Object* try_convert_fun_to_expression_body(String uri, Document* doc, ParseResult* ast, Object* params) {
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find FUN_DECL containing cursor
+	uint fun_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if ((uint)cursor_offset >= n.start_offset && (uint)cursor_offset < n.end_offset) {
+			fun_idx = i;
+		}
+	}
+	if (fun_idx == uint.max) return null;
+
+	AstNode* fun_node = &ast.nodes[fun_idx];
+
+	// Find BLOCK child
+	uint block_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		if (ast.nodes[i].parent != fun_idx) continue;
+		if (ast.nodes[i].kind == BLOCK) {
+			block_idx = i;
+			break;
+		}
+	}
+	if (block_idx == uint.max) return null;
+
+	AstNode* block = &ast.nodes[block_idx];
+
+	// Count children of block — need exactly one statement
+	uint stmt_count = 0;
+	uint single_stmt_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		if (ast.nodes[i].parent != block_idx) continue;
+		stmt_count++;
+		single_stmt_idx = i;
+	}
+	if (stmt_count != 1 || single_stmt_idx == uint.max) return null;
+
+	AstNode* stmt = &ast.nodes[single_stmt_idx];
+
+	// Must be a RETURN_EXPR or a simple expression
+	String expr_text;
+	if (stmt.kind == RETURN_EXPR) {
+		// Get the expression after 'return' — it's the source text from
+		// after "return " to the end of the RETURN_EXPR node
+		// The return keyword is 6 chars, plus space(s)
+		usz return_start = (usz)stmt.start_offset;
+		usz return_end = (usz)stmt.end_offset;
+		// Skip "return" keyword and whitespace
+		usz expr_start = return_start + 6; // "return"
+		while (expr_start < return_end && (doc.content[expr_start] == ' ' || doc.content[expr_start] == '\t')) {
+			expr_start++;
+		}
+		if (expr_start >= return_end) return null; // empty return
+		expr_text = doc.content[expr_start..return_end - 1];
+	} else if (ast::is_expression(stmt.kind)) {
+		expr_text = doc.content[(usz)stmt.start_offset..(usz)stmt.end_offset - 1];
+	} else {
+		return null;
+	}
+
+	if (expr_text.len == 0) return null;
+
+	// Build replacement: replace from block start to function end with "= expr"
+	DString new_text;
+	new_text.tinit();
+	new_text.appendf("= %s", expr_text);
+
+	// Replace range: from block start to function end
+	Object* replace_start_pos = object::new_obj(tmem);
+	replace_start_pos.set("line", (int)block.start_line);
+	replace_start_pos.set("character", (int)block.start_col);
+	Object* replace_end_pos = object::new_obj(tmem);
+	replace_end_pos.set("line", (int)fun_node.end_line);
+	replace_end_pos.set("character", (int)fun_node.end_col);
+	Object* replace_range = object::new_obj(tmem);
+	replace_range.set("start", replace_start_pos);
+	replace_range.set("end", replace_end_pos);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", replace_range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert to expression body");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ── Quick fix: import all unresolved references ─────────────────
+
+/**
+ * When 2+ "Unresolved reference" diagnostics exist, offer a single
+ * "Import all" action that resolves all of them at once.
+ * Each unresolved name is resolved to its best candidate (first match).
+ * Returns null if < 2 unresolved references or no candidates found.
+ */
+fn Object* try_import_all_unresolved(String uri, Document* doc, ParseResult* ast,
+	WorkspaceIndex* workspace, Object* client_diagnostics) {
+	if (workspace == null || ast == null) return null;
+
+	// Collect all unresolved names from diagnostics
+	String[32] unresolved_names;
+	usz unresolved_count = 0;
+
+	for (sz i = 0; i < client_diagnostics.get_len() && unresolved_count < 32; i++) {
+		Object* diag = client_diagnostics.get_at(i);
+		String message = diag.get_string("message") ?? "";
+		if (!message.starts_with("Unresolved reference: '")) continue;
+
+		String name = extract_unresolved_name(message);
+		if (name.len == 0) continue;
+
+		// Dedup
+		bool dup = false;
+		for (usz j = 0; j < unresolved_count; j++) {
+			if (unresolved_names[j] == name) { dup = true; break; }
+		}
+		if (dup) continue;
+
+		unresolved_names[unresolved_count] = name;
+		unresolved_count++;
+	}
+
+	if (unresolved_count < 2) return null;
+
+	// Resolve each name to its best import candidate
+	String[32] import_paths;
+	usz import_count = 0;
+
+	bool needs_newline_before = false;
+	uint insert_line = find_import_insertion_line(ast, &needs_newline_before);
+
+	for (usz i = 0; i < unresolved_count; i++) {
+		String[16] candidates;
+		String[16] packages;
+		usz cand_count = diagnostics::find_import_candidates(
+			unresolved_names[i], workspace, &candidates, &packages);
+		if (cand_count == 0) continue;
+
+		// Use first candidate (best match)
+		String path = candidates[0];
+
+		// Check not already imported
+		if (is_already_imported(ast, path, packages[0])) continue;
+
+		// Dedup against already-collected paths
+		bool dup = false;
+		for (usz j = 0; j < import_count; j++) {
+			if (import_paths[j] == path) { dup = true; break; }
+		}
+		if (dup) continue;
+
+		import_paths[import_count] = path;
+		import_count++;
+	}
+
+	if (import_count < 2) return null;
+
+	// Build combined import text
+	DString import_text;
+	import_text.tinit();
+	if (needs_newline_before) {
+		import_text.append("\n");
+	}
+	for (usz i = 0; i < import_count; i++) {
+		import_text.appendf("import %s\n", import_paths[i]);
+	}
+
+	// Single insert edit
+	Object* insert_start = object::new_obj(tmem);
+	insert_start.set("line", (int)insert_line);
+	insert_start.set("character", 0);
+	Object* insert_end = object::new_obj(tmem);
+	insert_end.set("line", (int)insert_line);
+	insert_end.set("character", 0);
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_start);
+	insert_range.set("end", insert_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", insert_range);
+	edit.set("newText", import_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	DString title;
+	title.tinit();
+	title.appendf("Import all (%d imports)", (int)import_count);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", title.str_view());
+	action.set("kind", "quickfix");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ── Source: star import suggestion ───────────────────────────────
+
+struct PkgGroup {
+	String package_name;
+	uint[16] import_indices;
+	usz count;
+}
+
+/**
+ * When 3+ imports exist from the same package, offer to replace them
+ * with a single star import `import pkg.*`.
+ */
+fn void add_star_import_actions(Object* actions, String uri, ParseResult* ast) {
+	if (ast == null) return;
+
+	// Collect all IMPORT_DECL nodes and group by package
+	PkgGroup[16] groups;
+	usz group_count = 0;
+
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != IMPORT_DECL) continue;
+		if (n.extra_text.len == 0) continue; // extra_text = full import path
+
+		// Extract package: everything before the last '.'
+		String path = n.extra_text;
+		usz last_dot = 0;
+		bool found_dot = false;
+		for (usz j = path.len; j > 0; j--) {
+			if (path[j - 1] == '.') {
+				last_dot = j - 1;
+				found_dot = true;
+				break;
+			}
+		}
+		if (!found_dot) continue;
+		// Skip star imports
+		if (last_dot + 1 < path.len && path[last_dot + 1] == '*') continue;
+
+		String pkg = path[:last_dot];
+
+		// Find or create group
+		bool found_group = false;
+		for (usz g = 0; g < group_count; g++) {
+			if (groups[g].package_name == pkg) {
+				if (groups[g].count < 16) {
+					groups[g].import_indices[groups[g].count] = i;
+					groups[g].count++;
+				}
+				found_group = true;
+				break;
+			}
+		}
+		if (!found_group && group_count < 16) {
+			groups[group_count].package_name = pkg;
+			groups[group_count].import_indices[0] = i;
+			groups[group_count].count = 1;
+			group_count++;
+		}
+	}
+
+	// Offer star import for groups with 3+ imports
+	for (usz g = 0; g < group_count; g++) {
+		if (groups[g].count < 3) continue;
+
+		// Build edit: replace all imports in this group with one star import
+		// Find the range covering first to last import in the group
+		AstNode* first_import = &ast.nodes[groups[g].import_indices[0]];
+		AstNode* last_import = &ast.nodes[groups[g].import_indices[groups[g].count - 1]];
+
+		DString star_text;
+		star_text.tinit();
+		star_text.appendf("import %s.*\n", groups[g].package_name);
+
+		// Replace from first import start to last import end (full lines)
+		Object* replace_start = object::new_obj(tmem);
+		replace_start.set("line", (int)first_import.start_line);
+		replace_start.set("character", 0);
+		// End: next line after last import
+		Object* replace_end = object::new_obj(tmem);
+		replace_end.set("line", (int)last_import.end_line + 1);
+		replace_end.set("character", 0);
+		Object* replace_range = object::new_obj(tmem);
+		replace_range.set("start", replace_start);
+		replace_range.set("end", replace_end);
+
+		Object* edit = object::new_obj(tmem);
+		edit.set("range", replace_range);
+		edit.set("newText", star_text.str_view());
+
+		Object* edits = object::new_obj(tmem);
+		edits.push(edit);
+
+		Object* changes = object::new_obj(tmem);
+		changes.set(uri, edits);
+		Object* workspace_edit = object::new_obj(tmem);
+		workspace_edit.set("changes", changes);
+
+		DString title;
+		title.tinit();
+		title.appendf("Replace with 'import %s.*'", groups[g].package_name);
+
+		Object* action = object::new_obj(tmem);
+		action.set("title", title.str_view());
+		action.set("kind", "source.organizeImports");
+		action.set("edit", workspace_edit);
+		actions.push(action);
+	}
 }
 
 // ── Helpers ──────────────────────────────────────────────────────

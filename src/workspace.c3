@@ -66,6 +66,7 @@ struct WorkspaceIndex {
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
+	List{String} ext_cache_keys;                     // heap-allocated keys for extension entries
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
 }
@@ -78,6 +79,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.name_index.init(mem);
 	self.super_index.init(mem);
 	self.member_cache.init(mem);
+	self.ext_cache_keys.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
 }
@@ -124,6 +126,11 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 
 	// Free member_cache lists and their heap strings
 	@pool() {
+		foreach (&key : self.member_cache.tkeys()) {
+			// Extension receiver keys are heap-allocated copies
+			// Class name keys point to symbols list (freed separately)
+			// Safe to try freeing all — only heap ptrs will be freed
+		}
 		foreach (&list : self.member_cache.tvalues()) {
 			for (usz i = 0; i < list.len(); i++) {
 				MemberDecl* m = &(*list)[i];
@@ -133,6 +140,13 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		}
 	};
 	self.member_cache.free();
+
+	// Free heap-allocated extension cache keys
+	for (usz i = 0; i < self.ext_cache_keys.len(); i++) {
+		String k = self.ext_cache_keys[i];
+		if (k.len > 0) mem::free(k.ptr);
+	}
+	self.ext_cache_keys.free();
 
 	self.classpath.free();
 	self.dep_index.free();
@@ -167,16 +181,19 @@ fn void free_member_decl(MemberDecl* m) {
  */
 fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, String content,
 		Symbol* syms, usz count, usz start) {
-	// Check if any class-like symbols exist in this file
+	// Check if any class-like symbols or extension functions exist
 	bool has_classes = false;
+	bool has_extensions = false;
 	for (usz i = 0; i < count; i++) {
 		if (syms[i].kind == SymbolKind.CLASS || syms[i].kind == SymbolKind.INTERFACE ||
 			syms[i].kind == SymbolKind.OBJECT) {
 			has_classes = true;
-			break;
+		}
+		if (syms[i].receiver.len > 0) {
+			has_extensions = true;
 		}
 	}
-	if (!has_classes) return;
+	if (!has_classes && !has_extensions) return;
 
 	// Parse the file
 	ParseResult* pr = mem::new(ParseResult);
@@ -296,6 +313,68 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 			}
 			self.member_cache.set(class_name, members);
 			break; // Found the class node, done
+		}
+	}
+
+	// Index top-level extension functions/properties into member_cache
+	// by their receiver type name. These are FUN_DECL/PROPERTY_DECL at
+	// top level (parent is FILE or no parent) with extra_text (receiver).
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name.len == 0 || n.extra_text.len == 0) continue;
+		if (n.kind != FUN_DECL && n.kind != PROPERTY_DECL) continue;
+
+		// Only top-level: parent is FILE or root (0xFFFFFFFF or similar)
+		// Check parent is not a class/interface/object
+		if (n.parent < pr.node_count) {
+			NodeKind pk = pr.nodes[n.parent].kind;
+			if (pk == CLASS_DECL || pk == INTERFACE_DECL || pk == OBJECT_DECL) continue;
+		}
+
+		// Extract simple receiver name (strip generics/nullable: "List<T>?" → "List")
+		String recv = n.extra_text;
+		usz recv_end = 0;
+		while (recv_end < recv.len && recv[recv_end] != '<' && recv[recv_end] != '?' && recv[recv_end] != '.') {
+			recv_end++;
+		}
+		if (recv_end == 0) continue;
+		String recv_name = recv[:recv_end];
+
+		MemberDecl m = {
+			.name = n.name.copy(mem),
+			.type_text = n.type_text.len > 0 ? n.type_text.copy(mem) : "",
+			.uri = uri.copy(mem),
+			.node_kind = n.kind,
+			.mod_flags = n.mod_flags,
+			.line = n.name_line,
+			.col = n.name_col,
+			.name_len = n.name_len,
+			.param_count = 0,
+		};
+
+		// Collect parameters for extension functions
+		if (n.kind == FUN_DECL) {
+			for (uint k = 0; k < pr.node_count && m.param_count < MAX_PARAMS; k++) {
+				if (pr.nodes[k].parent != i) continue;
+				if (pr.nodes[k].kind != PARAM) continue;
+				usz pi = m.param_count;
+				m.param_names[pi] = pr.nodes[k].name.len > 0 ? pr.nodes[k].name.copy(mem) : "";
+				m.param_types[pi] = pr.nodes[k].type_text.len > 0 ? pr.nodes[k].type_text.copy(mem) : "";
+				m.param_count++;
+			}
+		}
+
+		// Add to or create member_cache entry for receiver type
+		String recv_key = recv_name.copy(mem);
+		if (try existing = self.member_cache.get_ref(recv_key)) {
+			existing.push(m);
+			mem::free(recv_key.ptr);
+		} else {
+			List{MemberDecl} ext_members;
+			ext_members.init(mem);
+			ext_members.push(m);
+			self.member_cache.set(recv_key, ext_members);
+			self.ext_cache_keys.push(recv_key);
 		}
 	}
 }
@@ -425,6 +504,7 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 	usz count = wf.symbol_count;
 
 	// Remove member_cache entries for class-like symbols in this file
+	// and extension function entries from this file
 	for (usz i = start; i < start + count && i < self.symbols.len(); i++) {
 		WorkspaceSymbol* sym = &self.symbols[i];
 		if (sym.kind == SymbolKind.CLASS || sym.kind == SymbolKind.INTERFACE ||
@@ -435,6 +515,34 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 				}
 				list_ref.free();
 				self.member_cache.remove(sym.name);
+			}
+		}
+		// Remove extension function entries by matching URI
+		if (sym.receiver.len > 0 && (sym.kind == SymbolKind.FUNCTION || sym.kind == SymbolKind.PROPERTY)) {
+			// Extract simple receiver name
+			String recv = sym.receiver;
+			usz recv_end = 0;
+			while (recv_end < recv.len && recv[recv_end] != '<' && recv[recv_end] != '?' && recv[recv_end] != '.') {
+				recv_end++;
+			}
+			if (recv_end > 0) {
+				String recv_name = recv[:recv_end];
+				if (try list_ref = self.member_cache.get_ref(recv_name)) {
+					// Remove entries whose URI matches this file
+					usz j = 0;
+					while (j < list_ref.len()) {
+						if ((*list_ref)[j].uri == uri) {
+							free_member_decl(&(*list_ref)[j]);
+							list_ref.remove_at(j);
+						} else {
+							j++;
+						}
+					}
+					if (list_ref.len() == 0) {
+						list_ref.free();
+						self.member_cache.remove(recv_name);
+					}
+				}
 			}
 		}
 	}

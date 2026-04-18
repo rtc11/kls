@@ -13,6 +13,7 @@ struct Parser {
 	Token previous;
 	ParseResult* result;
 	String last_annotations;  // set by parse_modifiers, read by declaration parsers
+	bool allow_angle_comparison;  // when true, treat < > as comparison in expressions
 }
 
 // ── Public entry point ─────────────────────────────────────────────
@@ -1512,13 +1513,31 @@ fn void Parser.parse_if_expr(Parser* self) {
 			// Expression parsing consumed the condition correctly
 			self.advance(); // consume ')'
 		} else {
-			// Rollback and fall back to skipping
+			// Rollback and retry with < > as comparison operators
 			self.lexer = save_lexer;
 			self.current = save_current;
 			self.previous = save_previous;
 			self.result.node_count = save_node_count;
 			self.result.error_count = save_error_count;
-			self.skip_balanced_parens();
+
+			self.allow_angle_comparison = true;
+			self.advance(); // consume '('
+			if (!self.at(RPAREN) && !self.at_eof()) {
+				self.parse_expression(0);
+			}
+			self.allow_angle_comparison = false;
+
+			if (self.at(RPAREN)) {
+				self.advance(); // consume ')'
+			} else {
+				// Still can't parse -- final fallback to skipping
+				self.lexer = save_lexer;
+				self.current = save_current;
+				self.previous = save_previous;
+				self.result.node_count = save_node_count;
+				self.result.error_count = save_error_count;
+				self.skip_balanced_parens();
+			}
 		}
 	}
 
@@ -1661,7 +1680,28 @@ fn void Parser.parse_when_entry_conditions(Parser* self, uint entry_idx) {
 	// Parse comma-separated condition expressions
 	bool success = true;
 	while (!self.at(ARROW) && !self.at(RCURL) && !self.at_eof()) {
-		self.parse_expression(PREC_NONE);
+		// Handle bare `is Type` / `!is Type` (subject implied from when)
+		if (self.at(KW_IS) || self.at(NOT_IS)) {
+			uint idx = self.add_node(TYPE_CHECK_EXPR);
+			self.node_start(idx, self.current);
+			self.result.nodes[idx].extra_text = self.current.text;
+			self.advance(); // consume 'is' or '!is'
+
+			// Parse the type
+			uint type_start = self.current.offset;
+			self.skip_type_ref();
+			uint type_end = self.previous.offset + self.previous.len;
+			if (type_end > type_start) {
+				self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			}
+			self.node_end(idx);
+		} else if (self.at(KW_IN) || self.at(NOT_IN)) {
+			// Handle bare `in range` (subject implied)
+			self.advance(); // consume 'in' or '!in'
+			self.parse_expression(PREC_NONE);
+		} else {
+			self.parse_expression(PREC_NONE);
+		}
 
 		if (self.at(ARROW)) break;
 		if (self.at(COMMA)) {
@@ -1943,8 +1983,25 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
 			if (self.at(RPAREN)) {
 				// Expression parsing consumed the condition correctly
 				self.advance(); // consume ')'
+		} else {
+			// Rollback and retry with < > as comparison operators
+			self.lexer = save_lexer;
+			self.current = save_current;
+			self.previous = save_previous;
+			self.result.node_count = save_node_count;
+			self.result.error_count = save_error_count;
+
+			self.allow_angle_comparison = true;
+			self.advance(); // consume '('
+			if (!self.at(RPAREN) && !self.at_eof()) {
+				self.parse_expression(0);
+			}
+			self.allow_angle_comparison = false;
+
+			if (self.at(RPAREN)) {
+				self.advance(); // consume ')'
 			} else {
-				// Rollback and fall back to skipping
+				// Still can't parse -- final fallback to skipping
 				self.lexer = save_lexer;
 				self.current = save_current;
 				self.previous = save_previous;
@@ -1952,6 +2009,7 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
 				self.result.error_count = save_error_count;
 				self.skip_balanced_parens();
 			}
+		}
 		}
 	}
 
@@ -2232,6 +2290,13 @@ fn uint Parser.parse_expression(Parser* self, int min_prec) {
 	// Parse infix / binary operators via precedence climbing
 	while (!self.at_eof()) {
 		int prec = infix_precedence(self.current.kind);
+
+		// When allow_angle_comparison is set (if/while conditions),
+		// treat < and > as comparison operators instead of generic delimiters.
+		if (prec == PREC_NONE && self.allow_angle_comparison
+			&& (self.current.kind == LANGLE || self.current.kind == RANGLE)) {
+			prec = PREC_COMPARISON;
+		}
 
 		// Infix function calls: `a to b`, `a until b`, `a downTo b`, etc.
 		// Only recognize a few well-known infix functions to avoid
@@ -3434,7 +3499,9 @@ fn bool is_soft_keyword(TokenKind kind) {
 		case KW_CONST: case KW_EXPECT: case KW_ACTUAL: case KW_VALUE:
 		case KW_GET: case KW_SET: case KW_FIELD: case KW_PROPERTY:
 		case KW_RECEIVER: case KW_PARAM: case KW_SETPARAM: case KW_DELEGATE:
-		case KW_FILE:
+		case KW_FILE: case KW_INIT: case KW_CONSTRUCTOR: case KW_BY:
+		case KW_COMPANION: case KW_CATCH: case KW_FINALLY: case KW_WHERE:
+		case KW_DYNAMIC:
 			return true;
 		default:
 			return false;

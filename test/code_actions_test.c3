@@ -65,6 +65,15 @@ fn Object* make_filtered_params(String uri, Object* diags, String[] only_kinds) 
 	return params;
 }
 
+/**
+ * Build codeAction params with source.organizeImports filter (no diagnostics needed).
+ */
+fn Object* make_code_action_params_source(String uri) {
+	Object* diags = object::new_obj(tmem); // empty array
+	String[1] only = { "source.organizeImports" };
+	return make_filtered_params(uri, diags, only[:1]); 
+}
+
 fn String get_action_title(Object* actions, usz index) {
 	return actions.get_at(index).get_string("title")!!;
 }
@@ -105,6 +114,34 @@ fn int get_edit_end_col(Object* edits, usz index) {
 fn String get_edit_new_text(Object* edits, usz index) {
 	Object* edit = edits.get_at(index);
 	return edit.get_string("newText")!!;
+}
+
+/**
+ * Build codeAction params with a specific selection range (for extract variable tests).
+ */
+fn Object* make_extract_params(String uri, int start_line, int start_col, int end_line, int end_col) {
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+
+	Object* start = object::new_obj(tmem);
+	start.set("line", start_line);
+	start.set("character", start_col);
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", end_line);
+	end_pos.set("character", end_col);
+	Object* range = object::new_obj(tmem);
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	Object* diags = object::new_obj(tmem);
+	Object* context = object::new_obj(tmem);
+	context.set("diagnostics", diags);
+
+	Object* params = object::new_obj(tmem);
+	params.set("textDocument", td);
+	params.set("range", range);
+	params.set("context", context);
+	return params;
 }
 
 // ── Test: empty diagnostics ─────────────────────────────────────
@@ -1434,6 +1471,982 @@ fn void jdk_java_lang_no_import_action() @test {
 			String title = get_action_title(result, (usz)i);
 			assert(!title.contains("java.lang.Thread"),
 				"should not offer import for java.lang.Thread (auto-imported), got '%s'", title);
+		}
+	};
+}
+
+// ── Test: extract variable from binary expression ────────────────
+
+fn void extract_variable_from_binary_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		//                    0         1         2
+		//                    0123456789012345678901234567
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "1 + 2" (col 21 to col 26)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract variable") {
+				found = true;
+				String kind = get_action_kind(result, (usz)i);
+				assert(kind == "refactor.extract.variable", "expected refactor.extract.variable, got '%s'", kind);
+
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				assert(edits.get_len() == 2, "expected 2 edits, got %d", (int)edits.get_len());
+
+				// Edit 1: insert "val extractedVar = 1 + 2\n" before statement
+				String insert_text = get_edit_new_text(edits, 0);
+				assert(insert_text.contains("val extractedVar = 1 + 2"),
+					"expected insert text, got '%s'", insert_text);
+
+				// Edit 2: replace expression with "extractedVar"
+				String replace_text = get_edit_new_text(edits, 1);
+				assert(replace_text == "extractedVar",
+					"expected 'extractedVar', got '%s'", replace_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract variable' action");
+	};
+}
+
+// ── Test: extract variable from call expression ─────────────────
+
+fn void extract_variable_from_call_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		//                    0         1         2         3
+		//                    0123456789012345678901234567890123456
+		String content = `fun main() { println(foo()) }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "foo()" (col 21 to col 26)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract variable") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				String insert_text = get_edit_new_text(edits, 0);
+				assert(insert_text.contains("val extractedVar = foo()"),
+					"expected insert text with foo(), got '%s'", insert_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract variable' action for call expression");
+	};
+}
+
+// ── Test: no extract variable for single name ───────────────────
+
+fn void no_extract_variable_for_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = y }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "y" (col 21 to col 22)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 22);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should not offer extract for single name reference");
+		}
+	};
+}
+
+// ── Test: no extract variable for empty selection ───────────────
+
+fn void no_extract_variable_for_empty_selection() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Empty selection (same start and end)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 21);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should not offer extract for empty selection");
+		}
+	};
+}
+
+// ── Test: no extract variable for partial selection ─────────────
+
+fn void no_extract_variable_for_partial_selection() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "1 +" (col 21 to col 24) — doesn't match any expression node
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 24);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should not offer extract for partial selection");
+		}
+	};
+}
+
+// ── Test: extract variable preserves indentation ────────────────
+
+fn void extract_variable_preserves_indentation() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {\n    val x = 1 + 2\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Line 1: "    val x = 1 + 2"
+		//          0         1
+		//          0123456789012345678
+		// "1 + 2" starts at col 12, ends at col 17 (exclusive)
+		Object* params = make_extract_params("file:///test.kt", 1, 12, 1, 17);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract variable") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				String insert_text = get_edit_new_text(edits, 0);
+				// Should have "val extractedVar = 1 + 2\n    " (preserving 4-space indent)
+				assert(insert_text.contains("val extractedVar = 1 + 2\n    "),
+					"expected preserved indentation, got '%s'", insert_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract variable' action with preserved indent");
+	};
+}
+
+// ── Test: extract variable only filter ──────────────────────────
+
+fn void extract_variable_only_filter() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Build params with only "refactor" filter
+		Object* td = object::new_obj(tmem);
+		td.set("uri", "file:///test.kt");
+
+		Object* start = object::new_obj(tmem);
+		start.set("line", 0);
+		start.set("character", 21);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", 0);
+		end_pos.set("character", 26);
+		Object* range = object::new_obj(tmem);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		Object* diags = object::new_obj(tmem);
+
+		Object* only = object::new_obj(tmem);
+		only.push(object::new_string("refactor", tmem));
+
+		Object* context = object::new_obj(tmem);
+		context.set("diagnostics", diags);
+		context.set("only", only);
+
+		Object* params = object::new_obj(tmem);
+		params.set("textDocument", td);
+		params.set("range", range);
+		params.set("context", context);
+
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		// Should include extract variable (refactor.extract.variable matches "refactor")
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract variable") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected extract variable with 'refactor' only filter");
+	};
+}
+
+// ── Test: extract variable filtered out by quickfix only ────────
+
+fn void extract_variable_filtered_out_by_quickfix() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* td = object::new_obj(tmem);
+		td.set("uri", "file:///test.kt");
+
+		Object* start = object::new_obj(tmem);
+		start.set("line", 0);
+		start.set("character", 21);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", 0);
+		end_pos.set("character", 26);
+		Object* range = object::new_obj(tmem);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		Object* diags = object::new_obj(tmem);
+
+		Object* only = object::new_obj(tmem);
+		only.push(object::new_string("quickfix", tmem));
+
+		Object* context = object::new_obj(tmem);
+		context.set("diagnostics", diags);
+		context.set("only", only);
+
+		Object* params = object::new_obj(tmem);
+		params.set("textDocument", td);
+		params.set("range", range);
+		params.set("context", context);
+
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"extract variable should be filtered out by 'quickfix' only filter");
+		}
+	};
+}
+
+// ── Test: extract function from expression ──────────────────────
+
+fn void extract_function_from_expression() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		//                    0         1         2
+		//                    0123456789012345678901234567
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "1 + 2" (col 21 to col 26)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract function") {
+				found = true;
+				String kind = get_action_kind(result, (usz)i);
+				assert(kind == "refactor.extract.function", "expected refactor.extract.function, got '%s'", kind);
+
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				assert(edits.get_len() == 2, "expected 2 edits, got %d", (int)edits.get_len());
+
+				// Edit 1: replace expression with "extracted()"
+				String replace_text = get_edit_new_text(edits, 0);
+				assert(replace_text == "extracted()",
+					"expected 'extracted()', got '%s'", replace_text);
+
+				// Edit 2: insert function definition
+				String insert_text = get_edit_new_text(edits, 1);
+				assert(insert_text.contains("private fun extracted() = 1 + 2"),
+					"expected function definition, got '%s'", insert_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract function' action");
+	};
+}
+
+// ── Test: extract function from statement block ─────────────────
+
+fn void extract_function_from_statements() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun main() {\n    val y = 10\n    println(y)\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select lines 1-2 covering both statements
+		// Line 1: "    val y = 10"  (14 chars)
+		// Line 2: "    println(y)"  (14 chars)
+		Object* params = make_extract_params("file:///test.kt", 1, 0, 2, 14);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract function") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+
+				// Should have 2 edits: replace + insert
+				assert(edits.get_len() == 2, "expected 2 edits, got %d", (int)edits.get_len());
+
+				// The inserted function should contain "private fun extracted"
+				String insert_text = get_edit_new_text(edits, 1);
+				assert(insert_text.contains("private fun extracted"),
+					"expected function definition, got '%s'", insert_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract function' action for statements");
+	};
+}
+
+// ── Test: extract function with parameters ──────────────────────
+
+fn void extract_function_with_parameters() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun calc(x: Int) {\n    val result = x + 1\n    println(result)\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select line 1: "    val result = x + 1" — uses parameter 'x' from enclosing fun
+		// Line 1: "    val result = x + 1"
+		//          0         1         2
+		//          0123456789012345678901
+		Object* params = make_extract_params("file:///test.kt", 1, 0, 1, 22);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract function") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+
+				// The inserted function should have 'x' as parameter
+				String insert_text = get_edit_new_text(edits, 1);
+				assert(insert_text.contains("x: Int"),
+					"expected parameter 'x: Int' in function, got '%s'", insert_text);
+
+				// The call should pass 'x' as argument
+				String call_text = get_edit_new_text(edits, 0);
+				assert(call_text.contains("extracted(x)"),
+					"expected call with 'x' arg, got '%s'", call_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract function' with parameter");
+	};
+}
+
+// ── Test: no extract function for empty selection ───────────────
+
+fn void no_extract_function_for_empty_selection() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 21);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should not offer extract function for empty selection");
+		}
+	};
+}
+
+// ── Test: no extract function for NAME_EXPR ─────────────────────
+
+fn void no_extract_function_for_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = y }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "y" (col 21 to col 22)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 22);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should not offer extract function for single name");
+		}
+	};
+}
+
+// ── Test: extract function action kind filter ───────────────────
+
+fn void extract_function_filtered_by_quickfix() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* td = object::new_obj(tmem);
+		td.set("uri", "file:///test.kt");
+
+		Object* start = object::new_obj(tmem);
+		start.set("line", 0);
+		start.set("character", 21);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", 0);
+		end_pos.set("character", 26);
+		Object* range = object::new_obj(tmem);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		Object* diags = object::new_obj(tmem);
+		Object* only = object::new_obj(tmem);
+		only.push(object::new_string("quickfix", tmem));
+		Object* context = object::new_obj(tmem);
+		context.set("diagnostics", diags);
+		context.set("only", only);
+
+		Object* params = object::new_obj(tmem);
+		params.set("textDocument", td);
+		params.set("range", range);
+		params.set("context", context);
+
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"extract function should be filtered out by 'quickfix' only filter");
+		}
+	};
+}
+
+// ── Test: generate toString for data class ──────────────────────
+
+fn void generate_to_string_for_data_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "data class User(val name: String, val age: Int) {\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor inside class (line 0, col 20)
+		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Generate toString()") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("override fun toString()"),
+					"expected toString override, got '%s'", text);
+				assert(text.contains("User(name=$name, age=$age)"),
+					"expected property interpolation, got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected 'Generate toString()' action for data class");
+	};
+}
+
+// ── Test: generate equals for data class ────────────────────────
+
+fn void generate_equals_for_data_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "data class User(val name: String, val age: Int) {\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Generate equals()") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("override fun equals(other: Any?)"),
+					"expected equals override, got '%s'", text);
+				assert(text.contains("other !is User"),
+					"expected type check, got '%s'", text);
+				assert(text.contains("name == other.name"),
+					"expected property comparison, got '%s'", text);
+				assert(text.contains("age == other.age"),
+					"expected property comparison, got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected 'Generate equals()' action for data class");
+	};
+}
+
+// ── Test: generate hashCode for data class ──────────────────────
+
+fn void generate_hash_code_for_data_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "data class User(val name: String, val age: Int) {\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Generate hashCode()") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("override fun hashCode(): Int"),
+					"expected hashCode override, got '%s'", text);
+				assert(text.contains("name.hashCode()"),
+					"expected property hashCode, got '%s'", text);
+				assert(text.contains("31 * result + age.hashCode()"),
+					"expected combined hashCode, got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected 'Generate hashCode()' action for data class");
+	};
+}
+
+// ── Test: no generate for non-data class ────────────────────────
+
+fn void no_generate_for_non_data_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "class User(val name: String) {\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 15, 0, 15);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.starts_with("Generate"),
+				"should not offer generate for non-data class, got '%s'", title);
+		}
+	};
+}
+
+// ── Test: no generate when method already exists ────────────────
+
+fn void no_generate_when_already_exists() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "data class User(val name: String) {\n    override fun toString(): String = \"custom\"\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Generate toString()",
+				"should not offer generate toString when already defined");
+		}
+	};
+}
+
+// ── Test: generate all three for data class ─────────────────────
+
+fn void generate_all_three_for_data_class() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "data class Point(val x: Int, val y: Int) {\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found_to_string = false;
+		bool found_equals = false;
+		bool found_hash_code = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Generate toString()") found_to_string = true;
+			if (title == "Generate equals()") found_equals = true;
+			if (title == "Generate hashCode()") found_hash_code = true;
+		}
+		assert(found_to_string, "expected Generate toString()");
+		assert(found_equals, "expected Generate equals()");
+		assert(found_hash_code, "expected Generate hashCode()");
+	};
+}
+
+// ── Test: convert function to expression body ───────────────────
+
+fn void convert_fun_to_expression_body() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun add(a: Int, b: Int): Int { return a + b }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on function (col 5)
+		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Convert to expression body") {
+				found = true;
+				String kind = get_action_kind(result, (usz)i);
+				assert(kind == "refactor.rewrite", "expected refactor.rewrite, got '%s'", kind);
+
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("= a + b"),
+					"expected '= a + b', got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected 'Convert to expression body' action");
+	};
+}
+
+// ── Test: no convert for multi-statement function ───────────────
+
+fn void no_convert_for_multi_statement_fun() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun foo() { val x = 1; return x }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Convert to expression body",
+				"should not offer convert for multi-statement function");
+		}
+	};
+}
+
+// ── Test: no convert for empty function ─────────────────────────
+
+fn void no_convert_for_empty_fun() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun foo() {}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Convert to expression body",
+				"should not offer convert for empty function");
+		}
+	};
+}
+
+// ── Test: convert for function with expression statement ────────
+
+fn void convert_fun_with_expression_statement() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Single expression call — can be expression body
+		String content = "fun greet() { println(\"hello\") }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Convert to expression body") {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("= println"),
+					"expected expression body with println, got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected 'Convert to expression body' for single expression");
+	};
+}
+
+// ── Test: convert filtered by quickfix only ─────────────────────
+
+fn void convert_expression_body_filtered_by_quickfix() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun add(a: Int, b: Int): Int { return a + b }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* td = object::new_obj(tmem);
+		td.set("uri", "file:///test.kt");
+
+		Object* start = object::new_obj(tmem);
+		start.set("line", 0);
+		start.set("character", 5);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", 0);
+		end_pos.set("character", 5);
+		Object* range = object::new_obj(tmem);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		Object* diags = object::new_obj(tmem);
+		Object* only = object::new_obj(tmem);
+		only.push(object::new_string("quickfix", tmem));
+		Object* context = object::new_obj(tmem);
+		context.set("diagnostics", diags);
+		context.set("only", only);
+
+		Object* params = object::new_obj(tmem);
+		params.set("textDocument", td);
+		params.set("range", range);
+		params.set("context", context);
+
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Convert to expression body",
+				"should be filtered out by quickfix only filter");
+		}
+	};
+}
+
+// ── Test: import all unresolved references ──────────────────────
+
+fn void import_all_unresolved_references() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex workspace;
+		workspace.init();
+		defer workspace.free();
+
+		// Two unresolved references: KClass (kotlin.reflect) and Continuation (kotlin.coroutines)
+		String content = "fun main() {\n    val c = KClass\n    val f = Continuation\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Build diagnostics
+		ParseResult* pr = mem::new(ParseResult);
+		defer { pr.free_errors(); mem::free(pr); }
+		parser::parse(content, pr);
+		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
+
+		Object* params = make_code_action_params("file:///test.kt", diags);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title.starts_with("Import all")) {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("import kotlin.reflect.KClass"),
+					"expected KClass import, got '%s'", text);
+				assert(text.contains("import kotlin.coroutines.Continuation"),
+					"expected Continuation import, got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected 'Import all' action for multiple unresolved references");
+	};
+}
+
+// ── Test: no import all for single unresolved ───────────────────
+
+fn void no_import_all_for_single_unresolved() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex workspace;
+		workspace.init();
+		defer workspace.free();
+
+		String content = `fun main() { val c = KClass }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		ParseResult* pr = mem::new(ParseResult);
+		defer { pr.free_errors(); mem::free(pr); }
+		parser::parse(content, pr);
+		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
+
+		Object* params = make_code_action_params("file:///test.kt", diags);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.starts_with("Import all"),
+				"should not offer import all for single unresolved");
+		}
+	};
+}
+
+// ── Test: star import suggestion ────────────────────────────────
+
+fn void star_import_suggestion() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// 3 imports from kotlin.reflect
+		String content = "import kotlin.reflect.KClass\nimport kotlin.reflect.KFunction\nimport kotlin.reflect.KProperty\n\nfun main() {}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_code_action_params_source("file:///test.kt");
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title.contains("import kotlin.reflect.*")) {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				String text = get_edit_new_text(edits, 0);
+				assert(text.contains("import kotlin.reflect.*"),
+					"expected star import, got '%s'", text);
+				break;
+			}
+		}
+		assert(found, "expected star import suggestion for 3+ imports from same package");
+	};
+}
+
+// ── Test: no star import for 2 imports ──────────────────────────
+
+fn void no_star_import_for_two_imports() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Only 2 imports from kotlin.reflect
+		String content = "import kotlin.reflect.KClass\nimport kotlin.reflect.KFunction\n\nfun main() {}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_code_action_params_source("file:///test.kt");
+		Object* result = code_actions::handle_code_action(&store, null, params);
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.contains("import kotlin.reflect.*"),
+				"should not offer star import for only 2 imports");
 		}
 	};
 }

@@ -1221,3 +1221,146 @@ fn void val_reassignment_compound_operator() @test {
 		assert(found, "expected val reassignment diagnostic for compound operator");
 	};
 }
+
+// ── Type mismatch diagnostic tests ───────────────────────────────
+
+fn bool has_diagnostic_containing(Object* result, String needle) {
+	for (usz i = 0; i < result.get_len(); i++) {
+		Object* diag = result.get_at(i);
+		String msg = diag.get_string("message") ?? "";
+		if (msg.contains(needle)) return true;
+	}
+	return false;
+}
+
+fn void type_mismatch_assignment_int_to_string() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`val x: String = 42`
+		);
+		assert(has_diagnostic_containing(result, "Type mismatch"),
+			"should flag Int assigned to String");
+	};
+}
+
+fn void type_mismatch_assignment_no_false_positive() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`val x: Int = 42`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag Int assigned to Int");
+	};
+}
+
+fn void type_mismatch_nullable_to_non_nullable() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(x: String?) { val y: String = x }`
+		);
+		assert(has_diagnostic_containing(result, "Type mismatch"),
+			"should flag String? assigned to String");
+	};
+}
+
+fn void type_mismatch_non_nullable_to_nullable_ok() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(x: String) { val y: String? = x }`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag String assigned to String?");
+	};
+}
+
+fn void type_mismatch_return_type() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(): String { return 42 }`
+		);
+		assert(has_diagnostic_containing(result, "Type mismatch"),
+			"should flag Int returned where String expected");
+	};
+}
+
+fn void type_mismatch_return_type_ok() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(): Int { return 42 }`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag Int returned where Int expected");
+	};
+}
+
+fn void type_mismatch_argument() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun greet(name: String) {}
+			 fun test() { greet(42) }`
+		);
+		assert(has_diagnostic_containing(result, "Type mismatch"),
+			"should flag Int arg where String param expected");
+	};
+}
+
+fn void type_mismatch_argument_ok() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun greet(name: String) {}
+			 fun test() { greet("hello") }`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag String arg where String param expected");
+	};
+}
+
+fn void type_mismatch_subtype_assignment_ok() @test {
+	@pool() {
+		// Int should be assignable to Any
+		Object* result = build_test_diagnostics(
+			`val x: Any = 42`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag Int assigned to Any");
+	};
+}
+
+fn void unreachable_code_after_return() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(): Int {
+				return 1
+				val x = 2
+			}`
+		);
+		assert(has_diagnostic_containing(result, "Unreachable code"),
+			"should flag code after return");
+	};
+}
+
+fn void unreachable_code_after_throw() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test() {
+				throw RuntimeException("error")
+				val x = 2
+			}`
+		);
+		assert(has_diagnostic_containing(result, "Unreachable code"),
+			"should flag code after throw");
+	};
+}
+
+fn void no_unreachable_code_without_return() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(): Int {
+				val x = 1
+				return x
+			}`
+		);
+		assert(!has_diagnostic_containing(result, "Unreachable code"),
+			"should NOT flag code before return");
+	};
+}

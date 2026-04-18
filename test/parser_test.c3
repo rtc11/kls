@@ -4008,3 +4008,70 @@ fn void parse_lambda_destructuring_with_underscore() @test {
 		assert(!found_underscore, "underscore should not create a PARAM node");
 	};
 }
+
+// ── Soft keyword as identifier tests ────────────────────────────
+
+fn void parse_param_named_init() @test {
+	@pool() {
+		String content = `fun topology(init: Topology.() -> Unit): Topology = Topology().apply(init)`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// Should have FUN_DECL 'topology' with PARAM 'init'
+		bool found_fun = false;
+		bool found_param = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "topology") found_fun = true;
+			if (r.nodes[i].kind == PARAM && r.nodes[i].name == "init") found_param = true;
+		}
+		assert(found_fun, "expected FUN_DECL 'topology'");
+		assert(found_param, "expected PARAM 'init'");
+	};
+}
+
+fn void parse_param_named_constructor() @test {
+	@pool() {
+		String content = `fun create(constructor: String): Any = Unit`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		bool found_param = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM && r.nodes[i].name == "constructor") found_param = true;
+		}
+		assert(found_param, "expected PARAM 'constructor'");
+	};
+}
+
+fn void parse_val_named_init() @test {
+	@pool() {
+		String content = `val init = "hello"`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PROPERTY_DECL && r.nodes[i].name == "init") found = true;
+		}
+		assert(found, "expected PROPERTY_DECL 'init'");
+	};
+}
+
+fn void parse_init_block_still_works() @test {
+	@pool() {
+		String content =
+`class Foo {
+    init {
+        println("hello")
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		bool found_init = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == INIT_BLOCK) found_init = true;
+		}
+		assert(found_init, "expected INIT_BLOCK in class");
+	};
+}

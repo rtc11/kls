@@ -2,6 +2,7 @@ module kls::lsp::diagnostics;
 
 import std::io;
 import std::collections::object;
+import std::collections::list;
 import kls::json_rpc;
 import kls::document;
 import kls::kotlin::lexer;
@@ -129,6 +130,16 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	// Flag assignments to val-declared local variables.
 	if (lexer_error_count == 0 && ast != null) {
 		add_val_reassignment_diagnostics(diagnostics, content, ast);
+	}
+
+	// ── Type checking diagnostics ────────────────────────────────
+	// Resolve types for the AST and check for type mismatches.
+	if (lexer_error_count == 0 && ast != null && ast.error_count == 0) {
+		TypeInfo* ti = mem::new(TypeInfo);
+		defer mem::free(ti);
+		types::resolve_types(ast, ti);
+		add_type_mismatch_diagnostics(diagnostics, ast, ti, workspace);
+		add_unreachable_code_diagnostics(diagnostics, ast);
 	}
 
 	return diagnostics;
@@ -558,6 +569,362 @@ fn usz find_import_candidates(String name, WorkspaceIndex* workspace,
 	}
 
 	return count;
+}
+
+// ── Type checking diagnostics ─────────────────────────────────────
+
+/**
+ * Helper to create a diagnostic JSON object.
+ */
+fn Object* make_diagnostic(uint start_line, uint start_col, uint end_line, uint end_col,
+		int severity, String message) {
+	Object* diag = object::new_obj(tmem);
+
+	Object* range = object::new_obj(tmem);
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)start_line);
+	start.set("character", (int)start_col);
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)end_line);
+	end_pos.set("character", (int)end_col);
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	diag.set("range", range);
+	diag.set("severity", severity);
+	diag.set("source", "kls");
+	diag.set("message", message);
+
+	return diag;
+}
+
+/**
+ * Add type mismatch diagnostics:
+ * 1. Assignment: val x: String = 42  → type mismatch
+ * 2. Return: fun f(): String { return 42 } → type mismatch
+ * 3. Argument: fun f(x: Int) {}; f("hello") → type mismatch
+ */
+fn void add_type_mismatch_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* ti,
+		WorkspaceIndex* workspace) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+
+		// ── Assignment type mismatch ────────────────────────────
+		// PROPERTY_DECL with explicit type_text and an initializer child
+		if (n.kind == PROPERTY_DECL && n.type_text.len > 0) {
+			check_assignment_type_mismatch(diagnostics, ast, ti, i, n);
+		}
+
+		// ── Return type mismatch ────────────────────────────────
+		// RETURN_EXPR inside a FUN_DECL with explicit return type
+		if (n.kind == RETURN_EXPR) {
+			check_return_type_mismatch(diagnostics, ast, ti, i, n);
+		}
+
+		// ── Argument type mismatch ──────────────────────────────
+		// CALL_EXPR: resolve function, check arg types vs param types
+		if (n.kind == CALL_EXPR) {
+			check_argument_type_mismatch(diagnostics, ast, ti, i, n, workspace);
+		}
+	}
+}
+
+/**
+ * Check: val x: String = 42 → "Type mismatch: inferred type is Int, but String was expected"
+ */
+fn void check_assignment_type_mismatch(Object* diagnostics, ParseResult* ast, TypeInfo* ti,
+		uint idx, AstNode* n) {
+	TypeRef declared_type = types::parse_type_text(n.type_text);
+	if (declared_type.kind == UNKNOWN) return;
+
+	// Find initializer expression (child that's not a BLOCK and not the type annotation node)
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent != idx) continue;
+		AstNode* child = &ast.nodes[j];
+
+		// Skip non-expression children
+		if (child.kind == BLOCK || child.kind == TYPE_REF || child.kind == PARAM) continue;
+
+		// Must have a resolved type
+		if (!ti.has_type[j]) continue;
+		TypeRef init_type = ti.node_types[j];
+		if (init_type.kind == UNKNOWN) continue;
+
+		if (!types::is_assignable_to(init_type, declared_type)) {
+			String src_name = types::format_type_for_diagnostic(&init_type);
+			String tgt_name = types::format_type_for_diagnostic(&declared_type);
+			String msg = string::tformat("Type mismatch: inferred type is %s, but %s was expected",
+				src_name, tgt_name);
+			diagnostics.push(make_diagnostic(child.start_line, child.start_col,
+				child.end_line, child.end_col, 1, msg));
+		}
+		break; // only check first expression child
+	}
+}
+
+/**
+ * Check: fun f(): String { return 42 } → "Type mismatch..."
+ * Also checks expression-body functions: fun f(): String = 42
+ */
+fn void check_return_type_mismatch(Object* diagnostics, ParseResult* ast, TypeInfo* ti,
+		uint idx, AstNode* n) {
+	// Find enclosing FUN_DECL
+	uint fun_idx = ast::NO_PARENT;
+	uint current = n.parent;
+	while (current != ast::NO_PARENT && current < ast.node_count) {
+		if (ast.nodes[current].kind == FUN_DECL) {
+			fun_idx = current;
+			break;
+		}
+		// Don't cross lambda boundaries
+		if (ast.nodes[current].kind == LAMBDA_EXPR) return;
+		current = ast.nodes[current].parent;
+	}
+	if (fun_idx == ast::NO_PARENT) return;
+
+	AstNode* fun_node = &ast.nodes[fun_idx];
+	if (fun_node.type_text.len == 0) return; // no explicit return type
+
+	TypeRef declared_return = types::parse_type_text(fun_node.type_text);
+	if (declared_return.kind == UNKNOWN) return;
+
+	// Find the return expression's child (the returned value)
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent != idx) continue;
+		if (!ti.has_type[j]) continue;
+
+		TypeRef return_type = ti.node_types[j];
+		if (return_type.kind == UNKNOWN) continue;
+
+		if (!types::is_assignable_to(return_type, declared_return)) {
+			String src_name = types::format_type_for_diagnostic(&return_type);
+			String tgt_name = types::format_type_for_diagnostic(&declared_return);
+			String msg = string::tformat("Type mismatch: inferred type is %s, but %s was expected",
+				src_name, tgt_name);
+			AstNode* ret_child = &ast.nodes[j];
+			diagnostics.push(make_diagnostic(ret_child.start_line, ret_child.start_col,
+				ret_child.end_line, ret_child.end_col, 1, msg));
+		}
+		break;
+	}
+}
+
+/**
+ * Check: f("hello") when fun f(x: Int) → "Type mismatch for parameter..."
+ * Resolves function declaration from same file or workspace.
+ */
+fn void check_argument_type_mismatch(Object* diagnostics, ParseResult* ast, TypeInfo* ti,
+		uint idx, AstNode* n, WorkspaceIndex* workspace) {
+	// Find the called function name
+	String call_name = n.name;
+	if (call_name.len == 0) return;
+
+	// Collect argument nodes (expression children of CALL_EXPR, skip first = callee)
+	uint[16] arg_indices;
+	usz arg_count = 0;
+	bool skipped_callee = false;
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent != idx) continue;
+		AstNode* child = &ast.nodes[j];
+		// Skip non-expression nodes
+		if (child.kind == NAME_EXPR || child.kind == LITERAL_EXPR ||
+		    child.kind == CALL_EXPR || child.kind == DOT_EXPR ||
+		    child.kind == BINARY_EXPR || child.kind == PREFIX_EXPR ||
+		    child.kind == STRING_TEMPLATE_EXPR || child.kind == LAMBDA_EXPR ||
+		    child.kind == THIS_EXPR || child.kind == SUPER_EXPR ||
+		    child.kind == PAREN_EXPR || child.kind == INDEX_EXPR ||
+		    child.kind == CALLABLE_REF_EXPR || child.kind == OBJECT_EXPR ||
+		    child.kind == TYPE_CAST_EXPR || child.kind == IF_EXPR ||
+		    child.kind == WHEN_EXPR || child.kind == TYPE_CHECK_EXPR) {
+			// Skip the first child (callee: NAME_EXPR or DOT_EXPR)
+			if (!skipped_callee) {
+				skipped_callee = true;
+				continue;
+			}
+			if (arg_count < 16) {
+				arg_indices[arg_count++] = j;
+			}
+		}
+	}
+	if (arg_count == 0) return;
+
+	// Find the function declaration: same-file first, then workspace
+	uint[16] param_indices;
+	usz param_count = 0;
+
+	// Same-file lookup
+	uint fun_idx = find_function_decl(ast, call_name, arg_count);
+	if (fun_idx != ast::NO_PARENT) {
+		// Collect PARAM children of the FUN_DECL
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent != fun_idx) continue;
+			if (ast.nodes[j].kind == PARAM && ast.nodes[j].type_text.len > 0) {
+				if (param_count < 16) {
+					param_indices[param_count++] = j;
+				}
+			}
+		}
+	}
+
+	// Workspace lookup if no same-file match
+	if (param_count == 0 && workspace != null) {
+		check_workspace_arg_mismatch(diagnostics, ast, ti, arg_indices[:arg_count],
+			call_name, workspace);
+		return;
+	}
+
+	// Check each arg against corresponding param
+	usz check_count = arg_count < param_count ? arg_count : param_count;
+	for (usz p = 0; p < check_count; p++) {
+		uint arg_idx = arg_indices[p];
+		uint param_idx = param_indices[p];
+		if (!ti.has_type[arg_idx]) continue;
+
+		TypeRef arg_type = ti.node_types[arg_idx];
+		if (arg_type.kind == UNKNOWN) continue;
+
+		TypeRef param_type = types::parse_type_text(ast.nodes[param_idx].type_text);
+		if (param_type.kind == UNKNOWN) continue;
+
+		if (!types::is_assignable_to(arg_type, param_type)) {
+			String src_name = types::format_type_for_diagnostic(&arg_type);
+			String tgt_name = types::format_type_for_diagnostic(&param_type);
+			String param_name = ast.nodes[param_idx].name;
+			String msg;
+			if (param_name.len > 0) {
+				msg = string::tformat("Type mismatch: inferred type is %s, but %s was expected for parameter '%s'",
+					src_name, tgt_name, param_name);
+			} else {
+				msg = string::tformat("Type mismatch: inferred type is %s, but %s was expected",
+					src_name, tgt_name);
+			}
+			AstNode* arg_node = &ast.nodes[arg_idx];
+			diagnostics.push(make_diagnostic(arg_node.start_line, arg_node.start_col,
+				arg_node.end_line, arg_node.end_col, 1, msg));
+		}
+	}
+}
+
+/**
+ * Find a FUN_DECL in the same file by name and approximate arg count.
+ */
+fn uint find_function_decl(ParseResult* ast, String name, usz arg_count) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		if (ast.nodes[i].kind != FUN_DECL) continue;
+		if (ast.nodes[i].name != name) continue;
+
+		// Count params to match overloads
+		usz param_count = 0;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i && ast.nodes[j].kind == PARAM) {
+				param_count++;
+			}
+		}
+		// Allow off-by-one for default args / varargs
+		if (param_count >= arg_count || (arg_count > 0 && param_count >= arg_count - 1)) {
+			return i;
+		}
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Check argument types against workspace member declarations (class methods).
+ * Uses member_cache which stores param_types for class member functions.
+ */
+fn void check_workspace_arg_mismatch(Object* diagnostics, ParseResult* ast, TypeInfo* ti,
+		uint[] arg_indices, String call_name, WorkspaceIndex* workspace) {
+	// Search all member caches for a function with this name
+	workspace.member_cache.@each(; String key, List{MemberDecl} members) {
+		foreach (&member : members) {
+			if (member.name != call_name) continue;
+			if (member.node_kind != FUN_DECL) continue;
+			if (member.param_count == 0) continue;
+
+			// Check each arg against corresponding param
+			usz check_count = arg_indices.len < member.param_count ? arg_indices.len : member.param_count;
+			for (usz p = 0; p < check_count; p++) {
+				uint arg_idx = arg_indices[p];
+				if (!ti.has_type[arg_idx]) continue;
+
+				TypeRef arg_type = ti.node_types[arg_idx];
+				if (arg_type.kind == UNKNOWN) continue;
+
+				String param_type_text = member.param_types[p];
+				if (param_type_text.len == 0) continue;
+
+				TypeRef param_type = types::parse_type_text(param_type_text);
+				if (param_type.kind == UNKNOWN) continue;
+
+				if (!types::is_assignable_to(arg_type, param_type)) {
+					String src_name = types::format_type_for_diagnostic(&arg_type);
+					String tgt_name = types::format_type_for_diagnostic(&param_type);
+					String param_name = member.param_names[p];
+					String msg;
+					if (param_name.len > 0) {
+						msg = string::tformat(
+							"Type mismatch: inferred type is %s, but %s was expected for parameter '%s'",
+							src_name, tgt_name, param_name);
+					} else {
+						msg = string::tformat(
+							"Type mismatch: inferred type is %s, but %s was expected",
+							src_name, tgt_name);
+					}
+					AstNode* arg_node = &ast.nodes[arg_idx];
+					diagnostics.push(make_diagnostic(arg_node.start_line, arg_node.start_col,
+						arg_node.end_line, arg_node.end_col, 1, msg));
+				}
+			}
+			return; // found matching function
+		}
+	};
+}
+
+// ── Unreachable code diagnostic ───────────────────────────────────
+
+/**
+ * Flag statements after return/throw in the same block.
+ */
+fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) {
+	// For each BLOCK, find return/throw and flag subsequent siblings
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BLOCK) continue;
+
+		// Collect direct children in order
+		uint[128] children;
+		usz child_count = 0;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) {
+				if (child_count < 128) {
+					children[child_count++] = j;
+				}
+			}
+		}
+
+		// Find first return/throw and flag everything after it
+		bool found_terminator = false;
+		for (usz c = 0; c < child_count; c++) {
+			uint child_idx = children[c];
+			AstNode* child = &ast.nodes[child_idx];
+
+			if (found_terminator) {
+				// This code is unreachable
+				Object* diag = make_diagnostic(child.start_line, child.start_col,
+					child.end_line, child.end_col, 2, "Unreachable code"); // Warning
+				// Add unnecessary tag
+				Object* tags = object::new_obj(tmem);
+				tags.push(object::new_int(1, tmem)); // DiagnosticTag.Unnecessary
+				diag.set("tags", tags);
+				diagnostics.push(diag);
+			}
+
+			if (child.kind == RETURN_EXPR || child.kind == THROW_EXPR ||
+			    child.kind == BREAK_EXPR || child.kind == CONTINUE_EXPR) {
+				found_terminator = true;
+			}
+		}
+	}
 }
 
 // ── Receiver lambda member resolution ────────────────────────────

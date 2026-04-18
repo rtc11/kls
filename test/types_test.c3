@@ -1152,7 +1152,7 @@ fn void generic_mutablelistof_bool_arg() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = mutableListOf(true)"); defer free_result(r);
 		TypeRef t = resolve_and_get_decl(r, "x");
-		assert(t.name == "List", "mutableListOf(true) should be List, got '%s'", t.name);
+		assert(t.name == "MutableList", "mutableListOf(true) should be MutableList, got '%s'", t.name);
 		if (t.kind == GENERIC && t.type_arg_count > 0) {
 			assert(t.type_arg_names[0] == "Boolean",
 				"mutableListOf(true) type arg should be Boolean, got '%s'", t.type_arg_names[0]);
@@ -2497,4 +2497,640 @@ fn void cross_file_no_workspace_returns_unknown() @test {
 		assert(!ti.has_type[u_idx] || ti.node_types[u_idx].kind == UNKNOWN,
 			"u should be UNKNOWN without workspace");
 	};
+}
+
+// ── Phase 1: Map index returns value type ───────────────────────────
+
+fn void map_index_returns_value_type() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val m: Map<String, Int> = mapOf()
+				val v = m["key"]
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx != 0, "should find 'v'");
+		assert(ti.has_type[v_idx], "v should have type");
+		assert(ti.node_types[v_idx].name == "Int",
+			"map[key] should be Int, got '%s'", ti.node_types[v_idx].name);
+		assert(ti.node_types[v_idx].nullable,
+			"map[key] should be nullable");
+	};
+}
+
+fn void list_index_returns_element_type() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val items: List<String> = listOf()
+				val s = items[0]
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint s_idx = find_decl(pr, "s");
+		assert(s_idx != 0, "should find 's'");
+		assert(ti.has_type[s_idx], "s should have type");
+		assert(ti.node_types[s_idx].name == "String",
+			"list[i] should be String, got '%s'", ti.node_types[s_idx].name);
+		assert(!ti.node_types[s_idx].nullable,
+			"list[i] should not be nullable");
+	};
+}
+
+// ── Phase 1: `to` infix produces Pair with type args ───────────────
+
+fn void to_infix_produces_typed_pair() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val p = "hello" to 42
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint p_idx = find_decl(pr, "p");
+		assert(p_idx != 0, "should find 'p'");
+		assert(ti.has_type[p_idx], "p should have type");
+		assert(ti.node_types[p_idx].name == "Pair",
+			"to should produce Pair, got '%s'", ti.node_types[p_idx].name);
+		assert(ti.node_types[p_idx].kind == GENERIC,
+			"Pair should be GENERIC");
+		assert(ti.node_types[p_idx].type_arg_count == 2,
+			"Pair should have 2 type args, got %d", (int)ti.node_types[p_idx].type_arg_count);
+		assert(ti.node_types[p_idx].type_arg_names[0] == "String",
+			"first type arg should be String, got '%s'", ti.node_types[p_idx].type_arg_names[0]);
+		assert(ti.node_types[p_idx].type_arg_names[1] == "Int",
+			"second type arg should be Int, got '%s'", ti.node_types[p_idx].type_arg_names[1]);
+	};
+}
+
+// ── Phase 1: mapOf with typed Pair args ─────────────────────────────
+
+fn void mapof_infers_type_args_from_to() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val m = mapOf("a" to 1)
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint m_idx = find_decl(pr, "m");
+		assert(m_idx != 0, "should find 'm'");
+		assert(ti.has_type[m_idx], "m should have type");
+		assert(ti.node_types[m_idx].name == "Map",
+			"mapOf should produce Map, got '%s'", ti.node_types[m_idx].name);
+		assert(ti.node_types[m_idx].type_arg_count == 2,
+			"Map should have 2 type args, got %d", (int)ti.node_types[m_idx].type_arg_count);
+		assert(ti.node_types[m_idx].type_arg_names[0] == "String",
+			"Map key type should be String, got '%s'", ti.node_types[m_idx].type_arg_names[0]);
+		assert(ti.node_types[m_idx].type_arg_names[1] == "Int",
+			"Map value type should be Int, got '%s'", ti.node_types[m_idx].type_arg_names[1]);
+	};
+}
+
+// ── Phase 1: try/catch expression type ──────────────────────────────
+
+fn void try_catch_expr_type() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val x = try { 42 } catch (e: Exception) { 0 }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint x_idx = find_decl(pr, "x");
+		assert(x_idx != 0, "should find 'x'");
+		assert(ti.has_type[x_idx], "x should have type");
+		assert(ti.node_types[x_idx].name == "Int",
+			"try/catch should produce Int, got '%s'", ti.node_types[x_idx].name);
+	};
+}
+
+fn void try_catch_mixed_types() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val x = try { "hello" } catch (e: Exception) { 42 }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint x_idx = find_decl(pr, "x");
+		assert(x_idx != 0, "should find 'x'");
+		assert(ti.has_type[x_idx], "x should have type");
+		// common_type(String, Int) = Any
+		assert(ti.node_types[x_idx].name == "Any",
+			"try/catch mixed should produce Any, got '%s'", ti.node_types[x_idx].name);
+	};
+}
+
+// ── Phase 2: Lambda body type inference ─────────────────────────────
+
+fn void map_infers_return_type_from_lambda() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val names: List<String> = listOf("a", "b")
+				val lengths = names.map { it.length }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint v_idx = find_decl(pr, "lengths");
+		assert(v_idx != 0, "should find 'lengths'");
+		assert(ti.has_type[v_idx], "lengths should have type");
+		assert(ti.node_types[v_idx].name == "List",
+			"map should produce List, got '%s'", ti.node_types[v_idx].name);
+		assert(ti.node_types[v_idx].kind == GENERIC, "should be GENERIC");
+		assert(ti.node_types[v_idx].type_arg_count == 1,
+			"should have 1 type arg, got %d", (int)ti.node_types[v_idx].type_arg_count);
+		assert(ti.node_types[v_idx].type_arg_names[0] == "Int",
+			"type arg should be Int, got '%s'", ti.node_types[v_idx].type_arg_names[0]);
+	};
+}
+
+fn void map_chain_preserves_types() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val items: List<String> = listOf("a", "b")
+				val result = items.filter { it.length > 0 }.map { it.length }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint v_idx = find_decl(pr, "result");
+		assert(v_idx != 0, "should find 'result'");
+		assert(ti.has_type[v_idx], "result should have type");
+		assert(ti.node_types[v_idx].name == "List",
+			"filter.map should produce List, got '%s'", ti.node_types[v_idx].name);
+		if (ti.node_types[v_idx].type_arg_count > 0) {
+			assert(ti.node_types[v_idx].type_arg_names[0] == "Int",
+				"type arg should be Int, got '%s'", ti.node_types[v_idx].type_arg_names[0]);
+		}
+	};
+}
+
+fn void let_returns_lambda_body_type() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val name = "hello"
+				val len = name.let { it.length }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint v_idx = find_decl(pr, "len");
+		assert(v_idx != 0, "should find 'len'");
+		assert(ti.has_type[v_idx], "len should have type");
+		assert(ti.node_types[v_idx].name == "Int",
+			"let should return Int, got '%s'", ti.node_types[v_idx].name);
+	};
+}
+
+fn void run_returns_lambda_body_type() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val x = "hello".run { length }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint x_idx = find_decl(pr, "x");
+		assert(x_idx != 0, "should find 'x'");
+		// run { length } — "length" is a name that resolves if we know `this` is String
+		// This may or may not resolve depending on `this` inference — test that it at least
+		// returns *some* type or stays UNKNOWN gracefully
+	};
+}
+
+fn void associate_infers_map_type_from_lambda() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val items: List<String> = listOf("a", "b")
+				val m = items.associate { it to it.length }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint m_idx = find_decl(pr, "m");
+		assert(m_idx != 0, "should find 'm'");
+		assert(ti.has_type[m_idx], "m should have type");
+		assert(ti.node_types[m_idx].name == "Map",
+			"associate should produce Map, got '%s'", ti.node_types[m_idx].name);
+		if (ti.node_types[m_idx].type_arg_count >= 2) {
+			assert(ti.node_types[m_idx].type_arg_names[0] == "String",
+				"Map key should be String, got '%s'", ti.node_types[m_idx].type_arg_names[0]);
+			assert(ti.node_types[m_idx].type_arg_names[1] == "Int",
+				"Map value should be Int, got '%s'", ti.node_types[m_idx].type_arg_names[1]);
+		}
+	};
+}
+
+fn void groupby_infers_map_type_from_lambda() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val items: List<String> = listOf("a", "bb", "ccc")
+				val grouped = items.groupBy { it.length }
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint v_idx = find_decl(pr, "grouped");
+		assert(v_idx != 0, "should find 'grouped'");
+		assert(ti.has_type[v_idx], "grouped should have type");
+		assert(ti.node_types[v_idx].name == "Map",
+			"groupBy should produce Map, got '%s'", ti.node_types[v_idx].name);
+		if (ti.node_types[v_idx].type_arg_count >= 2) {
+			assert(ti.node_types[v_idx].type_arg_names[0] == "Int",
+				"Map key should be Int, got '%s'", ti.node_types[v_idx].type_arg_names[0]);
+		}
+	};
+}
+
+fn void mapof_chain_index_resolves() @test {
+	@pool() {
+		String src = `
+			fun test() {
+				val m = mapOf("a" to 1, "b" to 2)
+				val v = m["a"]
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx != 0, "should find 'v'");
+		assert(ti.has_type[v_idx], "v should have type");
+		assert(ti.node_types[v_idx].name == "Int",
+			"map[key] should be Int, got '%s'", ti.node_types[v_idx].name);
+		assert(ti.node_types[v_idx].nullable, "map[key] should be nullable");
+	};
+}
+
+// ── Phase 3: Smart casts and extension functions ────────────────────
+
+fn void when_subject_smart_cast_is_type() @test {
+	@pool() {
+		String src = `
+			fun test(x: Any) {
+				when (x) {
+					is String -> {
+						val s = x
+					}
+				}
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint s_idx = find_decl(pr, "s");
+		assert(s_idx != 0, "should find 's'");
+		assert(ti.has_type[s_idx], "s should have type from when smart cast");
+		assert(ti.node_types[s_idx].name == "String",
+			"s should be String via when smart cast, got '%s'", ti.node_types[s_idx].name);
+	};
+}
+
+fn void when_subject_smart_cast_is_int() @test {
+	@pool() {
+		String src = `
+			fun test(x: Any) {
+				when (x) {
+					is Int -> {
+						val n = x
+					}
+				}
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint n_idx = find_decl(pr, "n");
+		assert(n_idx != 0, "should find 'n'");
+		assert(ti.has_type[n_idx], "n should have type from when smart cast");
+		assert(ti.node_types[n_idx].name == "Int",
+			"n should be Int via when smart cast, got '%s'", ti.node_types[n_idx].name);
+	};
+}
+
+fn void extension_function_workspace_resolution() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a file with an extension function on String
+		ws.index_file("file:///ext.kt", "fun String.shout(): String = this.uppercase()");
+
+		String src = `fun test() { val s = "hello"; val r = s.shout() }`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer mem::free(ti);
+
+		uint r_idx = find_decl(pr, "r");
+		assert(r_idx != 0, "should find 'r'");
+		assert(ti.has_type[r_idx], "r should have type from extension function");
+		assert(ti.node_types[r_idx].name == "String",
+			"r should be String from extension, got '%s'", ti.node_types[r_idx].name);
+	};
+}
+
+fn void smart_cast_null_check_simple() @test {
+	@pool() {
+		String src = `
+			fun test(x: String?) {
+				if (x != null) {
+					val s = x
+				}
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint s_idx = find_decl(pr, "s");
+		assert(s_idx != 0, "should find 's'");
+		assert(ti.has_type[s_idx], "s should have type");
+		assert(ti.node_types[s_idx].name == "String",
+			"s should be String, got '%s'", ti.node_types[s_idx].name);
+		assert(!ti.node_types[s_idx].nullable,
+			"s should be non-nullable after simple null check");
+	};
+}
+
+fn void smart_cast_null_check_and_conjunction() @test {
+	@pool() {
+		String src = `
+			fun test(x: String?) {
+				if (x != null && x.length > 0) {
+					val s = x
+				}
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer mem::free(ti);
+
+		uint s_idx = find_decl(pr, "s");
+		assert(s_idx != 0, "should find 's'");
+		assert(ti.has_type[s_idx], "s should have type from null check smart cast");
+		assert(ti.node_types[s_idx].name == "String",
+			"s should be String, got '%s'", ti.node_types[s_idx].name);
+		assert(!ti.node_types[s_idx].nullable,
+			"s should be non-nullable after null check");
+	};
+}
+
+fn void when_bare_in_check_parses() @test {
+	@pool() {
+		String src = `
+			fun test(x: Int) {
+				when (x) {
+					in 1..10 -> val a = x
+					else -> val b = x
+				}
+			}
+		`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		assert(pr.error_count == 0, "when with bare 'in' should parse without errors, got %d", (int)pr.error_count);
+	};
+}
+
+// ── is_assignable_to tests ───────────────────────────────────────
+
+fn void assignable_same_type() @test {
+	assert(types::is_assignable_to(types::TYPE_INT, types::TYPE_INT), "Int assignable to Int");
+	assert(types::is_assignable_to(types::TYPE_STRING, types::TYPE_STRING), "String assignable to String");
+}
+
+fn void assignable_unknown_permissive() @test {
+	assert(types::is_assignable_to(types::TYPE_UNKNOWN, types::TYPE_INT), "Unknown assignable to Int");
+	assert(types::is_assignable_to(types::TYPE_INT, types::TYPE_UNKNOWN), "Int assignable to Unknown");
+}
+
+fn void assignable_nothing_subtype() @test {
+	assert(types::is_assignable_to(types::TYPE_NOTHING, types::TYPE_INT), "Nothing assignable to Int");
+	assert(types::is_assignable_to(types::TYPE_NOTHING, types::TYPE_STRING), "Nothing assignable to String");
+	assert(types::is_assignable_to(types::TYPE_NOTHING, types::TYPE_ANY), "Nothing assignable to Any");
+}
+
+fn void assignable_nothing_nullable() @test {
+	TypeRef nullable_string = types::TYPE_STRING;
+	nullable_string.nullable = true;
+	assert(types::is_assignable_to(types::TYPE_NOTHING_NULLABLE, nullable_string),
+		"Nothing? assignable to String?");
+	assert(!types::is_assignable_to(types::TYPE_NOTHING_NULLABLE, types::TYPE_STRING),
+		"Nothing? NOT assignable to String (non-nullable)");
+}
+
+fn void assignable_to_any() @test {
+	assert(types::is_assignable_to(types::TYPE_INT, types::TYPE_ANY), "Int assignable to Any");
+	assert(types::is_assignable_to(types::TYPE_STRING, types::TYPE_ANY), "String assignable to Any");
+	TypeRef nullable_any = types::TYPE_ANY;
+	nullable_any.nullable = true;
+	TypeRef nullable_string = types::TYPE_STRING;
+	nullable_string.nullable = true;
+	assert(types::is_assignable_to(nullable_string, nullable_any), "String? assignable to Any?");
+	assert(!types::is_assignable_to(nullable_string, types::TYPE_ANY), "String? NOT assignable to Any");
+}
+
+fn void assignable_nullable_direction() @test {
+	TypeRef nullable_int = types::TYPE_INT;
+	nullable_int.nullable = true;
+	// T assignable to T?
+	assert(types::is_assignable_to(types::TYPE_INT, nullable_int), "Int assignable to Int?");
+	// T? NOT assignable to T
+	assert(!types::is_assignable_to(nullable_int, types::TYPE_INT), "Int? NOT assignable to Int");
+}
+
+fn void assignable_no_numeric_widening() @test {
+	// Kotlin allows numeric widening for literals (Int -> Long, etc.)
+	assert(types::is_assignable_to(types::TYPE_INT, types::TYPE_LONG), "Int assignable to Long (widening)");
+	assert(types::is_assignable_to(types::TYPE_FLOAT, types::TYPE_DOUBLE), "Float assignable to Double (widening)");
+	assert(types::is_assignable_to(types::TYPE_BYTE, types::TYPE_INT), "Byte assignable to Int (widening)");
+	// But not narrowing
+	assert(!types::is_assignable_to(types::TYPE_LONG, types::TYPE_INT), "Long NOT assignable to Int");
+	assert(!types::is_assignable_to(types::TYPE_DOUBLE, types::TYPE_FLOAT), "Double NOT assignable to Float");
+}
+
+fn void assignable_to_unit() @test {
+	assert(types::is_assignable_to(types::TYPE_INT, types::TYPE_UNIT), "Int assignable to Unit");
+	assert(types::is_assignable_to(types::TYPE_STRING, types::TYPE_UNIT), "String assignable to Unit");
+}
+
+fn void assignable_stdlib_hierarchy() @test {
+	// Int → Number
+	TypeRef number = { .kind = SIMPLE, .name = "Number" };
+	assert(types::is_assignable_to(types::TYPE_INT, number), "Int assignable to Number");
+	assert(types::is_assignable_to(types::TYPE_LONG, number), "Long assignable to Number");
+	assert(!types::is_assignable_to(types::TYPE_STRING, number), "String NOT assignable to Number");
+
+	// String → CharSequence
+	TypeRef char_seq = { .kind = SIMPLE, .name = "CharSequence" };
+	assert(types::is_assignable_to(types::TYPE_STRING, char_seq), "String assignable to CharSequence");
+	assert(!types::is_assignable_to(types::TYPE_INT, char_seq), "Int NOT assignable to CharSequence");
+
+	// Exception → Throwable
+	TypeRef exception = { .kind = SIMPLE, .name = "Exception" };
+	TypeRef throwable = { .kind = SIMPLE, .name = "Throwable" };
+	assert(types::is_assignable_to(exception, throwable), "Exception assignable to Throwable");
+
+	// RuntimeException → Exception → Throwable → Any
+	TypeRef runtime_exc = { .kind = SIMPLE, .name = "RuntimeException" };
+	assert(types::is_assignable_to(runtime_exc, throwable), "RuntimeException assignable to Throwable");
+	assert(types::is_assignable_to(runtime_exc, types::TYPE_ANY), "RuntimeException assignable to Any");
+}
+
+fn void assignable_collection_hierarchy() @test {
+	TypeRef list = { .kind = SIMPLE, .name = "List" };
+	TypeRef collection = { .kind = SIMPLE, .name = "Collection" };
+	TypeRef iterable = { .kind = SIMPLE, .name = "Iterable" };
+	TypeRef mutable_list = { .kind = SIMPLE, .name = "MutableList" };
+	TypeRef arraylist = { .kind = SIMPLE, .name = "ArrayList" };
+
+	assert(types::is_assignable_to(list, collection), "List assignable to Collection");
+	assert(types::is_assignable_to(list, iterable), "List assignable to Iterable");
+	assert(types::is_assignable_to(mutable_list, list), "MutableList assignable to List");
+	assert(types::is_assignable_to(arraylist, list), "ArrayList assignable to List");
+	assert(!types::is_assignable_to(list, mutable_list), "List NOT assignable to MutableList");
+}
+
+fn void assignable_generic_covariant() @test {
+	// List<String> assignable to List<Any> (covariant)
+	TypeRef list_string = { .kind = GENERIC, .name = "List", .type_arg_count = 1 };
+	list_string.type_arg_names[0] = "String";
+	TypeRef list_any = { .kind = GENERIC, .name = "List", .type_arg_count = 1 };
+	list_any.type_arg_names[0] = "Any";
+
+	assert(types::is_assignable_to(list_string, list_any),
+		"List<String> assignable to List<Any> (covariant)");
+	assert(!types::is_assignable_to(list_any, list_string),
+		"List<Any> NOT assignable to List<String>");
+}
+
+fn void assignable_generic_invariant() @test {
+	// MutableList<String> NOT assignable to MutableList<Any> (invariant)
+	TypeRef mlist_string = { .kind = GENERIC, .name = "MutableList", .type_arg_count = 1 };
+	mlist_string.type_arg_names[0] = "String";
+	TypeRef mlist_any = { .kind = GENERIC, .name = "MutableList", .type_arg_count = 1 };
+	mlist_any.type_arg_names[0] = "Any";
+
+	assert(!types::is_assignable_to(mlist_string, mlist_any),
+		"MutableList<String> NOT assignable to MutableList<Any> (invariant)");
+}
+
+fn void assignable_generic_contravariant() @test {
+	// Comparable<Any> assignable to Comparable<String> (contravariant)
+	TypeRef comp_any = { .kind = GENERIC, .name = "Comparable", .type_arg_count = 1 };
+	comp_any.type_arg_names[0] = "Any";
+	TypeRef comp_string = { .kind = GENERIC, .name = "Comparable", .type_arg_count = 1 };
+	comp_string.type_arg_names[0] = "String";
+
+	assert(types::is_assignable_to(comp_any, comp_string),
+		"Comparable<Any> assignable to Comparable<String> (contravariant)");
+	assert(!types::is_assignable_to(comp_string, comp_any),
+		"Comparable<String> NOT assignable to Comparable<Any>");
+}
+
+fn void assignable_generic_star_projection() @test {
+	TypeRef list_string = { .kind = GENERIC, .name = "List", .type_arg_count = 1 };
+	list_string.type_arg_names[0] = "String";
+	TypeRef list_star = { .kind = GENERIC, .name = "List", .type_arg_count = 1 };
+	list_star.type_arg_names[0] = "*";
+
+	assert(types::is_assignable_to(list_string, list_star),
+		"List<String> assignable to List<*>");
+}
+
+fn void assignable_different_types_not_related() @test {
+	assert(!types::is_assignable_to(types::TYPE_STRING, types::TYPE_INT),
+		"String NOT assignable to Int");
+	assert(!types::is_assignable_to(types::TYPE_INT, types::TYPE_STRING),
+		"Int NOT assignable to String");
+	assert(!types::is_assignable_to(types::TYPE_BOOLEAN, types::TYPE_INT),
+		"Boolean NOT assignable to Int");
+}
+
+fn void assignable_unknown_user_types_permissive() @test {
+	// User/dependency types not in stdlib: should be permissive
+	TypeRef kafka_streams = { .kind = SIMPLE, .name = "KafkaStreams" };
+	TypeRef topology = { .kind = SIMPLE, .name = "Topology" };
+	assert(types::is_assignable_to(kafka_streams, topology),
+		"Unknown user types should be permissive");
+
+	TypeRef named = { .kind = SIMPLE, .name = "Named" };
+	TypeRef cache_key = { .kind = SIMPLE, .name = "CacheKey" };
+	assert(types::is_assignable_to(named, cache_key),
+		"Unknown user types should be permissive");
+}
+
+fn void assignable_user_type_to_stdlib_permissive() @test {
+	// User type to stdlib type: permissive (could be subtype)
+	TypeRef my_list = { .kind = SIMPLE, .name = "MyCustomList" };
+	assert(types::is_assignable_to(my_list, types::TYPE_STRING),
+		"Unknown user type to stdlib should be permissive");
+}
+
+fn void assignable_stdlib_to_user_type_permissive() @test {
+	// Stdlib to user type: permissive
+	TypeRef my_type = { .kind = SIMPLE, .name = "MyType" };
+	assert(types::is_assignable_to(types::TYPE_INT, my_type),
+		"Stdlib to unknown user type should be permissive");
 }

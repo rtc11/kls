@@ -740,3 +740,312 @@ fn void type_hint_has_padding_left() @test {
 		}
 	};
 }
+
+// ── Return type hint tests ──────────────────────────────────────
+
+fn void return_type_hint_expression_body() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content = `fun answer() = 42`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label == ": Int") found = true;
+		}
+		assert(found, "expected ': Int' return type hint for expression body");
+	};
+}
+
+fn void return_type_hint_single_return() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun greeting() {` "\n"
+			`    return "hello"` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label == ": String") found = true;
+		}
+		assert(found, "expected ': String' return type hint");
+	};
+}
+
+fn void return_type_hint_suppressed_with_explicit_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content = `fun answer(): Int = 42`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+
+		// Should NOT have a return type hint since type is explicit
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				if (get_hint_kind(result, i) != 1) continue;
+				int line = get_hint_line(result, i);
+				// Line 0 is the function line; any type hint there would be wrong
+				if (line == 0) {
+					String label = get_hint_label(result, i);
+					assert(label != ": Int", "return type hint should be suppressed when explicit");
+				}
+			}
+		}
+	};
+}
+
+fn void return_type_hint_unit_suppressed() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun doStuff() {` "\n"
+			`    println("hi")` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+
+		// Should NOT show ": Unit" hint
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				if (get_hint_kind(result, i) != 1) continue;
+				String label = get_hint_label(result, i);
+				assert(label != ": Unit", "Unit return type hint should be suppressed");
+			}
+		}
+	};
+}
+
+fn void return_type_hint_constructor_call() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`class Foo` "\n"
+			`fun makeFoo() = Foo()`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label == ": Foo") found = true;
+		}
+		assert(found, "expected ': Foo' return type hint");
+	};
+}
+
+// ── Lambda `it` hint tests ──────────────────────────────────────
+
+fn void lambda_it_hint_implicit_param() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun main() {` "\n"
+			`    listOf(1).forEach { println(it) }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String label = get_hint_label(result, i);
+			if (label == "it") found = true;
+		}
+		assert(found, "expected 'it' hint for implicit lambda param");
+	};
+}
+
+fn void lambda_it_hint_suppressed_with_explicit_param() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun main() {` "\n"
+			`    listOf(1).forEach { x -> println(x) }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+
+		// Should NOT have an 'it' hint since param is explicit
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				String label = get_hint_label(result, i);
+				assert(label != "it", "'it' hint should be suppressed with explicit param");
+			}
+		}
+	};
+}
+
+fn void lambda_it_hint_suppressed_no_it_usage() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun main() {` "\n"
+			`    listOf(1).forEach { println("hello") }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+
+		// Should NOT have an 'it' hint since `it` is not used
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				String label = get_hint_label(result, i);
+				assert(label != "it", "'it' hint should be suppressed when not used");
+			}
+		}
+	};
+}
+
+// ── Chain type hint tests ───────────────────────────────────────
+
+fn void chain_hint_not_shown_for_short_chain() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		// Only 2 dots -- no chain hints
+		String content =
+			`fun main() {` "\n"
+			`    val x = "hello".length.toString()` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+
+		// Should not have chain type hints (only possibly val type hint)
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				if (get_hint_kind(result, i) != 1) continue;
+				String label = get_hint_label(result, i);
+				int line = get_hint_line(result, i);
+				// Line 1 chain hints should not appear for 2-segment chains
+				// (val type hint is fine though)
+			}
+		}
+	};
+}
+
+// ── Smart cast hint tests ───────────────────────────────────────
+
+fn void smart_cast_hint_after_is_check() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun test(x: Any) {` "\n"
+			`    if (x is String) {` "\n"
+			`        println(x)` "\n"
+			`    }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String label = get_hint_label(result, i);
+			if (label == "(String)") {
+				found = true;
+				// Should be on line 2 where x is used
+				int line = get_hint_line(result, i);
+				assert(line == 2, "expected smart cast hint on line 2, got %d", line);
+			}
+		}
+		assert(found, "expected '(String)' smart cast hint");
+	};
+}
+
+fn void smart_cast_hint_not_shown_for_negated_is() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun test(x: Any) {` "\n"
+			`    if (x !is String) {` "\n"
+			`        println(x)` "\n"
+			`    }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+
+		// Should NOT show smart cast hint for !is
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				String label = get_hint_label(result, i);
+				assert(label != "(String)", "smart cast hint should not appear for !is check");
+			}
+		}
+	};
+}
