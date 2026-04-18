@@ -978,8 +978,6 @@ fn uint find_call_parent_of_lambda(ParseResult* ast, uint lambda_idx) {
 fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, WorkspaceIndex* workspace) {
 	AstNode* call = &ast.nodes[call_idx];
 
-	// Get the callee name. The parser copies the callee name into CALL_EXPR.name
-	// for both simple calls (foo()) and member calls (obj.foo()).
 	String callee_name = call.name;
 
 	// Fallback: if CALL_EXPR.name is empty, check for a NAME_EXPR child
@@ -993,16 +991,11 @@ fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, Workspace
 	}
 
 	if (callee_name.len == 0) return "";
-
 	// ── Handle Kotlin scope functions ─────────────────────────────
 	// apply/run: receiver.apply { ... } → receiver type is the "this" type
 	// with: with(receiver) { ... } → first arg type is "this" type
 	// also/let: don't use receiver lambdas (they use `it`, not `this`)
 	if (callee_name == "apply" || callee_name == "run") {
-		// For receiver.apply { ... }, find the receiver's type.
-		// The CALL_EXPR wraps DOT_EXPR as a child; DOT_EXPR's first child
-		// is the receiver expression. We need to find what class that is.
-		// Find DOT_EXPR child of CALL_EXPR
 		for (uint i = 0; i < ast.node_count; i++) {
 			if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == DOT_EXPR) {
 				uint dot_idx = i;
@@ -1023,8 +1016,17 @@ fn String find_receiver_type_for_call(ParseResult* ast, uint call_idx, Workspace
 				for (uint j = 0; j < ast.node_count; j++) {
 					if (ast.nodes[j].parent == dot_idx && ast.nodes[j].kind == CALL_EXPR) {
 						String ctor_name = ast.nodes[j].name;
-						if (ctor_name.len > 0 && is_class_name(ast, ctor_name, workspace)) {
-							return ctor_name;
+						if (ctor_name.len > 0) {
+							// Constructor calls use PascalCase — if it looks like a type name
+							// or is a known class, use it as the receiver type.
+							// For unknown classes (e.g. from deps not fully indexed),
+							// PascalCase is sufficient evidence of a constructor call.
+							if (is_class_name(ast, ctor_name, workspace)) {
+								return ctor_name;
+							}
+							if (ctor_name[0] >= 'A' && ctor_name[0] <= 'Z') {
+								return ctor_name;
+							}
 						}
 						break;
 					}

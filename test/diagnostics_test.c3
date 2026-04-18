@@ -861,6 +861,36 @@ fun main() {
 	};
 }
 
+fn void receiver_lambda_constructor_apply_nested_in_lambda() @test {
+	@pool() {
+		// Realistic pattern: Constructor().apply { member } nested inside another lambda
+		// This mimics: configure = { connectors.add(EngineConnectorBuilder().apply { port = 8080 }) }
+		Object* result = build_diagnostics_with_workspace(
+			`class ServerConfig(var host: String = "", var port: Int = 0)
+
+fun configure(block: () -> Unit) {}
+
+fun main() {
+    configure {
+        ServerConfig().apply {
+            host = "localhost"
+            port = 8080
+        }
+    }
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'host'"),
+				"nested constructor apply member 'host' should not be flagged, got: %s", msg);
+			assert(!msg.contains("Unresolved reference: 'port'"),
+				"nested constructor apply member 'port' should not be flagged, got: %s", msg);
+		}
+	};
+}
+
 fn void destructuring_lambda_param_no_unresolved() @test {
 	@pool() {
 		Object* result = build_diagnostics_with_workspace(
