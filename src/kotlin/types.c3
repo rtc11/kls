@@ -2400,14 +2400,17 @@ fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		if (pr.nodes[j].parent != idx) continue;
 
 		if (pr.nodes[j].kind == WHEN_ENTRY) {
-			// Find the body child of the WHEN_ENTRY (last child, typically BLOCK or expression)
+			// Find the body type of this WHEN_ENTRY.
+			// Children are ordered: condition(s), then body (last child).
+			// We want the body type, so find the last child and use its type.
 			TypeRef entry_type = TYPE_UNKNOWN;
+			uint last_child = pr.node_count; // sentinel
 			for (uint k = 0; k < pr.node_count; k++) {
 				if (pr.nodes[k].parent != j) continue;
-				// Skip condition expressions -- use the last typed child (the body)
-				if (info.has_type[k]) {
-					entry_type = info.node_types[k];
-				}
+				last_child = k;
+			}
+			if (last_child < pr.node_count && info.has_type[last_child]) {
+				entry_type = info.node_types[last_child];
 			}
 			if (entry_type.kind != UNKNOWN) {
 				if (result.kind == UNKNOWN) {

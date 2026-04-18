@@ -1382,3 +1382,40 @@ fn void no_unreachable_code_without_return() @test {
 			"should NOT flag code before return");
 	};
 }
+
+fn void return_when_null_branch_no_type_mismatch() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+`fun statusReply(o: Any): String {
+    return when (o) {
+        null -> "ok"
+        else -> "other"
+    }
+}`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"return when with null branch should not cause type mismatch");
+		assert(!has_diagnostic_containing(result, "Unreachable"),
+			"return when should not be flagged as unreachable");
+	};
+}
+
+fn void return_when_nested_no_false_positive() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+`fun test(x: Any): String {
+    return when (x) {
+        null -> "null"
+        else -> when (x) {
+            "a" -> "A"
+            else -> "other"
+        }
+    }
+}`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"nested return when should not cause type mismatch");
+		assert(!has_diagnostic_containing(result, "Unreachable"),
+			"nested return when should not be flagged as unreachable");
+	};
+}
