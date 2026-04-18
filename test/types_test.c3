@@ -3134,3 +3134,16 @@ fn void assignable_stdlib_to_user_type_permissive() @test {
 	assert(types::is_assignable_to(types::TYPE_INT, my_type),
 		"Stdlib to unknown user type should be permissive");
 }
+
+fn void assignable_generic_type_params_permissive() @test {
+	// Topic<K, V> vs Topic<K, L> — type params V and L are unresolved, should be permissive
+	TypeRef topic_kv = { .kind = GENERIC, .name = "Topic", .type_arg_count = 2 };
+	topic_kv.type_arg_names[0] = "K";
+	topic_kv.type_arg_names[1] = "V";
+	TypeRef topic_kl = { .kind = GENERIC, .name = "Topic", .type_arg_count = 2 };
+	topic_kl.type_arg_names[0] = "K";
+	topic_kl.type_arg_names[1] = "L";
+
+	assert(types::is_assignable_to(topic_kv, topic_kl),
+		"Topic<K, V> should be assignable to Topic<K, L> (unresolved type params)");
+}

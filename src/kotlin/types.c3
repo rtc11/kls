@@ -2835,6 +2835,22 @@ fn bool is_stdlib_subtype(String source_name, String target_name) {
  * Check generic type argument assignability respecting variance.
  * Both source and target have the same container name.
  */
+/**
+ * Check if a type name looks like an unresolved type parameter.
+ * Type parameters are typically single uppercase letters (T, K, V, R, E)
+ * or short names not in known stdlib types.
+ */
+fn bool is_type_parameter(String name) {
+	if (name.len == 0) return false;
+	// Single uppercase letter: definitely a type parameter
+	if (name.len == 1 && name[0] >= 'A' && name[0] <= 'Z') return true;
+	// Two-letter names starting with uppercase that aren't known types
+	if (name.len == 2 && name[0] >= 'A' && name[0] <= 'Z' && name[1] >= 'A' && name[1] <= 'Z') {
+		return !is_known_stdlib_type(name);
+	}
+	return false;
+}
+
 fn bool check_generic_args_assignable(TypeRef source, TypeRef target) {
 	// Find variance for this container
 	for (usz i = 0; i < GENERIC_VARIANCE.len; i++) {
@@ -2881,11 +2897,26 @@ fn bool check_generic_args_assignable(TypeRef source, TypeRef target) {
 	}
 
 	// No variance entry found: treat all args as invariant
+	// Be permissive with unresolved type parameters (e.g., V vs L)
+	// to avoid false positives in generic code.
 	usz check_count = source.type_arg_count;
 	if (check_count > target.type_arg_count) check_count = target.type_arg_count;
 	for (usz p = 0; p < check_count; p++) {
-		if (source.type_arg_names[p] != target.type_arg_names[p]) return false;
-		if (source.type_arg_nullable[p] != target.type_arg_nullable[p]) return false;
+		String src_arg = source.type_arg_names[p];
+		String tgt_arg = target.type_arg_names[p];
+		if (src_arg == tgt_arg) {
+			if (source.type_arg_nullable[p] && !target.type_arg_nullable[p]) return false;
+			continue;
+		}
+		// If either arg looks like an unresolved type parameter, be permissive
+		if (is_type_parameter(src_arg) || is_type_parameter(tgt_arg)) continue;
+		// Both are concrete types — check assignability
+		TypeRef src_type = parse_type_text(src_arg);
+		src_type.nullable = source.type_arg_nullable[p];
+		TypeRef tgt_type = parse_type_text(tgt_arg);
+		tgt_type.nullable = target.type_arg_nullable[p];
+		if (!is_assignable_to(src_type, tgt_type)) return false;
+		if (!is_assignable_to(tgt_type, src_type)) return false;
 	}
 	return true;
 }
