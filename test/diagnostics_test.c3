@@ -1406,6 +1406,18 @@ fn void type_mismatch_argument_ok() @test {
 	};
 }
 
+fn void no_false_type_mismatch_for_dot_call_on_unknown_receiver() @test {
+	@pool() {
+		// Method call on a dep/unknown type should NOT match workspace functions with same name
+		Object* result = build_test_diagnostics(
+			`class Foo { fun subscribe(key: String) {} }
+			 fun test(consumer: Any) { consumer.subscribe(listOf("a")) }`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag arg type mismatch for dot-call on unknown receiver type");
+	};
+}
+
 fn void type_mismatch_subtype_assignment_ok() @test {
 	@pool() {
 		// Int should be assignable to Any

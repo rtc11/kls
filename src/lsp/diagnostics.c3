@@ -748,19 +748,41 @@ fn void check_argument_type_mismatch(Object* diagnostics, ParseResult* ast, Type
 	}
 	if (arg_count == 0) return;
 
+	// Detect dot-calls (e.g., receiver.method()) to avoid matching wrong declarations.
+	// First child of CALL_EXPR being DOT_EXPR means it's a method call.
+	String receiver_type_name = "";
+	bool is_dot_call = false;
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent != idx) continue;
+		if (ast.nodes[j].kind == DOT_EXPR) {
+			is_dot_call = true;
+			// Get receiver type: first child of DOT_EXPR
+			for (uint k = 0; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != j) continue;
+				if (ti.has_type[k] && ti.node_types[k].kind != UNKNOWN) {
+					receiver_type_name = ti.node_types[k].name;
+				}
+				break;
+			}
+		}
+		break; // only check first child
+	}
+
 	// Find the function declaration: same-file first, then workspace
 	uint[16] param_indices;
 	usz param_count = 0;
 
-	// Same-file lookup
-	uint fun_idx = find_function_decl(ast, call_name, arg_count);
-	if (fun_idx != ast::NO_PARENT) {
-		// Collect PARAM children of the FUN_DECL
-		for (uint j = 0; j < ast.node_count; j++) {
-			if (ast.nodes[j].parent != fun_idx) continue;
-			if (ast.nodes[j].kind == PARAM && ast.nodes[j].type_text.len > 0) {
-				if (param_count < 16) {
-					param_indices[param_count++] = j;
+	// Same-file lookup (only for non-dot-calls, or when receiver matches a same-file class)
+	if (!is_dot_call) {
+		uint fun_idx = find_function_decl(ast, call_name, arg_count);
+		if (fun_idx != ast::NO_PARENT) {
+			// Collect PARAM children of the FUN_DECL
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent != fun_idx) continue;
+				if (ast.nodes[j].kind == PARAM && ast.nodes[j].type_text.len > 0) {
+					if (param_count < 16) {
+						param_indices[param_count++] = j;
+					}
 				}
 			}
 		}
@@ -768,6 +790,12 @@ fn void check_argument_type_mismatch(Object* diagnostics, ParseResult* ast, Type
 
 	// Workspace lookup if no same-file match
 	if (param_count == 0 && workspace != null) {
+		// For dot-calls, only check workspace if receiver matches a workspace class
+		if (is_dot_call) {
+			if (receiver_type_name.len == 0) return; // unknown receiver — skip
+			if (catch workspace.lookup_members(receiver_type_name)) return; // not a workspace class — skip
+		}
+
 		check_workspace_arg_mismatch(diagnostics, ast, ti, arg_indices[:arg_count],
 			call_name, workspace);
 		return;
