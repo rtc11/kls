@@ -109,6 +109,20 @@ fn bool Parser.eat(Parser* self, TokenKind kind) {
 	return false;
 }
 
+fn bool Parser.peek_is(Parser* self, TokenKind kind) {
+	Lexer save = self.lexer;
+	Token next = self.lexer.next();
+	self.lexer = save;
+	return next.kind == kind;
+}
+
+fn bool Parser.peek_is_constructor(Parser* self) {
+	Lexer save = self.lexer;
+	Token next = self.lexer.next();
+	self.lexer = save;
+	return next.kind == KW_CONSTRUCTOR;
+}
+
 fn void Parser.expect(Parser* self, TokenKind kind) {
 	if (self.current.kind == kind) {
 		self.advance();
@@ -622,8 +636,23 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 	}
 
 	// Primary constructor for classes: (val x: Int, var y: String)
-	if (kind == CLASS_DECL && self.at(LPAREN)) {
-		self.parse_primary_constructor();
+	// May have optional visibility modifier and 'constructor' keyword:
+	//   class Foo(val x: Int)
+	//   class Foo internal constructor(val x: Int)
+	//   class Foo private constructor(val x: Int)
+	if (kind == CLASS_DECL) {
+		// Skip optional visibility modifier before 'constructor'
+		if ((self.at(KW_INTERNAL) || self.at(KW_PRIVATE) || self.at(KW_PROTECTED) || self.at(KW_PUBLIC))
+		    && self.peek_is_constructor()) {
+			self.advance(); // consume visibility modifier
+		}
+		// Skip optional 'constructor' keyword
+		if (self.at(KW_CONSTRUCTOR) && self.peek_is(LPAREN)) {
+			self.advance(); // consume 'constructor'
+		}
+		if (self.at(LPAREN)) {
+			self.parse_primary_constructor();
+		}
 	}
 
 	// Super types: : SuperClass(), Interface

@@ -2934,6 +2934,22 @@ fn void parse_intersection_type_in_generic_bound() @test {
 	};
 }
 
+fn void parse_class_with_visibility_constructor() @test {
+	@pool() {
+		String content = `class Foo internal constructor(private val x: Int)`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for visibility constructor, got %d", (int)r.error_count);
+	};
+}
+
+fn void parse_class_with_private_constructor() @test {
+	@pool() {
+		String content = `class Foo private constructor(val x: Int, val y: String)`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for private constructor, got %d", (int)r.error_count);
+	};
+}
+
 fn void parse_data_class_with_string_template_defaults() @test {
 	@pool() {
 		String content =
