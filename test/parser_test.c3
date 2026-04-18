@@ -4075,3 +4075,94 @@ fn void parse_init_block_still_works() @test {
 		assert(found_init, "expected INIT_BLOCK in class");
 	};
 }
+
+fn void parse_return_when_expression() @test {
+	@pool() {
+		String content =
+`fun test(x: Any): String {
+    return when (x) {
+        null -> "null"
+        else -> "other"
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// RETURN_EXPR should have WHEN_EXPR as child, not sibling
+		bool found_return = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind != RETURN_EXPR) continue;
+			found_return = true;
+
+			// Check that WHEN_EXPR is a child of RETURN_EXPR
+			bool when_is_child = false;
+			for (uint j = 0; j < r.node_count; j++) {
+				if (r.nodes[j].parent == i && r.nodes[j].kind == WHEN_EXPR) {
+					when_is_child = true;
+				}
+			}
+			assert(when_is_child, "WHEN_EXPR should be child of RETURN_EXPR");
+		}
+		assert(found_return, "expected RETURN_EXPR");
+	};
+}
+
+fn void parse_return_if_expression() @test {
+	@pool() {
+		String content =
+`fun test(x: Boolean): Int {
+    return if (x) 1 else 2
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		bool found_return = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind != RETURN_EXPR) continue;
+			found_return = true;
+
+			bool if_is_child = false;
+			for (uint j = 0; j < r.node_count; j++) {
+				if (r.nodes[j].parent == i && r.nodes[j].kind == IF_EXPR) {
+					if_is_child = true;
+				}
+			}
+			assert(if_is_child, "IF_EXPR should be child of RETURN_EXPR");
+		}
+		assert(found_return, "expected RETURN_EXPR");
+	};
+}
+
+fn void parse_return_nested_when() @test {
+	@pool() {
+		String content =
+`fun statusReply(o: Any): String {
+    return when (o) {
+        null -> "ok"
+        else -> when (o) {
+            "00" -> "a"
+            "04" -> "b"
+            else -> "c"
+        }
+    }
+}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		// The function body BLOCK should have exactly 1 child: RETURN_EXPR
+		// (not RETURN_EXPR + WHEN_EXPR as siblings)
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind != FUN_DECL) continue;
+			// Find the BLOCK child
+			for (uint j = 0; j < r.node_count; j++) {
+				if (r.nodes[j].parent != i || r.nodes[j].kind != BLOCK) continue;
+
+				uint block_children = 0;
+				for (uint k = 0; k < r.node_count; k++) {
+					if (r.nodes[k].parent == j) block_children++;
+				}
+				assert(block_children == 1, "function body should have 1 child (RETURN_EXPR), got %d", block_children);
+			}
+		}
+	};
+}

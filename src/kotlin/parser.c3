@@ -2111,7 +2111,12 @@ fn void Parser.parse_return_expr(Parser* self) {
 
 	// Optional return value
 	if (!self.at(RCURL) && !self.at(SEMICOLON) && !self.at_eof()) {
-		if (!is_statement_start(self.current.kind)) {
+		// Parse expression unless it looks like a new statement.
+		// Exception: if/when/try are both statement starters AND expressions,
+		// so after 'return' they should be parsed as the return value.
+		if (!is_statement_start(self.current.kind) ||
+		    self.current.kind == KW_WHEN || self.current.kind == KW_IF ||
+		    self.current.kind == KW_TRY) {
 			self.parse_expression(PREC_NONE);
 		}
 	}
