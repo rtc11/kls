@@ -290,6 +290,12 @@ fn void Parser.parse_file(Parser* self) {
 	self.node_start(file_idx, self.current);
 	uint children_start = self.result.node_count;
 
+	// Skip file-level annotations (e.g., @file:Suppress("UNCHECKED_CAST"))
+	// These can appear before the package declaration.
+	while (self.at(AT) && self.is_file_annotation()) {
+		self.scan_annotation();
+	}
+
 	// Optional package declaration
 	if (self.at(KW_PACKAGE)) {
 		self.parse_package_decl();
@@ -463,6 +469,29 @@ fn uint Parser.parse_modifiers(Parser* self) {
 		self.last_annotations = multi_buf.str_view().copy(mem);
 	}
 	return flags;
+}
+
+/**
+ * Check if the current token starts a @file: annotation.
+ * Peeks ahead without consuming tokens.
+ */
+fn bool Parser.is_file_annotation(Parser* self) {
+	if (!self.at(AT)) return false;
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+
+	self.advance(); // consume '@'
+	bool result = self.at_identifier() && self.current.text == "file";
+	if (result) {
+		self.advance(); // consume 'file'
+		result = self.at(COLON);
+	}
+
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	return result;
 }
 
 /**

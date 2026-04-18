@@ -3830,6 +3830,16 @@ fn void parse_annotation_with_use_site_target() @test {
 	};
 }
 
+fn void parse_file_annotation_before_package() @test {
+	@pool() {
+		String content = `@file:Suppress("UNCHECKED_CAST")
+package com.example
+fun main() {}`;
+		ParseResult* r = do_parse(content); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors for @file: annotation before package, got %d", (int)r.error_count);
+	};
+}
+
 fn void parse_annotation_on_class_member_fun() @test {
 	@pool() {
 		String src = `class MyTests {
