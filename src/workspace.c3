@@ -86,11 +86,36 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 
 fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 	// Free heap-copied strings in symbols
+	// URI and package_name are interned (shared per file), track freed pointers
+	void*[2048] freed_ptrs;
+	usz freed_count = 0;
+
 	for (usz i = 0; i < self.symbols.len(); i++) {
 		WorkspaceSymbol* sym = &self.symbols[i];
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
-		if (sym.uri.len > 0) mem::free(sym.uri.ptr);
-		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+
+		// Free interned uri/package only once per unique pointer
+		if (sym.uri.len > 0) {
+			bool found = false;
+			for (usz j = 0; j < freed_count; j++) {
+				if (freed_ptrs[j] == sym.uri.ptr) { found = true; break; }
+			}
+			if (!found) {
+				mem::free(sym.uri.ptr);
+				if (freed_count < 2048) { freed_ptrs[freed_count] = sym.uri.ptr; freed_count++; }
+			}
+		}
+		if (sym.package_name.len > 0) {
+			bool found = false;
+			for (usz j = 0; j < freed_count; j++) {
+				if (freed_ptrs[j] == sym.package_name.ptr) { found = true; break; }
+			}
+			if (!found) {
+				mem::free(sym.package_name.ptr);
+				if (freed_count < 2048) { freed_ptrs[freed_count] = sym.package_name.ptr; freed_count++; }
+			}
+		}
+
 		if (sym.receiver.len > 0) mem::free(sym.receiver.ptr);
 		for (usz j = 0; j < sym.supertype_count; j++) {
 			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
@@ -425,6 +450,9 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 		pkg_copy = pkg.copy(mem);
 	}
 
+	// Intern URI: one heap copy shared by all symbols from this file
+	String interned_uri = uri.copy(mem);
+
 	// Scan declarations
 	Symbol[256] buf;
 	usz count = symbols::scan_declarations(content, &buf);
@@ -434,8 +462,8 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 	for (usz i = 0; i < count; i++) {
 		WorkspaceSymbol ws = {
 			.name = buf[i].name.copy(mem),
-			.uri = uri.copy(mem),
-			.package_name = pkg_copy.len > 0 ? pkg_copy.copy(mem) : "",
+			.uri = interned_uri,  // shared across all symbols in this file
+			.package_name = pkg_copy,  // shared across all symbols in this file
 			.receiver = buf[i].receiver.len > 0 ? buf[i].receiver.copy(mem) : "",
 			.kind = buf[i].kind,
 			.lsp_kind = symbol_kind_to_lsp(buf[i].kind),
@@ -479,9 +507,11 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 	}
 
 	// Record file entry
+	// When count > 0, symbols share interned_uri/pkg_copy; WorkspaceFile gets own copies.
+	// When count == 0, no symbols reference the interned strings, so WorkspaceFile takes ownership.
 	WorkspaceFile wf = {
-		.uri = uri.copy(mem),
-		.package_name = pkg_copy,
+		.uri = count > 0 ? uri.copy(mem) : interned_uri,  // reuse interned_uri when no symbols
+		.package_name = count > 0 ? (pkg_copy.len > 0 ? pkg_copy.copy(mem) : "") : pkg_copy,  // reuse pkg_copy when no symbols
 		.module_name = module_name.len > 0 ? module_name.copy(mem) : "",
 		.symbol_start = start,
 		.symbol_count = count,
@@ -548,11 +578,21 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 	}
 
 	// Free strings in symbols being removed
+	// URI and package_name are interned (shared across all symbols in a file),
+	// so free them only once from the first symbol.
+	bool uri_freed = false;
+	bool pkg_freed = false;
 	for (usz i = start; i < start + count && i < self.symbols.len(); i++) {
 		WorkspaceSymbol* sym = &self.symbols[i];
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
-		if (sym.uri.len > 0) mem::free(sym.uri.ptr);
-		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+		if (!uri_freed && sym.uri.len > 0) {
+			mem::free(sym.uri.ptr);
+			uri_freed = true;
+		}
+		if (!pkg_freed && sym.package_name.len > 0) {
+			mem::free(sym.package_name.ptr);
+			pkg_freed = true;
+		}
 		if (sym.receiver.len > 0) mem::free(sym.receiver.ptr);
 		for (usz j = 0; j < sym.supertype_count; j++) {
 			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
@@ -594,53 +634,100 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 		}
 	};
 
-	// Rebuild name_index and super_index from the compacted symbols list
-	self.rebuild_name_index();
+	// Incrementally update name_index: remove stale indices and adjust shifted ones
+	self.incremental_remove_indices(start, count, shift);
 }
 
-fn void WorkspaceIndex.rebuild_name_index(WorkspaceIndex* self) {
-	// Free old name_index lists and clear the map
+/**
+ * Incrementally update name_index and super_index after removing symbols
+ * at [start..start+count) and shifting remaining symbols down by `shift`.
+ * Avoids full rebuild — O(entries in affected index lists) instead of O(all symbols).
+ */
+fn void WorkspaceIndex.incremental_remove_indices(WorkspaceIndex* self, usz start, usz count, usz shift) {
+	usz remove_end = start + count;
+
+	// Update name_index
 	@pool() {
-		foreach (&list : self.name_index.tvalues()) {
-			list.free();
-		}
-	};
-	self.name_index.clear();
+		String[256] keys_to_remove;
+		usz remove_count = 0;
 
-	// Free old super_index lists and clear the map
-	@pool() {
-		foreach (&list : self.super_index.tvalues()) {
-			list.free();
-		}
-	};
-	self.super_index.clear();
+		foreach (key : self.name_index.tkeys()) {
+			List{usz}* list = self.name_index.get_ref(key) ?? null;
+			if (list == null) continue;
 
-	for (usz i = 0; i < self.symbols.len(); i++) {
-		if (self.symbols[i].name.len == 0) continue; // skip removed
-		String name = self.symbols[i].name;
-		if (try list_ref = self.name_index.get_ref(name)) {
-			list_ref.push(i);
-		} else {
-			List{usz} new_list;
-			new_list.init(mem);
-			new_list.push(i);
-			self.name_index.set(name, new_list);
-		}
-
-		// Rebuild super_index
-		for (usz j = 0; j < self.symbols[i].supertype_count; j++) {
-			String st_name = self.symbols[i].supertypes[j];
-			if (st_name.len == 0) continue;
-			if (try list_ref = self.super_index.get_ref(st_name)) {
-				list_ref.push(i);
-			} else {
-				List{usz} new_list;
-				new_list.init(mem);
-				new_list.push(i);
-				self.super_index.set(st_name, new_list);
+			// Remove indices in the deleted range and adjust shifted indices
+			usz write = 0;
+			for (usz i = 0; i < list.len(); i++) {
+				usz idx = (*list)[i];
+				if (idx >= start && idx < remove_end) {
+					continue; // removed symbol
+				}
+				if (idx >= remove_end) {
+					(*list)[write] = idx - shift;
+				} else {
+					(*list)[write] = idx;
+				}
+				write++;
+			}
+			// Trim list to new size
+			while (list.len() > write) {
+				list.pop()!!;
+			}
+			if (list.len() == 0) {
+				if (remove_count < 256) {
+					keys_to_remove[remove_count] = key;
+					remove_count++;
+				}
 			}
 		}
-	}
+		// Remove empty entries
+		for (usz i = 0; i < remove_count; i++) {
+			if (try list_ref = self.name_index.get_ref(keys_to_remove[i])) {
+				list_ref.free();
+			}
+			self.name_index.remove(keys_to_remove[i]);
+		}
+	};
+
+	// Update super_index (same logic)
+	@pool() {
+		String[256] keys_to_remove;
+		usz remove_count = 0;
+
+		foreach (key : self.super_index.tkeys()) {
+			List{usz}* list = self.super_index.get_ref(key) ?? null;
+			if (list == null) continue;
+
+			usz write = 0;
+			for (usz i = 0; i < list.len(); i++) {
+				usz idx = (*list)[i];
+				if (idx >= start && idx < remove_end) {
+					continue;
+				}
+				if (idx >= remove_end) {
+					(*list)[write] = idx - shift;
+				} else {
+					(*list)[write] = idx;
+				}
+				write++;
+			}
+			while (list.len() > write) {
+				list.pop()!!;
+			}
+			if (list.len() == 0) {
+				if (remove_count < 256) {
+					keys_to_remove[remove_count] = key;
+					remove_count++;
+				}
+			}
+		}
+		for (usz i = 0; i < remove_count; i++) {
+			if (try list_ref = self.super_index.get_ref(keys_to_remove[i])) {
+				list_ref.free();
+			}
+			self.super_index.remove(keys_to_remove[i]);
+		}
+	};
 }
 
 // ── Lookup ─────────────────────────────────────────────────────────
@@ -779,6 +866,9 @@ fn void index_file_from_disk(WorkspaceIndex* idx, String file_path, usz* file_co
 		String content = (String)data;
 		String uri = path_to_uri(file_path);
 		String uri_copy = uri.tcopy();
+
+		// Skip if already indexed (overlapping source roots can cause duplicates)
+		if (idx.files.has_key(uri_copy)) return;
 
 		idx.index_file(uri_copy, content);
 	};

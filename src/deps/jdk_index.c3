@@ -127,7 +127,9 @@ fn void index_jdk(DependencyIndex* dep_index) {
 
 			String path_str = jmod_path.str_view();
 			if (file::is_file(path_str)) {
-				index_jmod(dep_index, path_str);
+				// Intern jmod_path: one heap copy shared by all symbols from this jmod
+				String interned_path = path_str.copy(mem);
+				index_jmod(dep_index, interned_path);
 			} else {
 				log::debug("[kls]   JDK module not found: %s", mod_name);
 			}
@@ -151,6 +153,27 @@ const usz JMOD_HEADER_SIZE = 4;
  * file and free the returned string.
  */
 fn String strip_jmod_header(String jmod_path) {
+	// Build temp file path first — check if already cached
+	DString tmp;
+	tmp.tinit();
+	if (try tmpdir = env::tget_var("TMPDIR")) {
+		String t = tmpdir;
+		if (t.len > 0 && t[t.len - 1] == '/') {
+			t = t[:t.len - 1];
+		}
+		tmp.appendf("%s/kls-jmod-%x.zip", t, jmod_path_hash(jmod_path));
+	} else {
+		tmp.appendf("/tmp/kls-jmod-%x.zip", jmod_path_hash(jmod_path));
+	}
+
+	String tmp_path = tmp.str_view();
+
+	// If temp file already exists (from previous session), reuse it
+	if (file::is_file(tmp_path)) {
+		log::debug("[kls]   Reusing cached jmod strip: %s", tmp_path);
+		return tmp_path.copy(mem);
+	}
+
 	// Read the entire jmod file
 	char[] data;
 	if (try d = file::load(tmem, jmod_path)) {
@@ -165,21 +188,6 @@ fn String strip_jmod_header(String jmod_path) {
 		data[2] != JMOD_MAGIC[2] || data[3] != JMOD_MAGIC[3]) {
 		return "";
 	}
-
-	// Build temp file path
-	DString tmp;
-	tmp.tinit();
-	if (try tmpdir = env::tget_var("TMPDIR")) {
-		String t = tmpdir;
-		if (t.len > 0 && t[t.len - 1] == '/') {
-			t = t[:t.len - 1];
-		}
-		tmp.appendf("%s/kls-jmod-%x.zip", t, jmod_path_hash(jmod_path));
-	} else {
-		tmp.appendf("/tmp/kls-jmod-%x.zip", jmod_path_hash(jmod_path));
-	}
-
-	String tmp_path = tmp.str_view();
 
 	// Write ZIP portion (skip first 4 bytes)
 	File f;
@@ -225,8 +233,7 @@ fn void index_jmod(DependencyIndex* idx, String jmod_path) {
 		return;
 	}
 	defer {
-		// Clean up temp file
-		file::delete(zip_path)!!;
+		// Keep temp file for cache — only free the path string
 		mem::free(zip_path.ptr);
 	}
 
@@ -365,7 +372,7 @@ fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_
 	}
 
 	jar_index::add_dep_symbol(idx, simple_name, sig.str_view(), pkg, simple_name, jmod_path, class_kind,
-		&class_supertypes, class_supertype_count);
+		&class_supertypes, class_supertype_count, jar_path_interned: true);
 
 	// Add public methods as symbols
 	for (usz i = 0; i < info.method_count; i++) {
@@ -391,7 +398,7 @@ fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_
 		classfile::method_descriptor_to_kotlin(m.descriptor, &msig);
 
 		jar_index::add_dep_symbol(idx, m.name, msig.str_view(), pkg, simple_name, jmod_path, DEP_METHOD,
-			null, 0);
+			null, 0, jar_path_interned: true);
 	}
 
 	// Add public fields as symbols
@@ -410,6 +417,6 @@ fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_
 		classfile::descriptor_to_kotlin_type(f.descriptor, &fsig);
 
 		jar_index::add_dep_symbol(idx, f.name, fsig.str_view(), pkg, simple_name, jmod_path, DEP_FIELD,
-			null, 0);
+			null, 0, jar_path_interned: true);
 	}
 }

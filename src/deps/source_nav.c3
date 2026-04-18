@@ -444,11 +444,14 @@ fn void ensure_parent_dirs(String file_path) {
 fn bool find_symbol_position(String content, String symbol_name, DepSymbolKind kind, uint* out_line, uint* out_col) {
 	if (content.len == 0 || symbol_name.len == 0) return false;
 
-	// Use the lexer to scan tokens
+	// Single-pass lex: track keyword-preceded match and first-occurrence fallback
 	Lexer lex = lexer::init(content);
-
-	// Track the previous token to detect "fun X", "class X", etc.
 	Token prev = { .kind = EOF };
+
+	// Fallback: first identifier occurrence (used if no keyword-preceded match)
+	uint fallback_line = 0;
+	uint fallback_col = 0;
+	bool has_fallback = false;
 
 	while (true) {
 		Token tok = lex.next();
@@ -480,21 +483,23 @@ fn bool find_symbol_position(String content, String symbol_name, DepSymbolKind k
 				*out_col = tok.col;
 				return true;
 			}
+
+			// Track first occurrence as fallback
+			if (!has_fallback) {
+				fallback_line = tok.line;
+				fallback_col = tok.col;
+				has_fallback = true;
+			}
 		}
 
 		prev = tok;
 	}
 
-	// Fallback: find the first occurrence of the identifier anywhere
-	Lexer lex2 = lexer::init(content);
-	while (true) {
-		Token tok = lex2.next();
-		if (tok.kind == EOF) break;
-		if ((tok.kind == IDENTIFIER || tok.kind.is_identifier_or_soft_keyword()) && tok.text == symbol_name) {
-			*out_line = tok.line;
-			*out_col = tok.col;
-			return true;
-		}
+	// No keyword-preceded match — use fallback if available
+	if (has_fallback) {
+		*out_line = fallback_line;
+		*out_col = fallback_col;
+		return true;
 	}
 
 	return false;

@@ -3,6 +3,7 @@ module kls::deps::jar_index;
 import std::io;
 import std::collections;
 import std::compression::zip;
+import std::thread;
 import kls::deps::classfile;
 import kls::deps::classpath;
 import kls::log;
@@ -28,8 +29,9 @@ struct DepSymbol {
 	String signature;      // heap-copied Kotlin-style signature
 	String package_name;   // heap-copied package (e.g., "kotlin.collections")
 	String class_name;     // heap-copied declaring class simple name
-	String jar_path;       // heap-copied path to the JAR containing this symbol
+	String jar_path;       // path to JAR; interned (shared) when indexed via index_jar
 	DepSymbolKind kind;
+	bool jar_path_shared;  // true = jar_path is interned, don't free per-symbol
 	String[MAX_DEP_SUPERTYPES] supertypes;  // heap-copied simple supertype names
 	usz supertype_count;
 }
@@ -42,6 +44,7 @@ struct DependencyIndex {
 	List{DepSymbol} symbols;
 	HashMap{String, List{usz}} name_index;   // name -> symbol indices
 	HashMap{String, List{usz}} super_index;  // supertype name -> symbol indices that extend/implement it
+	Mutex index_mutex;                        // guards symbols/name_index/super_index during parallel indexing
 	bool initialized;
 	bool limit_warned;                        // #15: only warn once about symbol limit
 }
@@ -50,17 +53,44 @@ fn void DependencyIndex.init(DependencyIndex* self) {
 	self.symbols.init(mem);
 	self.name_index.init(mem);
 	self.super_index.init(mem);
+	self.index_mutex.init()!!;
 	self.initialized = true;
 }
 
 fn void DependencyIndex.free(DependencyIndex* self) {
+	// Track interned (shared) jar_path pointers to free once
+	void*[256] freed_jar_paths;
+	usz freed_count = 0;
+
 	for (usz i = 0; i < self.symbols.len(); i++) {
 		DepSymbol* sym = &self.symbols[i];
 		if (sym.name.len > 0) mem::free(sym.name.ptr);
 		if (sym.signature.len > 0) mem::free(sym.signature.ptr);
 		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
 		if (sym.class_name.len > 0) mem::free(sym.class_name.ptr);
-		if (sym.jar_path.len > 0) mem::free(sym.jar_path.ptr);
+
+		if (sym.jar_path.len > 0) {
+			if (sym.jar_path_shared) {
+				// Interned: free once per unique pointer
+				bool already_freed = false;
+				for (usz j = 0; j < freed_count; j++) {
+					if (freed_jar_paths[j] == sym.jar_path.ptr) {
+						already_freed = true;
+						break;
+					}
+				}
+				if (!already_freed) {
+					mem::free(sym.jar_path.ptr);
+					if (freed_count < 256) {
+						freed_jar_paths[freed_count] = sym.jar_path.ptr;
+						freed_count++;
+					}
+				}
+			} else {
+				mem::free(sym.jar_path.ptr);
+			}
+		}
+
 		for (usz j = 0; j < sym.supertype_count; j++) {
 			if (sym.supertypes[j].len > 0) mem::free(sym.supertypes[j].ptr);
 		}
@@ -83,25 +113,94 @@ fn void DependencyIndex.free(DependencyIndex* self) {
 	};
 	self.super_index.free();
 
+	self.index_mutex.destroy();
 	self.initialized = false;
 }
 
 // ── Index all JARs from a classpath ────────────────────────────────
 
+const usz MAX_INDEX_THREADS = 4;
+
+struct JarWorkerArgs {
+	DependencyIndex* idx;
+	Classpath* cp;
+	usz start;
+	usz end;
+}
+
+fn void jar_worker_body(JarWorkerArgs* args) {
+	for (usz i = args.start; i < args.end; i++) {
+		@pool() {
+			args.idx.index_jar(args.cp.jars[i].path);
+		};
+	}
+}
+
+fn int jar_worker_fn(void* arg) {
+	@pool_init(mem, 1024 * 256) {
+		jar_worker_body((JarWorkerArgs*)arg);
+	};
+	return 0;
+}
+
 /**
- * Index all JARs in the given classpath. Opens each JAR as a ZIP,
- * iterates .class entries, parses each, and adds public API symbols.
+ * Index all JARs in the given classpath. Uses parallel threads to
+ * speed up JAR parsing — each thread indexes a partition of JARs,
+ * symbols are added to the shared index under a mutex.
  */
 fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp) {
 	log::info("[kls] Indexing %d JARs for dependency symbols...", (int)cp.jar_count);
 
-	for (usz i = 0; i < cp.jar_count; i++) {
-		@pool() {
-			self.index_jar(cp.jars[i].path);
-		};
+	if (cp.jar_count == 0) return;
+
+	// For small JAR counts, index sequentially (thread overhead not worth it)
+	if (cp.jar_count <= 4) {
+		for (usz i = 0; i < cp.jar_count; i++) {
+			@pool() {
+				self.index_jar(cp.jars[i].path);
+			};
+		}
+		log::info("[kls] Dependency index: %d symbols from %d JARs", (int)self.symbols.len(), (int)cp.jar_count);
+		return;
 	}
 
-	log::info("[kls] Dependency index: %d symbols from %d JARs", (int)self.symbols.len(), (int)cp.jar_count);
+	// Determine thread count (up to MAX_INDEX_THREADS, at least 1 JAR per thread)
+	usz thread_count = MAX_INDEX_THREADS;
+	if (thread_count > cp.jar_count) thread_count = cp.jar_count;
+
+	// Partition JARs across threads
+	JarWorkerArgs[MAX_INDEX_THREADS] args;
+	Thread[MAX_INDEX_THREADS] threads;
+	usz per_thread = cp.jar_count / thread_count;
+	usz remainder = cp.jar_count % thread_count;
+	usz offset = 0;
+
+	for (usz t = 0; t < thread_count; t++) {
+		usz count = per_thread + (usz)(t < remainder ? 1 : 0);
+		args[t] = {
+			.idx = self,
+			.cp = cp,
+			.start = offset,
+			.end = offset + count,
+		};
+		offset += count;
+	}
+
+	// Launch worker threads (thread 0 runs on main thread)
+	for (usz t = 1; t < thread_count; t++) {
+		threads[t].create(&jar_worker_fn, &args[t])!!;
+	}
+
+	// Main thread handles partition 0 (already has temp allocator)
+	jar_worker_body(&args[0]);
+
+	// Join worker threads
+	for (usz t = 1; t < thread_count; t++) {
+		threads[t].join()!!;
+	}
+
+	log::info("[kls] Dependency index: %d symbols from %d JARs (%d threads)",
+		(int)self.symbols.len(), (int)cp.jar_count, (int)thread_count);
 }
 
 /**
@@ -117,6 +216,9 @@ fn void DependencyIndex.index_jar(DependencyIndex* self, String jar_path) {
 		return;
 	}
 	defer archive.close()!!;
+
+	// Intern jar_path: one heap copy shared by all symbols from this JAR
+	String interned_jar_path = jar_path.copy(mem);
 
 	usz entry_count = archive.count();
 	for (usz i = 0; i < entry_count; i++) {
@@ -149,8 +251,8 @@ fn void DependencyIndex.index_jar(DependencyIndex* self, String jar_path) {
 			continue; // skip unparseable entries
 		}
 
-		// Add symbols from this class
-		add_symbols_from_class(self, &info, jar_path);
+		// Add symbols from this class (jar_path is interned, not re-copied)
+		add_symbols_from_class(self, &info, interned_jar_path);
 	}
 }
 
@@ -240,7 +342,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		}
 
 		add_dep_symbol(idx, simple_name, sig.str_view(), pkg, simple_name, jar_path, class_kind,
-			&class_supertypes, class_supertype_count);
+			&class_supertypes, class_supertype_count, jar_path_interned: true);
 	}
 
 	// Add public methods as symbols
@@ -265,7 +367,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		classfile::method_descriptor_to_kotlin(m.descriptor, &sig);
 
 		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD,
-			null, 0);
+			null, 0, jar_path_interned: true);
 	}
 
 	// Add public fields as symbols
@@ -280,29 +382,24 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		classfile::descriptor_to_kotlin_type(f.descriptor, &sig);
 
 		add_dep_symbol(idx, f.name, sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD,
-			null, 0);
+			null, 0, jar_path_interned: true);
 	}
 }
 
 fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		String package_name, String class_name, String jar_path, DepSymbolKind kind,
-		String[MAX_DEP_SUPERTYPES]* supertypes, usz supertype_count) {
-	if (idx.symbols.len() >= MAX_DEP_SYMBOLS) {
-		// #15: Warn once when the dependency symbol limit is reached
-		if (!idx.limit_warned) {
-			log::warn("[kls] Warning: dependency symbol limit reached (%d), some symbols may be missing", MAX_DEP_SYMBOLS);
-			idx.limit_warned = true;
-		}
-		return;
-	}
+		String[MAX_DEP_SUPERTYPES]* supertypes, usz supertype_count,
+		bool jar_path_interned = false) {
 
+	// Pre-allocate symbol data outside the lock (heap alloc is thread-safe)
 	DepSymbol sym = {
 		.name = name.copy(mem),
 		.signature = signature.copy(mem),
 		.package_name = package_name.len > 0 ? package_name.copy(mem) : "",
 		.class_name = class_name.copy(mem),
-		.jar_path = jar_path.copy(mem),
+		.jar_path = jar_path_interned ? jar_path : jar_path.copy(mem),
 		.kind = kind,
+		.jar_path_shared = jar_path_interned,
 		.supertype_count = supertype_count,
 	};
 
@@ -311,6 +408,28 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		if (supertypes != null) {
 			sym.supertypes[i] = (*supertypes)[i].copy(mem);
 		}
+	}
+
+	// Lock for data structure mutation
+	idx.index_mutex.lock();
+	defer idx.index_mutex.unlock();
+
+	if (idx.symbols.len() >= MAX_DEP_SYMBOLS) {
+		// #15: Warn once when the dependency symbol limit is reached
+		if (!idx.limit_warned) {
+			log::warn("[kls] Warning: dependency symbol limit reached (%d), some symbols may be missing", MAX_DEP_SYMBOLS);
+			idx.limit_warned = true;
+		}
+		// Free pre-allocated strings
+		if (sym.name.len > 0) mem::free(sym.name.ptr);
+		if (sym.signature.len > 0) mem::free(sym.signature.ptr);
+		if (sym.package_name.len > 0) mem::free(sym.package_name.ptr);
+		if (sym.class_name.len > 0) mem::free(sym.class_name.ptr);
+		if (!jar_path_interned && sym.jar_path.len > 0) mem::free(sym.jar_path.ptr);
+		for (usz i = 0; i < supertype_count; i++) {
+			if (sym.supertypes[i].len > 0) mem::free(sym.supertypes[i].ptr);
+		}
+		return;
 	}
 
 	usz sym_idx = idx.symbols.len();
@@ -323,7 +442,7 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		List{usz} new_list;
 		new_list.init(mem);
 		new_list.push(sym_idx);
-		idx.name_index.set(name, new_list);
+		idx.name_index.set(sym.name, new_list);
 	}
 
 	// Update super_index: map each supertype name -> this symbol
@@ -341,7 +460,7 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 			List{usz} new_list;
 			new_list.init(mem);
 			new_list.push(sym_idx);
-			idx.super_index.set(st_name, new_list);
+			idx.super_index.set(sym.supertypes[i], new_list);
 		}
 	}
 }
@@ -371,39 +490,32 @@ fn usz DependencyIndex.lookup_by_name(DependencyIndex* self, String name, DepSym
 
 /**
  * Look up dependency symbols whose name starts with the given prefix.
+ * Uses name_index keys for efficient iteration and natural dedup.
  * Writes matching pointers into out_buf and returns the count.
  */
 fn usz DependencyIndex.lookup_by_prefix(DependencyIndex* self, String prefix, DepSymbol*[] out_buf) {
 	if (prefix.len == 0 || out_buf.len == 0) return 0;
 
-	// Track seen names to deduplicate
-	String[256] seen;
-	usz seen_count = 0;
 	usz count = 0;
 
-	for (usz i = 0; i < self.symbols.len() && count < out_buf.len; i++) {
-		DepSymbol* sym = &self.symbols[i];
-		if (sym.name.len == 0) continue;
-		if (!sym.name.starts_with(prefix)) continue;
+	// Iterate name_index keys — each key is a unique name, so dedup is free
+	@pool() {
+		foreach (name : self.name_index.tkeys()) {
+			if (count >= out_buf.len) break;
+			if (!name.starts_with(prefix)) continue;
 
-		// Dedup by name
-		bool already_seen = false;
-		for (usz j = 0; j < seen_count; j++) {
-			if (seen[j] == sym.name) {
-				already_seen = true;
-				break;
+			// Get first symbol with this name
+			if (try indices = self.name_index.get_ref(name)) {
+				if (indices.len() > 0) {
+					usz idx = indices.get(0);
+					if (idx < self.symbols.len()) {
+						out_buf[count] = &self.symbols[idx];
+						count++;
+					}
+				}
 			}
 		}
-		if (already_seen) continue;
-
-		if (seen_count < 256) {
-			seen[seen_count] = sym.name;
-			seen_count++;
-		}
-
-		out_buf[count] = sym;
-		count++;
-	}
+	};
 
 	return count;
 }
