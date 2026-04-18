@@ -368,6 +368,19 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 
 		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD,
 			null, 0, jar_path_interned: true);
+
+		// Register Kotlin property name for getter/setter methods.
+		// Kotlin compiles `val Foo` as `getFoo()` and `var Foo` as `getFoo()`/`setFoo()`.
+		// Register the property name so lookup("Foo") finds the getter.
+		if (m.name.len > 3 && m.name[..2] == "get" && m.name[3] >= 'A' && m.name[3] <= 'Z') {
+			String prop_name = m.name[3..];
+			DString prop_sig;
+			prop_sig.tinit();
+			prop_sig.appendf("val %s", prop_name);
+			classfile::method_descriptor_to_kotlin(m.descriptor, &prop_sig);
+			add_dep_symbol(idx, prop_name, prop_sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD,
+				null, 0, jar_path_interned: true);
+		}
 	}
 
 	// Add public fields as symbols
