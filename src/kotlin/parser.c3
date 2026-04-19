@@ -2174,7 +2174,7 @@ fn void Parser.parse_return_expr(Parser* self) {
 		// so after 'return' they should be parsed as the return value.
 		if (!is_statement_start(self.current.kind) ||
 		    self.current.kind == KW_WHEN || self.current.kind == KW_IF ||
-		    self.current.kind == KW_TRY) {
+		    self.current.kind == KW_TRY || self.current.kind == KW_OBJECT) {
 			self.parse_expression(PREC_NONE);
 		}
 	}

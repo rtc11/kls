@@ -1504,3 +1504,19 @@ fn void return_when_nested_no_false_positive() @test {
 			"nested return when should not be flagged as unreachable");
 	};
 }
+
+fn void no_unreachable_for_return_object_literal() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun test(): Any {
+				val typeRef = object: TypeReference() {}
+				return object: StreamSerde {
+					fun serializer() = 1
+					fun deserializer() = 2
+				}
+			}`
+		);
+		assert(!has_diagnostic_containing(result, "Unreachable"),
+			"return with multi-line object literal should not flag unreachable");
+	};
+}
