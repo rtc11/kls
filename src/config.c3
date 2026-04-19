@@ -47,3 +47,17 @@ fn void apply_init_options(Object* opts) {
 fn bool hover_docs_enabled() {
 	return g_config.hover_docs_from_source;
 }
+
+/**
+ * Handle workspace/didChangeConfiguration notification.
+ * Expects params.settings with the same keys as initializationOptions.
+ * Falls back to checking params directly for flat payloads.
+ */
+fn void apply_settings(Object* params) {
+	if (params == null) return;
+
+	// LSP spec: settings are under params.settings
+	Object* settings = params.get("settings") ?? params;
+	apply_init_options(settings);
+	log::debug("[kls] Configuration updated");
+}

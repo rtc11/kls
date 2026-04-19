@@ -104,3 +104,20 @@ fn void handle_did_close(DocumentStore* store, Object* params) {
 	// and no AST, producing an empty diagnostics array to clear client-side)
 	diagnostics::publish_diagnostics(store, uri);
 }
+
+/**
+ * Handle textDocument/didSave notification.
+ * Re-publishes diagnostics and refreshes the workspace index for the saved file.
+ */
+fn void handle_did_save(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!!;
+	String uri = td.get_string("uri")!!;
+
+	log::debug("[kls] Document saved: %s", uri);
+
+	// Re-index and re-publish diagnostics on save
+	if (try doc = store.get(uri)) {
+		workspace.index_file(uri, doc.content);
+		diagnostics::publish_diagnostics(store, uri, workspace);
+	}
+}

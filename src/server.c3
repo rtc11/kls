@@ -33,6 +33,7 @@ import kls::lsp::execute_command;
 import kls::lsp::diagnostics;
 import kls::lsp::progress;
 import kls::workspace;
+import kls::config;
 import kls::deps::classpath;
 import kls::deps::jar_index;
 import kls::deps::jdk_index;
@@ -448,6 +449,20 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "$/cancelRequest":
+			// Silently ignore — we don't support cancellation yet but must not error
+			log::debug("[kls] Cancel request received (ignored)");
+
+		case "textDocument/didSave":
+			if (params != null) {
+				sync::handle_did_save(&self.documents, &self.workspace, params);
+			}
+
+		case "workspace/didChangeConfiguration":
+			if (params != null) {
+				config::apply_settings(params);
 			}
 
 		default:
