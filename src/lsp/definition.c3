@@ -447,7 +447,7 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					}
 				}
 				if (recv_name.len > 0) {
-					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text);
+					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr);
 					if (dep_result != null) return dep_result;
 				}
 			}
@@ -472,7 +472,7 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 
 		// Search dependency index by receiver type name
 		if (workspace != null && workspace.dep_index.initialized) {
-			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name);
+			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr);
 			if (dep_result != null) return dep_result;
 		}
 
@@ -660,32 +660,64 @@ fn Object* build_location_from_member(MemberDecl* m) {
  * This handles JDK classes (System.nanoTime, Files.readAllBytes, etc.)
  * and any other dependency class whose members are indexed.
  */
-fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name) {
+fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name, ParseResult* pr = null) {
 	// First verify the class exists in the dep index
-	DepSymbol*[4] class_matches;
+	DepSymbol*[16] class_matches;
 	usz class_count = dep_index.lookup_by_name(class_name, &class_matches);
 	bool is_known_class = false;
+
+	// If we have AST, use imports to prefer the correct class when multiple exist
+	String preferred_pkg = "";
+	if (pr != null) {
+		ImportMap imports = workspace::build_import_map(pr);
+		for (usz i = 0; i < imports.import_count; i++) {
+			if (imports.import_names[i] == class_name && !imports.is_star[i]) {
+				// Extract package from full import path: "com.example.Record" -> "com.example"
+				String path = imports.import_paths[i];
+				usz last_dot = 0;
+				for (usz j = 0; j < path.len; j++) {
+					if (path[j] == '.') last_dot = j;
+				}
+				if (last_dot > 0) preferred_pkg = path[:last_dot];
+				break;
+			}
+		}
+	}
+
+	// Find the class, preferring imported package
+	DepSymbol* best_class = null;
 	for (usz i = 0; i < class_count; i++) {
-		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
-			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_ANNOTATION ||
-			class_matches[i].kind == DEP_OBJECT) {
-			is_known_class = true;
+		if (class_matches[i].kind != DEP_CLASS && class_matches[i].kind != DEP_INTERFACE &&
+			class_matches[i].kind != DEP_ENUM && class_matches[i].kind != DEP_ANNOTATION &&
+			class_matches[i].kind != DEP_OBJECT) continue;
+		is_known_class = true;
+		if (preferred_pkg.len > 0 && class_matches[i].package_name == preferred_pkg) {
+			best_class = class_matches[i];
 			break;
 		}
+		if (best_class == null) best_class = class_matches[i];
 	}
 	if (!is_known_class) {
 		return null;
 	}
 
-	// Look up the member by name, filter by class_name
-	DepSymbol*[16] member_matches;
+	// Use the best class's package to filter members
+	String target_class = class_name;
+	String target_pkg = best_class != null ? best_class.package_name : "";
+
+	// Look up the member by name, filter by class_name and prefer matching package
+	DepSymbol*[32] member_matches;
 	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
+
 	DepSymbol* best = null;
 	for (usz i = 0; i < member_count; i++) {
-		if (member_matches[i].class_name != class_name) continue;
+		if (member_matches[i].class_name != target_class) continue;
 		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
-		best = member_matches[i];
-		break;
+		if (target_pkg.len > 0 && member_matches[i].package_name == target_pkg) {
+			best = member_matches[i];
+			break;
+		}
+		if (best == null) best = member_matches[i];
 	}
 
 	if (best == null) {

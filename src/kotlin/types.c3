@@ -1514,7 +1514,7 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			if (member_result.kind != UNKNOWN) return member_result;
 			// Try dependency index
 			if (g_workspace.dep_index.initialized) {
-				member_result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name);
+				member_result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name, pr);
 				if (member_result.kind != UNKNOWN) return member_result;
 			}
 		}
@@ -1791,7 +1791,7 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 
 		// Dependency index: look up member by receiver type name
 		if (g_workspace.dep_index.initialized) {
-			result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name);
+			result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name, pr);
 			if (result.kind != UNKNOWN) return result;
 		}
 	}
@@ -2246,56 +2246,74 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
  * Looks up the member by class_name and extracts the return type from the signature.
  * E.g., for Record.timestamp() with signature "(): Long", returns TypeRef{Long}.
  */
-fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, TypeRef receiver, String member_name) {
+fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, TypeRef receiver, String member_name, ParseResult* pr = null) {
 	String type_name = receiver.name;
 	if (type_name.len == 0) return TYPE_UNKNOWN;
 
-	// Verify the class exists in deps
-	DepSymbol*[4] class_matches;
-	usz class_count = dep_index.lookup_by_name(type_name, &class_matches);
-	bool is_known_class = false;
-	for (usz i = 0; i < class_count; i++) {
-		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
-			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
-			is_known_class = true;
-			break;
-		}
-	}
-	if (!is_known_class) return TYPE_UNKNOWN;
-
-	// Look up the member, filter by class name
-	DepSymbol*[16] member_matches;
-	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
-
-	for (usz i = 0; i < member_count; i++) {
-		if (member_matches[i].class_name != type_name) continue;
-		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
-
-		// Extract return type from signature
-		// Methods: "(...): ReturnType"
-		// Fields: "Type" (just the type name)
-		String sig = member_matches[i].signature;
-		if (sig.len == 0) continue;
-
-		if (member_matches[i].kind == DEP_FIELD) {
-			return parse_type_text(sig);
-		}
-
-		// Method: find ": " after closing paren
-		usz colon_pos = 0;
-		bool found_colon = false;
-		for (usz j = 0; j + 1 < sig.len; j++) {
-			if (sig[j] == ':' && sig[j + 1] == ' ') {
-				colon_pos = j + 2;
-				found_colon = true;
+	// Use imports to prefer correct package when multiple classes share the same name
+	String preferred_pkg = "";
+	if (pr != null) {
+		ImportMap imports = workspace::build_import_map(pr);
+		for (usz i = 0; i < imports.import_count; i++) {
+			if (imports.import_names[i] == type_name && !imports.is_star[i]) {
+				String path = imports.import_paths[i];
+				usz last_dot = 0;
+				for (usz j = 0; j < path.len; j++) {
+					if (path[j] == '.') last_dot = j;
+				}
+				if (last_dot > 0) preferred_pkg = path[:last_dot];
 				break;
 			}
 		}
-		if (found_colon && colon_pos < sig.len) {
-			return parse_type_text(sig[colon_pos..]);
-		}
+	}
 
-		return TYPE_UNKNOWN;
+	// Verify the class exists in deps, prefer imported package
+	DepSymbol*[16] class_matches;
+	usz class_count = dep_index.lookup_by_name(type_name, &class_matches);
+	DepSymbol* best_class = null;
+	for (usz i = 0; i < class_count; i++) {
+		if (class_matches[i].kind != DEP_CLASS && class_matches[i].kind != DEP_INTERFACE &&
+			class_matches[i].kind != DEP_ENUM && class_matches[i].kind != DEP_OBJECT) continue;
+		if (preferred_pkg.len > 0 && class_matches[i].package_name == preferred_pkg) {
+			best_class = class_matches[i];
+			break;
+		}
+		if (best_class == null) best_class = class_matches[i];
+	}
+	if (best_class == null) return TYPE_UNKNOWN;
+
+	String target_pkg = best_class.package_name;
+
+	// Look up the member, filter by class name and prefer matching package
+	DepSymbol*[32] member_matches;
+	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
+
+	DepSymbol* best = null;
+	for (usz i = 0; i < member_count; i++) {
+		if (member_matches[i].class_name != type_name) continue;
+		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
+		if (target_pkg.len > 0 && member_matches[i].package_name == target_pkg) {
+			best = member_matches[i];
+			break;
+		}
+		if (best == null) best = member_matches[i];
+	}
+
+	if (best == null) return TYPE_UNKNOWN;
+
+	// Extract return type from signature
+	String sig = best.signature;
+	if (sig.len == 0) return TYPE_UNKNOWN;
+
+	if (best.kind == DEP_FIELD) {
+		return parse_type_text(sig);
+	}
+
+	// Method: find ": " after closing paren
+	for (usz j = 0; j + 1 < sig.len; j++) {
+		if (sig[j] == ':' && sig[j + 1] == ' ') {
+			return parse_type_text(sig[j + 2..]);
+		}
 	}
 
 	return TYPE_UNKNOWN;
