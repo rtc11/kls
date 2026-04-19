@@ -231,18 +231,22 @@ fn TypeRef TypeParser.parse_simple_or_generic_type(TypeParser* self) {
 	result.kind = SIMPLE;
 
 	// Collect dotted name: com.example.Type
-	DString name_buf;
-	name_buf.tinit();
-	name_buf.appendf("%s", self.current.text);
+	// Use source slices directly — the source string (type_text from AST) is a
+	// stable slice of document content, avoiding temp allocation lifetime issues
+	// when TypeRefs are stored in heap-cached TypeInfo.
+	String first_token = self.current.text;
+	usz name_start = (usz)(first_token.ptr - self.source.ptr);
+	usz name_end = name_start + first_token.len;
 	self.advance();
 
 	while (self.eat(DOT)) {
 		if (self.at_identifier()) {
-			name_buf.appendf(".%s", self.current.text);
+			String seg = self.current.text;
+			name_end = (usz)(seg.ptr - self.source.ptr) + seg.len;
 			self.advance();
 		} else if (self.at(LPAREN)) {
 			// Receiver function type: Type.(A) -> B
-			String receiver_name = name_buf.str_view().tcopy();
+			String receiver_name = self.source[name_start..name_end - 1];
 
 			TypeRef ft = self.parse_function_or_paren_type();
 			ft.receiver_type_name = receiver_name;
@@ -253,7 +257,7 @@ fn TypeRef TypeParser.parse_simple_or_generic_type(TypeParser* self) {
 		}
 	}
 
-	result.name = name_buf.str_view().tcopy();
+	result.name = self.source[name_start..name_end - 1];
 
 	// Generic arguments: <T, R>
 	if (self.at(LANGLE)) {
@@ -329,12 +333,16 @@ fn void TypeParser.skip_angle_contents(TypeParser* self) {
 
 /**
  * Format a TypeRef as a human-readable Kotlin type string.
- * Uses temp allocator.
+ * For simple non-nullable types, returns the name directly (a source slice,
+ * safe for long-lived storage). Complex types use temp allocator.
  */
 fn String format_type(TypeRef* t) {
 	if (t.kind == UNKNOWN) return "";
 	if (t.kind == UNIT) return t.nullable ? "Unit?" : "Unit";
 	if (t.kind == NOTHING) return t.nullable ? "Nothing?" : "Nothing";
+
+	// Fast path: simple type without nullable — return name slice directly
+	if (t.kind == SIMPLE && !t.nullable && t.name.len > 0) return t.name;
 
 	DString ds;
 	ds.tinit();
