@@ -93,6 +93,7 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// If the token is a member of a DOT_EXPR, resolve the receiver type
 	// and search for the member declaration in the receiver class.
 	TypeInfo* ti = store.get_types(uri) ?? null;
+	bool is_dot_member = is_token_dot_member(pr, tok);
 	if (ti != null) {
 		if (try result = find_dot_member_definition(pr, ti, store, workspace, tok, uri)) {
 			log::debug("[def] found via dot-member navigation");
@@ -103,7 +104,10 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// ── Cross-file lookup via workspace index ────────────────────
 	// Workspace symbols take priority over dependency symbols, because
 	// the user's own code is the most relevant navigation target.
-	if (workspace != null) {
+	// Skip this for dot members (e.g., record.timestamp()) — the dot-member
+	// handler already searched the workspace by receiver type. Falling through
+	// here would match unrelated symbols with the same name.
+	if (workspace != null && !is_dot_member) {
 		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri, pr)) {
 			log::debug("[def] found via workspace index");
 			return result;
@@ -370,6 +374,19 @@ fn bool is_call_context_ast(ParseResult* pr, uint offset) {
 // ── Dot-member definition lookup ──────────────────────────────────
 
 faultdef NOT_DOT_MEMBER;
+
+/**
+ * Check if a token is the member name of a DOT_EXPR (e.g., `foo.bar` — bar is a dot member).
+ */
+fn bool is_token_dot_member(ParseResult* pr, Token tok) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != DOT_EXPR) continue;
+		if (n.name != tok.text) continue;
+		if (n.name_line == tok.line && n.name_col == tok.col) return true;
+	}
+	return false;
+}
 
 /**
  * Check if the token is a member of a DOT_EXPR, resolve the receiver

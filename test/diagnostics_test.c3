@@ -1536,3 +1536,22 @@ fn void no_unreachable_for_return_object_literal() @test {
 			"return with multi-line object literal should not flag unreachable");
 	};
 }
+
+fn void no_false_type_mismatch_for_unresolvable_dot_call_arg() @test {
+	@pool() {
+		// record.timestamp() return type is unknown (dep type) — should NOT flag mismatch
+		Object* result = build_test_diagnostics(
+			`fun process(record: Record<String, String>, context: ProcessorContext<String, String>) {
+				val metadata = context.recordMetadata().orElse(null)
+				val srcTopic = metadata?.topic() ?: ""
+				val partition = metadata?.partition() ?: ""
+
+				fun replaceHeader(key: String, time: Long) {}
+				replaceHeader("AUD_TIMESTAMP_MS", record.timestamp())
+				replaceHeader("AUD_STREAM_TIME_MS", context.currentStreamTimeMs())
+			}`
+		);
+		assert(!has_diagnostic_containing(result, "Type mismatch"),
+			"should NOT flag type mismatch when arg is unresolvable dot-call");
+	};
+}

@@ -3147,3 +3147,45 @@ fn void assignable_generic_type_params_permissive() @test {
 	assert(types::is_assignable_to(topic_kv, topic_kl),
 		"Topic<K, V> should be assignable to Topic<K, L> (unresolved type params)");
 }
+
+fn void dot_call_on_unresolvable_receiver_returns_unknown() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class with a 'timestamp: Long?' member — unrelated to Record
+		ws.index_file("file:///consumer.kt", "data class Metadata(val timestamp: Long? = null)");
+
+		// Parse code where record.timestamp() is called but Record is NOT in workspace
+		String src =
+`fun process(record: Record<String, String>) {
+    fun replaceHeader(key: String, time: Long) {}
+    replaceHeader("key", record.timestamp())
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer mem::free(ti);
+
+		// Find the DOT_EXPR for record.timestamp()
+		for (uint i = 0; i < pr.node_count; i++) {
+			if (pr.nodes[i].kind == DOT_EXPR && pr.nodes[i].name == "timestamp") {
+				assert(ti.node_types[i].kind == types::TypeKind.UNKNOWN,
+					"record.timestamp() should be UNKNOWN, got '%s' (kind=%d)",
+					ti.node_types[i].name, (int)ti.node_types[i].kind);
+				return;
+			}
+		}
+		// Might be a CALL_EXPR instead
+		for (uint i = 0; i < pr.node_count; i++) {
+			if (pr.nodes[i].kind == CALL_EXPR && pr.nodes[i].name == "timestamp") {
+				assert(ti.node_types[i].kind == types::TypeKind.UNKNOWN,
+					"record.timestamp() CALL_EXPR should be UNKNOWN, got '%s' (kind=%d)",
+					ti.node_types[i].name, (int)ti.node_types[i].kind);
+				return;
+			}
+		}
+		assert(false, "should find DOT_EXPR or CALL_EXPR for timestamp");
+	};
+}
