@@ -1362,6 +1362,9 @@ fn void add_unresolved_reference_diagnostics(Object* diagnostics, String content
 		// Skip if this is a member access (part of a dot chain)
 		if (is_dot_member(ast, i)) continue;
 
+		// Skip if this is the receiver of a callable reference (e.g., Processor in Processor::stores)
+		if (node.parent != ast::NO_PARENT && ast.nodes[node.parent].kind == CALLABLE_REF_EXPR) continue;
+
 		// Skip if this is a named argument label (e.g., `type` in Lib(type = "jar"))
 		if (is_named_argument_label(ast, i)) continue;
 

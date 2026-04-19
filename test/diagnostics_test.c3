@@ -397,6 +397,18 @@ fun main() { val c = KClass }`
 	};
 }
 
+fn void callable_ref_receiver_no_unresolved() @test {
+	@pool() {
+		Object* result = build_diagnostics_with_workspace(
+			`fun test(items: List<Any>) {
+				items.map(Processor::name)
+			}`
+		);
+		assert(!has_diagnostic_containing(result, "Unresolved"),
+			"callable ref receiver (Processor in Processor::name) should not be flagged unresolved");
+	};
+}
+
 fn void wildcard_import_prevents_unresolved_diagnostic() @test {
 	@pool() {
 		// Wildcard import covers the package -- should NOT be flagged
