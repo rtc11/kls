@@ -457,6 +457,8 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 		String type_name = receiver_type.name;
 		String member_name = tok.text;
 
+		log::debug("[def:dot] receiver_type='%s' (kind=%d) member='%s'", type_name, (int)receiver_type.kind, member_name);
+
 		// Search for the member declaration in the type's class declaration
 		// First, search same-file AST for class with this type name
 		if (try result = find_member_in_class_ast(pr, type_name, member_name, current_uri)) {
@@ -472,8 +474,17 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 
 		// Search dependency index by receiver type name
 		if (workspace != null && workspace.dep_index.initialized) {
+			log::debug("[def:dot] trying dep index for %s.%s (dep_count=%d)", type_name, member_name, (int)workspace.dep_index.symbols.len());
 			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name);
-			if (dep_result != null) return dep_result;
+			if (dep_result != null) {
+				log::debug("[def:dot] found %s.%s in dep index", type_name, member_name);
+				return dep_result;
+			}
+			log::debug("[def:dot] NOT found %s.%s in dep index", type_name, member_name);
+		} else {
+			log::debug("[def:dot] dep index not available (workspace=%s, initialized=%s)",
+				workspace != null ? "yes" : "no",
+				workspace != null && workspace.dep_index.initialized ? "yes" : "no");
 		}
 
 		// Check if this is a known scope function (apply, let, also, run, etc.)
@@ -664,8 +675,11 @@ fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_n
 	// First verify the class exists in the dep index
 	DepSymbol*[4] class_matches;
 	usz class_count = dep_index.lookup_by_name(class_name, &class_matches);
+	log::debug("[def:dep] lookup class '%s': %d matches", class_name, (int)class_count);
 	bool is_known_class = false;
 	for (usz i = 0; i < class_count; i++) {
+		log::debug("[def:dep]   match[%d]: name='%s' kind=%d pkg='%s'",
+			(int)i, class_matches[i].name, (int)class_matches[i].kind, class_matches[i].package_name);
 		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
 			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_ANNOTATION ||
 			class_matches[i].kind == DEP_OBJECT) {
@@ -674,13 +688,19 @@ fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_n
 		}
 	}
 	if (!is_known_class) {
+		log::debug("[def:dep] class '%s' not found in dep index", class_name);
 		return null;
 	}
 
 	// Look up the member by name, filter by class_name
 	DepSymbol*[16] member_matches;
 	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
-
+	log::debug("[def:dep] lookup member '%s': %d matches", member_name, (int)member_count);
+	for (usz i = 0; i < member_count; i++) {
+		log::debug("[def:dep]   member[%d]: name='%s' class='%s' kind=%d sig='%s'",
+			(int)i, member_matches[i].name, member_matches[i].class_name,
+			(int)member_matches[i].kind, member_matches[i].signature);
+	}
 	DepSymbol* best = null;
 	for (usz i = 0; i < member_count; i++) {
 		if (member_matches[i].class_name != class_name) continue;
