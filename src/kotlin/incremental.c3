@@ -8,8 +8,8 @@ import std::io;
 
 // ── Chunk tracking ─────────────────────────────────────────────────
 
-const usz MAX_CHUNKS = 1024;
-const usz MAX_MEMBER_CHUNKS = 256;
+const usz MAX_CHUNKS = 512;
+const usz MAX_MEMBER_CHUNKS = 128;
 
 /**
  * A chunk represents the byte range and node range of a single top-level

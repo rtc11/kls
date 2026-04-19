@@ -28,7 +28,7 @@ import kls::log;
  * `workspace` may be null (e.g. in tests); when null the unresolved-reference
  * pass is skipped.
  */
-fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIndex* workspace = null) {
+fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIndex* workspace = null, TypeInfo* type_info = null) {
 	Object* diagnostics = object::new_obj(tmem);
 
 	if (content.len == 0) {
@@ -135,10 +135,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	// ── Type checking diagnostics ────────────────────────────────
 	// Resolve types for the AST and check for type mismatches.
 	if (lexer_error_count == 0 && ast != null && ast.error_count == 0) {
-		TypeInfo* ti = mem::new(TypeInfo);
-		defer mem::free(ti);
-		types::resolve_types(ast, ti);
-		add_type_mismatch_diagnostics(diagnostics, ast, ti, workspace);
+		if (type_info != null) {
+			add_type_mismatch_diagnostics(diagnostics, ast, type_info, workspace);
+		}
 		add_unreachable_code_diagnostics(diagnostics, ast);
 	}
 
@@ -1490,7 +1489,10 @@ fn void publish_diagnostics(DocumentStore* store, String uri, WorkspaceIndex* wo
 	// Get cached AST (parses lazily if needed); null if doc not found
 	ParseResult* ast = store.get_ast(uri) ?? null;
 
-	Object* diagnostics = build_diagnostics_array(content, ast, workspace);
+	// Get cached types (resolves lazily if needed); null if doc not found
+	TypeInfo* type_info = store.get_types(uri) ?? null;
+
+	Object* diagnostics = build_diagnostics_array(content, ast, workspace, type_info);
 
 	Object* params = object::new_obj(tmem);
 	params.set("uri", uri);

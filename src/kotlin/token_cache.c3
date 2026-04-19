@@ -5,7 +5,7 @@ import kls::kotlin::lexer;
 
 // ── Token cache for optimized fallback ─────────────────────────────
 
-const usz MAX_CACHED_TOKENS = 65536;
+const usz MAX_CACHED_TOKENS = 16384;
 
 /**
  * A cached token stream for a document. Stores all non-whitespace/comment

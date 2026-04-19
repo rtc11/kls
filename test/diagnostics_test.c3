@@ -6,6 +6,7 @@ import kls::kotlin::ast;
 import kls::kotlin::parser;
 import kls::document;
 import kls::workspace;
+import kls::kotlin::types;
 
 /**
  * Helper: build diagnostics for content, automatically parsing for AST errors.
@@ -14,7 +15,10 @@ fn Object* build_test_diagnostics(String content) {
 	ParseResult* pr = mem::new(ParseResult);
 	defer { pr.free_errors(); mem::free(pr); }
 	parser::parse(content, pr);
-	return diagnostics::build_diagnostics_array(content, pr);
+	TypeInfo* ti = mem::new(TypeInfo);
+	defer mem::free(ti);
+	types::resolve_types(pr, ti);
+	return diagnostics::build_diagnostics_array(content, pr, null, ti);
 }
 
 fn void empty_content_returns_empty_array() @test {
