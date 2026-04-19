@@ -11,8 +11,10 @@ import kls::lsp::sync;
 import kls::lsp::hover;
 import kls::lsp::completion;
 import kls::lsp::definition;
+import kls::lsp::declaration;
 import kls::lsp::references;
 import kls::lsp::document_highlight;
+import kls::lsp::linked_editing_range;
 import kls::lsp::document_link;
 import kls::lsp::document_symbols;
 import kls::lsp::signature_help;
@@ -230,6 +232,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
+		case "textDocument/declaration":
+			if (params != null) {
+				Object* result = declaration::handle_declaration(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
 		case "textDocument/typeDefinition":
 			if (params != null) {
 				Object* result = type_definition::handle_type_definition(&self.documents, &self.workspace, params);
@@ -257,6 +267,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/documentHighlight":
 			if (params != null) {
 				Object* result = document_highlight::handle_document_highlight(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "textDocument/linkedEditingRange":
+			if (params != null) {
+				Object* result = linked_editing_range::handle_linked_editing_range(&self.documents, params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
@@ -326,9 +344,25 @@ fn void Server.dispatch(Server* self, Object* msg) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
 			}
 
+		case "codeAction/resolve":
+			if (params != null) {
+				Object* result = code_actions::handle_code_action_resolve(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
 		case "textDocument/codeLens":
 			if (params != null) {
 				Object* result = code_lens::handle_code_lens(&self.documents, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "codeLens/resolve":
+			if (params != null) {
+				Object* result = code_lens::handle_code_lens_resolve(params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
@@ -361,6 +395,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/inlayHint":
 			if (params != null) {
 				Object* result = inlay_hints::handle_inlay_hints(&self.documents, &self.workspace, params);
+				json_rpc::send_response(request_id, result);
+			} else {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			}
+
+		case "inlayHint/resolve":
+			if (params != null) {
+				Object* result = inlay_hints::handle_inlay_hint_resolve(params);
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");

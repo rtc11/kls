@@ -45,6 +45,9 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	// Go to definition support
 	caps.set("definitionProvider", true);
 
+	// Go to declaration support (interface/abstract method declarations)
+	caps.set("declarationProvider", true);
+
 	// Go to type definition support
 	caps.set("typeDefinitionProvider", true);
 
@@ -93,19 +96,28 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	Object* code_action_kinds = object::new_obj(tmem);
 	code_action_kinds.push(object::new_string("quickfix", tmem));
 	code_action_kinds.push(object::new_string("source.organizeImports", tmem));
+	code_action_kinds.push(object::new_string("refactor.extract", tmem));
+	code_action_kinds.push(object::new_string("refactor.rewrite", tmem));
+	code_action_kinds.push(object::new_string("source.generate", tmem));
 	code_action_opts.set("codeActionKinds", code_action_kinds);
+	code_action_opts.set("resolveProvider", true);
 	caps.set("codeActionProvider", code_action_opts);
 
 	// CodeLens support (run/test lenses)
 	Object* code_lens_opts = object::new_obj(tmem);
-	code_lens_opts.set("resolveProvider", false);
+	code_lens_opts.set("resolveProvider", true);
 	caps.set("codeLensProvider", code_lens_opts);
 
-	// Inlay hint support
-	caps.set("inlayHintProvider", true);
+	// Inlay hint support (with resolve)
+	Object* inlay_hint_opts = object::new_obj(tmem);
+	inlay_hint_opts.set("resolveProvider", true);
+	caps.set("inlayHintProvider", inlay_hint_opts);
 
 	// Document link support (URLs + import paths)
 	caps.set("documentLinkProvider", true);
+
+	// Linked editing range support (rename-as-you-type for identifiers)
+	caps.set("linkedEditingRangeProvider", true);
 
 	// Call hierarchy support (prepare + incoming/outgoing)
 	caps.set("callHierarchyProvider", true);

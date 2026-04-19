@@ -1715,3 +1715,70 @@ fn void add_import_actions_at_cursor(Object* actions, String uri, Document* doc,
 		}
 	}
 }
+
+// ── codeAction/resolve support ──────────────────────────────────
+//
+// The resolve handler recomputes edits on demand for clients that
+// support lazy resolution. Actions are returned with edits eagerly,
+// but clients can also send codeAction/resolve to recompute.
+
+/**
+ * Handle codeAction/resolve request.
+ * Receives an action with "data" field, computes the full "edit", returns completed action.
+ * Also handles actions that already have edits (returns as-is).
+ */
+fn Object* handle_code_action_resolve(DocumentStore* store, WorkspaceIndex* workspace, Object* action) {
+	// If action already has an edit, return as-is
+	if (try action.get("edit")) {
+		return action;
+	}
+
+	Object* data = action.get("data") ?? null;
+	if (data == null) return action;
+
+	String action_type = data.get_string("action_type") ?? "";
+	String uri = data.get_string("uri") ?? "";
+	Object* range = data.get("range") ?? null;
+
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) return action;
+
+	ParseResult* ast = store.get_ast(uri) ?? null;
+	if (ast == null) return action;
+
+	// Build synthetic params object with range for the builder functions
+	Object* params = object::new_obj(tmem);
+	if (range != null) {
+		params.set("range", range);
+	}
+
+	Object* resolved = null;
+
+	if (action_type == "extract_variable") {
+		resolved = try_extract_variable(uri, doc, ast, params);
+	} else if (action_type == "extract_function") {
+		resolved = try_extract_function(uri, doc, ast, params);
+	} else if (action_type == "convert_expression_body") {
+		resolved = try_convert_fun_to_expression_body(uri, doc, ast, params);
+	} else if (action_type == "generate_toString" || action_type == "generate_equals" || action_type == "generate_hashCode") {
+		Object* temp_actions = object::new_obj(tmem);
+		add_data_class_actions(temp_actions, uri, doc, ast, params);
+		String title = action.get_string("title") ?? "";
+		for (sz i = 0; i < temp_actions.get_len(); i++) {
+			Object* a = temp_actions.get_at(i);
+			String t = a.get_string("title") ?? "";
+			if (t == title) {
+				resolved = a;
+				break;
+			}
+		}
+	}
+
+	if (resolved != null) {
+		if (try edit = resolved.get("edit")) {
+			action.set("edit", edit);
+		}
+	}
+
+	return action;
+}

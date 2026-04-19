@@ -138,3 +138,12 @@ fn Object* build_lens(AstNode* node, String uri, String title, String command_id
 	lens.set("command", command);
 	return lens;
 }
+
+/**
+ * Handle codeLens/resolve request.
+ * Since we always include commands in the initial response, this simply
+ * returns the code lens as-is.
+ */
+fn Object* handle_code_lens_resolve(Object* code_lens) {
+	return code_lens;
+}

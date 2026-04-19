@@ -51,13 +51,14 @@ kls/
       references.c3           # kls::lsp::references - textDocument/references (lexer-based with AST filtering)
       document_symbols.c3     # kls::lsp::document_symbols - textDocument/documentSymbol (hierarchical)
       semantic_tokens.c3      # kls::lsp::semantic_tokens - textDocument/semanticTokens/full (AST-enhanced)
-      code_actions.c3         # kls::lsp::code_actions - textDocument/codeAction (quickfixes, organize imports)
+      code_actions.c3         # kls::lsp::code_actions - textDocument/codeAction + codeAction/resolve (quickfixes, organize imports, refactoring)
       execute_command.c3      # kls::lsp::execute_command - workspace/executeCommand (run main, run test)
       progress.c3             # kls::lsp::progress - $/progress (work done progress reporting)
       type_definition.c3      # kls::lsp::type_definition - textDocument/typeDefinition
-      code_lens.c3            # kls::lsp::code_lens - textDocument/codeLens (Run main, Run Test)
+      declaration.c3          # kls::lsp::declaration - textDocument/declaration (supertype method navigation)
+      code_lens.c3            # kls::lsp::code_lens - textDocument/codeLens + codeLens/resolve (Run main, Run Test)
       formatting.c3           # kls::lsp::formatting - textDocument/formatting (whitespace, indent, blank lines)
-      inlay_hints.c3          # kls::lsp::inlay_hints - textDocument/inlayHint (param names, type hints)
+      inlay_hints.c3          # kls::lsp::inlay_hints - textDocument/inlayHint + inlayHint/resolve (param names, type hints)
       selection_range.c3      # kls::lsp::selection_range - textDocument/selectionRange (AST-based)
       signature_help.c3       # kls::lsp::signature_help - textDocument/signatureHelp (active param index)
       folding_range.c3        # kls::lsp::folding_range - textDocument/foldingRange (AST nodes, imports, comments)
@@ -68,6 +69,7 @@ kls/
       document_highlight.c3   # kls::lsp::document_highlight - textDocument/documentHighlight (read/write)
       call_hierarchy.c3       # kls::lsp::call_hierarchy - textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, callHierarchy/outgoingCalls
       document_link.c3        # kls::lsp::document_link - textDocument/documentLink (URLs in comments, import paths)
+      linked_editing_range.c3 # kls::lsp::linked_editing_range - textDocument/linkedEditingRange (rename-as-you-type)
     kotlin/
       token.c3                # kls::kotlin::token - Token enum, Token/TokenSpan structs
       lexer.c3                # kls::kotlin::lexer - Kotlin source tokenizer (next + next_all modes)
@@ -309,7 +311,7 @@ Content-Length: <byte-count>\r\n
 7. **Find references**: textDocument/references (lexer-based, AST filtering, cross-file)
 8. **Document symbols**: textDocument/documentSymbol (hierarchical)
 9. **Semantic tokens**: textDocument/semanticTokens/full, semanticTokens/full/delta, semanticTokens/range (AST-enhanced)
-10. **Code actions**: textDocument/codeAction (quickfixes, organize imports)
+10. **Code actions**: textDocument/codeAction + codeAction/resolve (quickfixes, organize imports, refactoring)
 11. **Type definition**: textDocument/typeDefinition (jump to type of symbol)
 12. **Code lens**: textDocument/codeLens (Run main, Run Test on @Test)
 13. **Formatting**: textDocument/formatting + textDocument/rangeFormatting + textDocument/onTypeFormatting (whitespace, indent, blank lines, auto-indent)
@@ -326,6 +328,8 @@ Content-Length: <byte-count>\r\n
 24. **Call hierarchy**: textDocument/prepareCallHierarchy, callHierarchy/incomingCalls, callHierarchy/outgoingCalls
 25. **Execute command**: workspace/executeCommand (kotlin.runMain, kotlin.runTest via Gradle/Maven/kotlinc)
 26. **Document link**: textDocument/documentLink (URLs in comments, import paths to workspace files)
+27. **Declaration**: textDocument/declaration (supertype method navigation for overrides)
+28. **Linked editing range**: textDocument/linkedEditingRange (rename-as-you-type for identifiers)
 
 ## Kotlin Grammar Reference
 

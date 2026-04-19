@@ -1035,3 +1035,13 @@ fn uint offset_to_col(String content, uint offset) {
 	}
 	return col;
 }
+
+/**
+ * Handle inlayHint/resolve request.
+ * Adds tooltip detail to an inlay hint. Currently returns the hint as-is
+ * since tooltips are computed eagerly. This handler exists so clients
+ * that send resolve requests don't get errors.
+ */
+fn Object* handle_inlay_hint_resolve(Object* hint) {
+	return hint;
+}
