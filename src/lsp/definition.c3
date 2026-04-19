@@ -117,7 +117,8 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	// ── Import-aware dependency lookup ───────────────────────────
 	// If the file has an explicit import for this name (e.g., import com.example.Foo),
 	// try the dependency index, filtered by the import's package.
-	if (workspace != null) {
+	// Skip for dot members — the dot-member handler already tried deps by receiver type.
+	if (workspace != null && !is_dot_member) {
 		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
 			log::debug("[def] found via explicit import dep lookup");
 			return result;
@@ -125,7 +126,9 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 	}
 
 	// ── Dependency fallback via source JARs ───────────────────────
-	if (workspace != null) {
+	// Skip for dot members — falling through here matches unrelated members
+	// (e.g., TestRecord.timestamp instead of Record.timestamp).
+	if (workspace != null && !is_dot_member) {
 		Object* dep_result = source_nav::find_definition_in_deps(&workspace.dep_index, target_name, is_call);
 		if (dep_result != null) {
 			log::debug("[def] found via dep JAR fallback");
@@ -465,6 +468,12 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 			if (try result = find_member_in_workspace_class(workspace, store, type_name, member_name)) {
 				return result;
 			}
+		}
+
+		// Search dependency index by receiver type name
+		if (workspace != null && workspace.dep_index.initialized) {
+			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name);
+			if (dep_result != null) return dep_result;
 		}
 
 		// Check if this is a known scope function (apply, let, also, run, etc.)
