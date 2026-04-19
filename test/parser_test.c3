@@ -1159,6 +1159,18 @@ fn void parse_expression_body_dot_set_not_accessor() @test {
 
 // ── Function type with receiver ────────────────────────────────────
 
+fn void parse_fun_with_dotted_receiver_type() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun TopologyDescription.Source.sourceToUml(): String = \"\""); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		assert(fun_node.kind == FUN_DECL);
+		assert(fun_node.name == "sourceToUml", "expected 'sourceToUml', got '%s'", fun_node.name);
+		assert(fun_node.extra_text == "TopologyDescription.Source", "expected 'TopologyDescription.Source', got '%s'", fun_node.extra_text);
+		assert(r.error_count == 0, "expected no errors for dotted receiver type, got %d", (int)r.error_count);
+	};
+}
+
 fn void parse_fun_with_receiver_type_param() @test {
 	@pool() {
 		ParseResult* r = do_parse("fun module(block: Module.() -> Unit): Module {}"); defer free_result(r);

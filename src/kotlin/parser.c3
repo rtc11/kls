@@ -737,6 +737,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 			}
 		} else if (self.at(DOT) || self.at(SAFE_CALL)) {
 			// Handle receiver: Receiver.name  or  Receiver?.name
+			// Also handles dotted receivers: com.example.Type.name
 			uint recv_start = first_name.offset;
 			if (self.at(SAFE_CALL)) {
 				// ?. is a single token -- receiver includes the ?
@@ -749,6 +750,24 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 			}
 			if (self.at_identifier()) {
 				Token real_name = self.expect_identifier();
+				// Check for additional dots: Outer.Inner.funName
+				while (self.at(DOT) || self.at(SAFE_CALL)) {
+					// Previous real_name was part of receiver, not the function name
+					if (self.at(SAFE_CALL)) {
+						uint recv_end = self.current.offset;
+						self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start + 1];
+						self.advance(); // consume '?.'
+					} else {
+						uint recv_end = self.current.offset;
+						self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start];
+						self.advance(); // consume '.'
+					}
+					if (self.at_identifier()) {
+						real_name = self.expect_identifier();
+					} else {
+						break;
+					}
+				}
 				self.node_set_name(idx, real_name);
 			}
 		} else {
