@@ -149,10 +149,10 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			self.workspace.scan_workspace();
 
 			progress::report("kls-indexing", "Indexing dependencies...", 60);
-			self.workspace.dep_index.index_classpath(&self.workspace.classpath);
+			self.workspace.dep_index.index_classpath(&self.workspace.classpath, "kls-indexing", 60, 80);
 
 			progress::report("kls-indexing", "Indexing JDK...", 80);
-			jdk_index::index_jdk(&self.workspace.dep_index);
+			jdk_index::index_jdk(&self.workspace.dep_index, "kls-indexing", 80, 90);
 
 			// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
 			if (self.workspace.classpath.jar_count == 0) {
@@ -522,10 +522,10 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 		progress::report("kls-reindex", "Re-indexing dependencies...", 60);
 		workspace.dep_index.free();
 		workspace.dep_index.init();
-		workspace.dep_index.index_classpath(&workspace.classpath);
+		workspace.dep_index.index_classpath(&workspace.classpath, "kls-reindex", 60, 75);
 
 		progress::report("kls-reindex", "Indexing JDK...", 75);
-		jdk_index::index_jdk(&workspace.dep_index);
+		jdk_index::index_jdk(&workspace.dep_index, "kls-reindex", 75, 90);
 
 		// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
 		if (workspace.classpath.jar_count == 0) {

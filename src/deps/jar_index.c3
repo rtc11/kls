@@ -7,6 +7,7 @@ import std::thread;
 import kls::deps::classfile;
 import kls::deps::classpath;
 import kls::log;
+import kls::lsp::progress;
 
 // ── Dependency symbol kinds ────────────────────────────────────────
 
@@ -147,8 +148,12 @@ fn int jar_worker_fn(void* arg) {
  * Index all JARs in the given classpath. Uses parallel threads to
  * speed up JAR parsing — each thread indexes a partition of JARs,
  * symbols are added to the shared index under a mutex.
+ *
+ * If progress_token is non-empty, reports sub-progress between
+ * pct_start and pct_end (e.g., 60→80) as threads complete.
  */
-fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp) {
+fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp,
+		String progress_token = "", int pct_start = 0, int pct_end = 100) {
 	log::info("[kls] Indexing %d JARs for dependency symbols...", (int)cp.jar_count);
 
 	if (cp.jar_count == 0) return;
@@ -159,6 +164,10 @@ fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp) {
 			@pool() {
 				self.index_jar(cp.jars[i].path);
 			};
+			if (progress_token.len > 0 && cp.jar_count > 0) {
+				int pct = pct_start + (int)((i + 1) * (usz)(pct_end - pct_start) / cp.jar_count);
+				progress::report(progress_token, "Indexing dependencies...", pct);
+			}
 		}
 		log::info("[kls] Dependency index: %d symbols from %d JARs", (int)self.symbols.len(), (int)cp.jar_count);
 		return;
@@ -194,9 +203,19 @@ fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp) {
 	// Main thread handles partition 0 (already has temp allocator)
 	jar_worker_body(&args[0]);
 
+	// Report progress as main thread partition completes
+	if (progress_token.len > 0) {
+		int pct = pct_start + (int)((usz)(pct_end - pct_start) / thread_count);
+		progress::report(progress_token, "Indexing dependencies...", pct);
+	}
+
 	// Join worker threads
 	for (usz t = 1; t < thread_count; t++) {
 		threads[t].join()!!;
+		if (progress_token.len > 0) {
+			int pct = pct_start + (int)((t + 1) * (usz)(pct_end - pct_start) / thread_count);
+			progress::report(progress_token, "Indexing dependencies...", pct);
+		}
 	}
 
 	log::info("[kls] Dependency index: %d symbols from %d JARs (%d threads)",

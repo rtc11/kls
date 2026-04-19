@@ -9,7 +9,7 @@ enum LogLevel : int {
 	ERROR,
 }
 
-LogLevel current_level = DEBUG;
+LogLevel current_level = INFO;
 
 fn void set_level(LogLevel level) {
 	current_level = level;

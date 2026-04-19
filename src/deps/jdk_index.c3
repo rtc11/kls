@@ -6,6 +6,7 @@ import std::io::path;
 import std::os::env;
 import std::os::process;
 import kls::log;
+import kls::lsp::progress;
 import std::compression::zip;
 import kls::deps::classfile;
 import kls::deps::jar_index;
@@ -112,12 +113,14 @@ fn String detect_java_home() {
  * enums/annotations (not methods or fields) to keep the symbol count
  * manageable.
  */
-fn void index_jdk(DependencyIndex* dep_index) {
+fn void index_jdk(DependencyIndex* dep_index, String progress_token = "", int pct_start = 0, int pct_end = 100) {
 	String java_home = detect_java_home();
 	if (java_home.len == 0) return;
 	defer mem::free(java_home.ptr);
 
 	usz total_before = dep_index.symbols.len();
+	usz mod_count = JDK_MODULES.len;
+	usz mod_idx = 0;
 
 	foreach (mod_name : JDK_MODULES) {
 		@pool() {
@@ -134,6 +137,11 @@ fn void index_jdk(DependencyIndex* dep_index) {
 				log::debug("[kls]   JDK module not found: %s", mod_name);
 			}
 		};
+		mod_idx++;
+		if (progress_token.len > 0) {
+			int pct = pct_start + (int)(mod_idx * (usz)(pct_end - pct_start) / mod_count);
+			progress::report(progress_token, "Indexing JDK...", pct);
+		}
 	}
 
 	usz total_after = dep_index.symbols.len();
