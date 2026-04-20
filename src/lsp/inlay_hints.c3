@@ -412,8 +412,104 @@ fn String? infer_type_from_initializer(ParseResult* pr, TypeInfo* ti, uint prop_
 				}
 			}
 
+		case STRING_TEMPLATE_EXPR:
+			return "String";
+
+		case IF_EXPR:
+			// Try to infer from then-branch expression
+			return infer_branch_type(pr, ti, init_expr, content);
+
+		case WHEN_EXPR:
+			// Try to infer from first entry's expression
+			return infer_when_type(pr, ti, init_expr, content);
+
+		case TYPE_CAST_EXPR:
+			// Cast: `x as Foo` → Foo
+			if (init_expr.type_text.len > 0) {
+				return init_expr.type_text;
+			}
+
+		case DOT_EXPR:
+			// Method chain: try TypeInfo on the DOT_EXPR node itself
+			// or resolve the final call's return type
+			return infer_dot_expr_type(pr, ti, ast::node_index(pr, init_expr), init_expr, content);
+
 		default:
 			break;
+	}
+
+	return ast::NOT_FOUND~;
+}
+
+/**
+ * Infer type from an IF_EXPR by looking at the then-branch.
+ */
+fn String? infer_branch_type(ParseResult* pr, TypeInfo* ti, AstNode* if_node, String content) {
+	uint if_idx = ast::node_index(pr, if_node);
+	uint child_order = 0;
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != if_idx) continue;
+		child_order++;
+		// Second child = then branch (first is condition)
+		if (child_order == 2 && ast::is_expression(child.kind)) {
+			return infer_expr_type_string(pr, ti, j, child, content);
+		}
+	}
+	return ast::NOT_FOUND~;
+}
+
+/**
+ * Infer type from a WHEN_EXPR by looking at the first entry's result.
+ */
+fn String? infer_when_type(ParseResult* pr, TypeInfo* ti, AstNode* when_node, String content) {
+	uint when_idx = ast::node_index(pr, when_node);
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != when_idx) continue;
+		if (child.kind != WHEN_ENTRY) continue;
+
+		// Find the last expression child of WHEN_ENTRY (the result body)
+		uint last_expr_idx = pr.node_count;
+		AstNode* last_expr = null;
+		for (uint k = 0; k < pr.node_count; k++) {
+			AstNode* entry_child = &pr.nodes[k];
+			if (entry_child.parent != j) continue;
+			if (ast::is_expression(entry_child.kind)) {
+				last_expr_idx = k;
+				last_expr = entry_child;
+			}
+		}
+		if (last_expr != null) {
+			return infer_expr_type_string(pr, ti, last_expr_idx, last_expr, content);
+		}
+		break; // only check first entry
+	}
+	return ast::NOT_FOUND~;
+}
+
+/**
+ * Infer type from a DOT_EXPR chain.
+ * Tries TypeInfo first, then checks if final segment is a known
+ * stdlib/JDK method with a return type.
+ */
+fn String? infer_dot_expr_type(ParseResult* pr, TypeInfo* ti, uint idx, AstNode* node, String content) {
+	// TypeInfo might have resolved it
+	if (ti != null && ti.has_type[idx]) {
+		TypeRef tr = ti.node_types[idx];
+		if (tr.kind != UNKNOWN) {
+			if (tr.full_text.len > 0) return tr.full_text;
+			if (tr.name.len > 0) return tr.name;
+		}
+	}
+
+	// Check if the DOT_EXPR's right-side name resolves to a known decl
+	if (node.name.len > 0) {
+		if (try decl = definition::find_definition_in_ast(pr, node.name, node.name_offset, false)) {
+			if (decl.type_text.len > 0) return decl.type_text;
+		}
 	}
 
 	return ast::NOT_FOUND~;
@@ -679,6 +775,18 @@ fn String? infer_expr_type_string(ParseResult* pr, TypeInfo* ti, uint idx, AstNo
 
 		case STRING_TEMPLATE_EXPR:
 			return "String";
+
+		case IF_EXPR:
+			return infer_branch_type(pr, ti, node, content);
+
+		case WHEN_EXPR:
+			return infer_when_type(pr, ti, node, content);
+
+		case TYPE_CAST_EXPR:
+			if (node.type_text.len > 0) return node.type_text;
+
+		case DOT_EXPR:
+			return infer_dot_expr_type(pr, ti, idx, node, content);
 
 		default:
 			break;

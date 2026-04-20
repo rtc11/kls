@@ -10,6 +10,8 @@ import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
 import kls::workspace;
+import kls::kotlin::stdlib;
+import kls::kotlin::jdk_symbols;
 import kls::kotlin::symbols;
 import kls::deps::jar_index;
 import kls::deps::source_nav;
@@ -465,13 +467,45 @@ fn Object* build_item_from_dep_symbol(DepSymbol* sym) {
 }
 
 /**
- * Build a minimal TypeHierarchyItem for unresolved types.
- * Uses empty uri and zero ranges since we don't know the location.
+ * Build a TypeHierarchyItem for types not found in workspace/deps.
+ * Tries stdlib and JDK symbol tables for richer metadata before
+ * falling back to a minimal placeholder.
  */
 fn Object* build_unresolved_item(String name) {
 	Object* item = object::new_obj(tmem);
 	item.set("name", name);
-	item.set("kind", 5); // SymbolKind.Class
+
+	int kind = 5; // default: Class
+	String detail = "";
+
+	// Try stdlib
+	if (try sym = stdlib::lookup_by_name(name)) {
+		switch (sym.kind) {
+			case INTERFACE: kind = 11;
+			case OBJECT: kind = 5;
+			default: kind = 5;
+		}
+		detail = sym.package_name;
+	} else {
+		// Try JDK
+		StdlibSymbol*[4] jdk_matches;
+		usz jdk_count = jdk_symbols::lookup_all_by_name(name, &jdk_matches);
+		if (jdk_count > 0) {
+			StdlibSymbol* jdk = jdk_matches[0];
+			switch (jdk.kind) {
+				case INTERFACE: kind = 11;
+				default: kind = 5;
+			}
+			detail = jdk.package_name;
+		}
+	}
+
+	item.set("kind", kind);
+	if (detail.len > 0) {
+		item.set("detail", detail);
+	}
+
+	// Still no source location — use empty URI + zero range
 	item.set("uri", "");
 
 	Object* zero_pos = object::new_obj(tmem);

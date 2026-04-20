@@ -194,15 +194,16 @@ fn void mixed_indent_normalized() @test {
 		store.init();
 		defer store.free();
 
-		// Tab + 2 spaces = 6 columns with tabSize=4, normalized to 6 spaces
+		// Tab + 2 spaces = 6 columns with tabSize=4, but AST-aware formatting
+		// re-indents to depth=1 (inside fun body) = 4 spaces
 		store.open("file:///test.kt", "kotlin", 1, "fun main() {\n\t  val x = 1\n}\n");
 		Object* params = make_params("file:///test.kt", 4, true);
 		Object* result = formatting::handle_formatting(&store, params);
 
 		assert(result != null, "expected edits");
 		String new_text = get_new_text(result);
-		assert(new_text == "fun main() {\n      val x = 1\n}\n",
-			"expected mixed indent normalized to 6 spaces, got '%s'", new_text);
+		assert(new_text == "fun main() {\n    val x = 1\n}\n",
+			"expected AST-aware indent (4 spaces, depth=1), got '%s'", new_text);
 	};
 }
 

@@ -73,9 +73,16 @@ fn Object* handle_formatting(DocumentStore* store, Object* params) {
 		return null;
 	}
 
-	// Format the content
-	String formatted = format_content(content, tab_size, insert_spaces,
-		trim_trailing_whitespace, insert_final_newline, trim_final_newlines);
+	// Try AST-aware formatting first (proper indentation)
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	String formatted;
+	if (pr != null && pr.node_count > 0) {
+		formatted = format_content_with_ast(content, pr, tab_size, insert_spaces,
+			trim_trailing_whitespace, insert_final_newline, trim_final_newlines);
+	} else {
+		formatted = format_content(content, tab_size, insert_spaces,
+			trim_trailing_whitespace, insert_final_newline, trim_final_newlines);
+	}
 
 	// If nothing changed, return empty array (no edits)
 	if (formatted == content) {
@@ -435,6 +442,123 @@ fn String format_range_with_ast(String content, usz range_start, usz range_end,
 	}
 
 	return out.str_view();
+}
+
+// ── AST-aware whole-document formatting ──────────────────────────
+
+/**
+ * Format entire document content using AST-derived indentation.
+ * Combines AST indent computation with whitespace normalization
+ * (trailing ws, blank line collapsing, final newline).
+ */
+fn String format_content_with_ast(String content, ParseResult* ast,
+		int tab_size, bool insert_spaces, bool trim_trailing_whitespace,
+		bool insert_final_newline, bool trim_final_newlines) {
+	DString out;
+	out.tinit();
+
+	usz i = 0;
+	int consecutive_blank_lines = 0;
+
+	while (i < content.len) {
+		usz line_start = i;
+		usz line_end = i;
+		while (line_end < content.len && content[line_end] != '\n') {
+			line_end++;
+		}
+
+		String line_content = content[line_start..line_end - 1];
+		bool has_newline = (line_end < content.len);
+
+		// Trim trailing whitespace
+		String trimmed = line_content;
+		if (trim_trailing_whitespace) {
+			trimmed = trim_trailing_ws(line_content);
+		}
+
+		// Get non-whitespace content
+		String stripped = strip_leading_ws(trimmed);
+
+		bool is_blank = stripped.len == 0;
+		if (is_blank) {
+			consecutive_blank_lines++;
+		} else {
+			consecutive_blank_lines = 0;
+		}
+
+		// Collapse 3+ consecutive blank lines to 2
+		if (is_blank && consecutive_blank_lines > 2) {
+			i = line_end;
+			if (has_newline) i++;
+			continue;
+		}
+
+		if (is_blank) {
+			// Blank line: no indent
+		} else {
+			// Compute expected indent from AST
+			usz first_nonws_offset = line_start;
+			while (first_nonws_offset < line_end &&
+				(content[first_nonws_offset] == ' ' || content[first_nonws_offset] == '\t')) {
+				first_nonws_offset++;
+			}
+
+			int depth = compute_indent_depth(ast, first_nonws_offset);
+
+			// Closing braces/brackets reduce depth by 1
+			if (stripped.len > 0 && (stripped[0] == '}' || stripped[0] == ')')) {
+				if (depth > 0) depth--;
+			}
+
+			build_indent(&out, depth, tab_size, insert_spaces);
+			out.append(stripped);
+		}
+
+		if (has_newline) {
+			out.append_char('\n');
+		}
+
+		i = line_end;
+		if (has_newline) i++;
+		if (!has_newline) break;
+	}
+
+	String result = out.str_view();
+
+	// Trim trailing blank lines
+	if (trim_final_newlines && result.len > 0) {
+		usz end = result.len;
+		usz last_content = end;
+		while (last_content > 0) {
+			char c = result[last_content - 1];
+			if (c != '\n' && c != ' ' && c != '\t' && c != '\r') {
+				break;
+			}
+			last_content--;
+		}
+		if (last_content < end) {
+			DString trimmed_result;
+			trimmed_result.tinit();
+			if (last_content > 0) {
+				trimmed_result.append(result[:last_content]);
+			}
+			if (insert_final_newline) {
+				trimmed_result.append_char('\n');
+			}
+			return trimmed_result.str_view();
+		}
+	}
+
+	// Ensure final newline
+	if (insert_final_newline && result.len > 0 && result[result.len - 1] != '\n') {
+		DString with_nl;
+		with_nl.tinit();
+		with_nl.append(result);
+		with_nl.append_char('\n');
+		return with_nl.str_view();
+	}
+
+	return result;
 }
 
 /**
