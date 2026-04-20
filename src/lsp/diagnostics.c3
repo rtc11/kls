@@ -295,8 +295,16 @@ fn bool is_name_in_scope(ParseResult* ast, String name, uint name_offset) {
 		for (uint i = 0; i < ast.node_count; i++) {
 			AstNode* n = &ast.nodes[i];
 			if (n.parent != current) continue;
-			if (n.name != name) continue;
-			if (is_definition_target(n.kind)) return true;
+			if (n.name == name && is_definition_target(n.kind)) return true;
+			// Check inside destructuring declarations: val (a, b) = ...
+			// Child PROPERTY_DECLs are parented to the "(destructuring)" node, not the scope
+			if (n.kind == PROPERTY_DECL && n.name == "(destructuring)") {
+				for (uint j = 0; j < ast.node_count; j++) {
+					AstNode* child = &ast.nodes[j];
+					if (child.parent != i) continue;
+					if (child.name == name && is_definition_target(child.kind)) return true;
+				}
+			}
 		}
 
 		// At FILE level, also check import simple names

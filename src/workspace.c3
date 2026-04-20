@@ -528,7 +528,9 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
  */
 fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 	WorkspaceFile* wf = self.files.get_ref(uri) ?? null;
-	if (wf == null) return;
+	if (wf == null) {
+		return;
+	}
 
 	usz start = wf.symbol_start;
 	usz count = wf.symbol_count;
@@ -600,11 +602,18 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 		sym.supertype_count = 0;
 	}
 
-	// Free file entry strings
-	if (wf.uri.len > 0) mem::free(wf.uri.ptr);
-	if (wf.package_name.len > 0) mem::free(wf.package_name.ptr);
-	if (wf.module_name.len > 0) mem::free(wf.module_name.ptr);
+	// Remove file entry from map BEFORE freeing strings to avoid use-after-free
+	// (the HashMap key references wf.uri which we're about to free).
+	// Copy the strings we need to free since wf pointer becomes invalid after remove.
+	String wf_uri = wf.uri;
+	String wf_pkg = wf.package_name;
+	String wf_mod = wf.module_name;
 	self.files.remove(uri);
+
+	// Free file entry strings (after removal so HashMap doesn't reference freed memory)
+	if (wf_uri.len > 0) mem::free(wf_uri.ptr);
+	if (wf_pkg.len > 0) mem::free(wf_pkg.ptr);
+	if (wf_mod.len > 0) mem::free(wf_mod.ptr);
 
 	// #11: Compact the symbols list by shifting remaining symbols down
 	usz remove_end = start + count;
@@ -623,12 +632,10 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 
 	// Update symbol_start in all WorkspaceFile entries that came after the removed range
 	@pool() {
-		foreach (&entry : self.files.tvalues()) {
-			if (entry.symbol_start > start) {
-				if (entry.symbol_start >= shift) {
+		foreach (key : self.files.tkeys()) {
+			if (try entry = self.files.get_ref(key)) {
+				if (entry.symbol_start >= remove_end) {
 					entry.symbol_start -= shift;
-				} else {
-					entry.symbol_start = 0;
 				}
 			}
 		}

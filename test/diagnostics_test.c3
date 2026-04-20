@@ -1249,6 +1249,30 @@ fn void destructuring_decl_not_flagged_unused() @test {
 	};
 }
 
+fn void destructuring_vars_not_unresolved() @test {
+	@pool() {
+		Object* result = build_diagnostics_with_workspace(
+`fun main() {
+    val (action, perioder) = when (true) {
+        true -> "DELETE" to listOf(1)
+        false -> "CREATE" to listOf(2)
+    }
+    println(action)
+    println(perioder)
+}`
+		);
+		assert(result.is_indexable());
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* diag = result.get_at(i);
+			String msg = diag.get_string("message") ?? "";
+			assert(!msg.contains("Unresolved reference: 'action'"),
+				"destructuring var 'action' should not be flagged unresolved, got: %s", msg);
+			assert(!msg.contains("Unresolved reference: 'perioder'"),
+				"destructuring var 'perioder' should not be flagged unresolved, got: %s", msg);
+		}
+	};
+}
+
 // ── Val reassignment tests ────────────────────────────────────────
 
 fn void val_reassignment_detected() @test {
