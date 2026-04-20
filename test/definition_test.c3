@@ -1418,3 +1418,78 @@ fun foo(o: Oppdrag) {}`;
 		}
 	};
 }
+
+// ── Import-aware dot-member fallback (extension functions from deps) ──
+
+fn void definition_dot_member_via_star_import() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add "respond" extension function from ktor (keyed by receiver type)
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"respond", "fun respond(ApplicationCall, Any): Unit",
+			"io.ktor.server.response", "ApplicationCall", "/fake/ktor.jar",
+			DEP_METHOD, null, 0);
+
+		// Code with star import and call.respond()
+		String content =
+			`import io.ktor.server.response.*
+
+			fun handle(call: Any) {
+				call.respond("hello")
+			}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "respond" — find column
+		// Line 3: "\t\t\t\tcall.respond("hello")" — "respond" after "call."
+		Object* params = make_params("file:///test.kt", 3, 9);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// Result will be null since /fake/ktor.jar doesn't exist as source JAR,
+		// but the import-aware dep lookup path is exercised without crashing.
+	};
+}
+
+fn void definition_dot_member_via_explicit_import() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add "respond" extension function
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"respond", "fun respond(ApplicationCall, Any): Unit",
+			"io.ktor.server.response", "ApplicationCall", "/fake/ktor.jar",
+			DEP_METHOD, null, 0);
+
+		// Also add a different "respond" in another package (should NOT match)
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"respond", "fun respond(HttpClient, Any): Unit",
+			"io.ktor.client", "HttpClient", "/fake/ktor-client.jar",
+			DEP_METHOD, null, 0);
+
+		// Code with explicit import
+		String content =
+			`import io.ktor.server.response.respond
+
+			fun handle(call: Any) {
+				call.respond("hello")
+			}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 3, 9);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// Exercised without crashing. Real sources would navigate.
+	};
+}

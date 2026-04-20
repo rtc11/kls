@@ -489,6 +489,12 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					return result;
 				}
 			}
+			// Import-aware dep extension fallback: look up member name in dep
+			// index filtered by file imports (handles e.g. call.respond() from ktor)
+			if (workspace != null && workspace.dep_index.initialized) {
+				Object* import_result = find_dot_member_by_import(&workspace.dep_index, pr, tok.text, current_uri);
+				if (import_result != null) return import_result;
+			}
 			return NOT_DOT_MEMBER~;
 		}
 
@@ -512,6 +518,10 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 		if (workspace != null && workspace.dep_index.initialized) {
 			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr);
 			if (dep_result != null) return dep_result;
+
+			// Import-aware fallback: extension function from dep not keyed by receiver type
+			Object* import_result = find_dot_member_by_import(&workspace.dep_index, pr, member_name, current_uri);
+			if (import_result != null) return import_result;
 		}
 
 		// Check if this is a known scope function (apply, let, also, run, etc.)
@@ -1563,4 +1573,48 @@ fn Object*? find_extension_by_name(WorkspaceIndex* workspace, String member_name
 	}
 
 	return NO_EXTENSION_FOUND~;
+}
+
+/**
+ * Import-aware fallback for dot-member navigation.
+ * When receiver type is unknown or member not found by receiver class,
+ * look up the member name in the dep index and filter by file imports.
+ * Handles extension functions from deps (e.g., call.respond() from ktor).
+ */
+fn Object* find_dot_member_by_import(DependencyIndex* dep_index, ParseResult* pr, String member_name, String current_uri) {
+	if (dep_index == null || !dep_index.initialized) return null;
+
+	ImportMap imports = workspace::build_import_map(pr);
+
+	DepSymbol*[32] matches;
+	usz count = dep_index.lookup_by_name(member_name, &matches);
+	if (count == 0) return null;
+
+	// First pass: prefer explicit import match
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].kind != DEP_METHOD && matches[i].kind != DEP_FIELD) continue;
+		for (usz j = 0; j < imports.import_count; j++) {
+			if (imports.is_star[j]) continue;
+			if (imports.import_names[j] != member_name) continue;
+			String pkg = workspace::get_import_package(imports.import_paths[j]);
+			if (pkg == matches[i].package_name) {
+				Object* result = source_nav::resolve_dep_definition(matches[i]);
+				if (result != null) return result;
+			}
+		}
+	}
+
+	// Second pass: star import match
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].kind != DEP_METHOD && matches[i].kind != DEP_FIELD) continue;
+		for (usz j = 0; j < imports.import_count; j++) {
+			if (!imports.is_star[j]) continue;
+			if (imports.star_packages[j] == matches[i].package_name) {
+				Object* result = source_nav::resolve_dep_definition(matches[i]);
+				if (result != null) return result;
+			}
+		}
+	}
+
+	return null;
 }
