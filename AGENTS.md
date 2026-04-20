@@ -22,9 +22,12 @@ c3c run
 
 # Run tests
 c3c test
+
+# Run as debug adapter
+c3c run -- --dap
 ```
 
-Binary output: `build/kls`. Communicates over **stdin/stdout** using LSP base protocol (Content-Length headers + JSON-RPC 2.0).
+Binary output: `build/kls`. Communicates over **stdin/stdout** using LSP base protocol (Content-Length headers + JSON-RPC 2.0). With `--dap` flag, runs as DAP debug adapter instead.
 
 ## Project Structure
 
@@ -89,6 +92,23 @@ kls/
       javadoc.c3              # kls::deps::javadoc - Javadoc/KDoc extraction from src.zip and -sources.jar
       kotlin_fallback.c3      # kls::deps::kotlin_fallback - System Kotlin install detection as stdlib fallback
       source_nav.c3           # kls::deps::source_nav - Navigate to dep source: extract from -sources.jar
+    dap/
+      server.c3               # kls::dap::server - DapServer struct, dispatch loop, message senders
+      types.c3                # kls::dap::types - DAP protocol types (Breakpoint, StackFrame, Scope, Variable, etc.)
+      lifecycle.c3            # kls::dap::lifecycle - initialize (capabilities), disconnect, terminate
+      launch.c3               # kls::dap::launch - launch request: spawn JVM with JDWP, connect
+      attach.c3               # kls::dap::attach - attach request: connect to existing JDWP agent
+      breakpoints.c3          # kls::dap::breakpoints - setBreakpoints, setExceptionBreakpoints, pending resolution
+      execution.c3            # kls::dap::execution - continue, next, stepIn, stepOut, pause
+      events.c3               # kls::dap::events - JDWP event parsing, JDWP→DAP event translation
+      threads.c3              # kls::dap::threads - threads request via JDWP AllThreads
+      stacktrace.c3           # kls::dap::stacktrace - stackTrace, source path resolution
+      variables.c3            # kls::dap::variables - scopes + variables via JDWP GetValues
+      evaluate.c3             # kls::dap::evaluate - evaluate request (name-only lookups)
+      jdwp/
+        transport.c3          # kls::dap::jdwp::transport - TCP socket, JDWP handshake, framing
+        protocol.c3           # kls::dap::jdwp::protocol - JDWP command sets encoding/decoding
+        ids.c3                # kls::dap::jdwp::ids - JDWP↔DAP ID mappings (threads, frames, variables)
   test/
     lexer_test.c3             # Lexer tokenization tests
     lexer_next_all_test.c3    # Lexer next_all (whitespace/comments) tests
@@ -131,6 +151,12 @@ kls/
     cross_file_hover_test.c3       # Cross-file hover tests
     cross_file_references_test.c3  # Cross-file references tests
     cross_file_definition_test.c3  # Cross-file definition tests
+    dap_lifecycle_test.c3     # DAP lifecycle tests
+    dap_ids_test.c3           # JDWP↔DAP ID mapping tests
+    dap_breakpoints_test.c3   # DAP breakpoints tests
+    dap_launch_test.c3        # Launch arg parsing, port detection tests
+    dap_variables_test.c3     # Variable type mapping tests
+    dap_events_test.c3        # JDWP→DAP event translation tests
   build/                      # Build output (gitignored)
 ```
 
@@ -145,6 +171,8 @@ kls/
 **Dependency Resolution** (`deps/`): Detects Gradle/Maven, resolves classpath JARs + source JARs. Parses `.class` files for symbols. Indexes JDK jmod files. Extracts Javadoc/KDoc from source archives for hover. Source navigation into dep JARs for go-to-definition. Falls back to system Kotlin install when no build system found.
 
 **LSP Handlers** (`lsp/`): Each feature in own file. Cross-file features use workspace index + dep symbols.
+
+**DAP Debug Adapter** (`dap/`): `--dap` mode runs DapServer instead of LSP Server. Same Content-Length framing (reuses json_rpc). Spawns/attaches JVM with JDWP agent. JDWP binary protocol over TCP for breakpoints, stepping, variable inspection. IdManager maps between JDWP 8-byte IDs and DAP integer IDs. Poll loop multiplexes stdin (DAP messages) + JDWP socket (VM events) + process output.
 
 ## C3 Coding Conventions
 
