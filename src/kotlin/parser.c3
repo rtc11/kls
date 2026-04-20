@@ -2173,7 +2173,7 @@ fn void Parser.parse_catch_clause(Parser* self) {
  * Parse return expression: return expr?
  * May have a label: return@label expr
  */
-fn void Parser.parse_return_expr(Parser* self) {
+fn uint Parser.parse_return_expr(Parser* self) {
 	uint idx = self.add_node(RETURN_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'return'
@@ -2200,12 +2200,13 @@ fn void Parser.parse_return_expr(Parser* self) {
 
 	self.adopt_children(idx, children_start);
 	self.node_end(idx);
+	return idx;
 }
 
 /**
  * Parse throw expression: throw expr
  */
-fn void Parser.parse_throw_expr(Parser* self) {
+fn uint Parser.parse_throw_expr(Parser* self) {
 	uint idx = self.add_node(THROW_EXPR);
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'throw'
@@ -2218,6 +2219,7 @@ fn void Parser.parse_throw_expr(Parser* self) {
 
 	self.adopt_children(idx, children_start);
 	self.node_end(idx);
+	return idx;
 }
 
 // ── Break / continue ──────────────────────────────────────────────
@@ -2546,6 +2548,12 @@ fn uint Parser.parse_primary(Parser* self) {
 
 		case KW_TRY:
 			return self.parse_try_as_expr();
+
+		case KW_THROW:
+			return self.parse_throw_expr();
+
+		case KW_RETURN:
+			return self.parse_return_expr();
 
 		default:
 			break;
