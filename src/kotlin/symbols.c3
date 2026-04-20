@@ -22,6 +22,7 @@ struct Symbol {
 	uint col;
 	uint offset;
 	uint len;
+	bool is_private;       // declared with 'private' modifier
 	String[MAX_SUPERTYPES] supertypes;  // supertype names (slices into source)
 	usz supertype_count;
 }
@@ -44,61 +45,74 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 	Lexer lex = lexer::init(content);
 	usz count = 0;
 	int brace_depth = 0;  // track nesting: only top-level fun/val/var are importable
+	bool saw_private = false;  // track private modifier for current declaration
 
 	while (count < out_buf.len) {
 		Token tok = lex.next();
 		if (tok.kind == EOF) break;
 
 		// Track brace depth for nesting awareness
-		if (tok.kind == LCURL) { brace_depth++; continue; }
-		if (tok.kind == RCURL) { if (brace_depth > 0) brace_depth--; continue; }
+		if (tok.kind == LCURL) { brace_depth++; saw_private = false; continue; }
+		if (tok.kind == RCURL) { if (brace_depth > 0) brace_depth--; saw_private = false; continue; }
 
 		switch (tok.kind) {
 			case KW_FUN:
 				// Skip nested functions (local funs, class members -- members
 				// are found via member_cache from the full parser).
-				if (brace_depth > 0) break;
+				if (brace_depth > 0) { saw_private = false; break; }
 				if (try sym = scan_fun_name(&lex)) {
+					sym.is_private = saw_private;
 					out_buf[count] = sym;
 					count++;
 				}
+				saw_private = false;
 
 		case KW_CLASS:
 			if (try sym = scan_simple_name(&lex, SymbolKind.CLASS)) {
 				scan_supertypes(&lex, &sym);
+				sym.is_private = saw_private;
 				out_buf[count] = sym;
 				count++;
 			}
+			saw_private = false;
 
 		case KW_INTERFACE:
 			if (try sym = scan_simple_name(&lex, SymbolKind.INTERFACE)) {
 				scan_supertypes(&lex, &sym);
+				sym.is_private = saw_private;
 				out_buf[count] = sym;
 				count++;
 			}
+			saw_private = false;
 
 		case KW_OBJECT:
 			if (try sym = scan_simple_name(&lex, SymbolKind.OBJECT)) {
 				scan_supertypes(&lex, &sym);
+				sym.is_private = saw_private;
 				out_buf[count] = sym;
 				count++;
 			}
+			saw_private = false;
 
 			case KW_VAL:
 				nextcase;
 			case KW_VAR:
 				// Skip nested properties (locals, class members).
-				if (brace_depth > 0) break;
+				if (brace_depth > 0) { saw_private = false; break; }
 				if (try sym = scan_property_name(&lex)) {
+					sym.is_private = saw_private;
 					out_buf[count] = sym;
 					count++;
 				}
+				saw_private = false;
 
 			case KW_TYPEALIAS:
 				if (try sym = scan_simple_name(&lex, SymbolKind.TYPEALIAS)) {
+					sym.is_private = saw_private;
 					out_buf[count] = sym;
 					count++;
 				}
+				saw_private = false;
 
 			// Modifier keywords: skip and let next iteration handle
 			// the declaration keyword that follows.
@@ -119,6 +133,7 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 			case KW_INNER:
 				nextcase;
 			case KW_PRIVATE:
+				saw_private = true;
 				nextcase;
 			case KW_PROTECTED:
 				nextcase;
@@ -159,6 +174,7 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 				}
 
 			default:
+				saw_private = false;
 				break;
 		}
 	}

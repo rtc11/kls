@@ -24,6 +24,7 @@ struct WorkspaceSymbol {
 	uint line;             // 0-based line
 	uint col;              // 0-based column
 	uint name_len;         // length of name for range building
+	bool is_private;       // declared with 'private' modifier (not importable)
 	String[symbols::MAX_SUPERTYPES] supertypes;  // heap-copied supertype names
 	usz supertype_count;
 }
@@ -470,6 +471,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			.line = buf[i].line,
 			.col = buf[i].col,
 			.name_len = buf[i].len,
+			.is_private = buf[i].is_private,
 			.supertype_count = buf[i].supertype_count,
 		};
 

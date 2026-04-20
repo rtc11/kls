@@ -556,6 +556,8 @@ fn usz find_import_candidates(String name, WorkspaceIndex* workspace,
 		for (usz i = 0; i < indices.len() && count < import_path_buf.len; i++) {
 			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
 			if (sym.package_name.len == 0) continue;
+			// Private symbols are not importable from other files
+			if (sym.is_private) continue;
 
 			DString path;
 			path.tinit();
@@ -1433,12 +1435,45 @@ fn void add_unresolved_reference_diagnostics(Object* diagnostics, String content
 							break;
 						}
 					}
-					// If not resolved by wildcard, it IS unresolved but importable
+					// Also check dep methods (top-level functions from JARs like
+					// assertEquals from kotlin-test) which are not included in
+					// find_import_candidates but may be covered by wildcard imports.
+					if (!resolved) {
+						DepSymbol*[16] dep_method_matches;
+						usz dep_method_count = workspace.dep_index.lookup_by_name(name, &dep_method_matches);
+						for (usz dm = 0; dm < dep_method_count; dm++) {
+							if (dep_method_matches[dm].kind != DEP_METHOD) continue;
+							if (is_covered_by_wildcard_import(ast, dep_method_matches[dm].package_name)) {
+								resolved = true;
+								break;
+							}
+						}
+					}
+			} else {
+				// Not found in stdlib/workspace/dep-class indices.
+				// Check dep methods: top-level functions from JARs (e.g. assertEquals
+				// from kotlin-test) are indexed as DEP_METHOD and skipped above.
+				// If any dep method with this name has a package covered by a
+				// wildcard import, it IS resolved.
+				DepSymbol*[16] dep_method_matches;
+				usz dep_method_count = workspace.dep_index.lookup_by_name(name, &dep_method_matches);
+				if (dep_method_count > 0) {
+					for (usz dm = 0; dm < dep_method_count; dm++) {
+						if (dep_method_matches[dm].kind != DEP_METHOD) continue;
+						if (is_covered_by_wildcard_import(ast, dep_method_matches[dm].package_name)) {
+							resolved = true;
+							break;
+						}
+					}
+					// If no wildcard covers it, still don't flag -- could be
+					// from implicit scope (receiver members, inherited names, etc.)
+					if (!resolved) resolved = true;
 				} else {
 					// Not found in any index -- don't flag it, could be from
 					// implicit scope (receiver members, inherited names, etc.)
 					resolved = true;
 				}
+			}
 			}
 
 			// Cache the result
