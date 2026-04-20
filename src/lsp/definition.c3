@@ -114,6 +114,18 @@ fn Object* handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Ob
 		}
 	}
 
+	// ── Inheritance-aware member lookup ──────────────────────────
+	// If the cursor is inside a class body and the bare call/reference
+	// matches a member of a supertype, resolve it via the class hierarchy.
+	// This handles `createOppdrag110()` called from a class that extends
+	// the class defining that method — without requiring explicit `this.`.
+	if (workspace != null && !is_dot_member) {
+		if (try result = find_inherited_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
+			log::debug("[def] found via inherited member lookup");
+			return result;
+		}
+	}
+
 	// ── Import-aware dependency lookup ───────────────────────────
 	// If the file has an explicit import for this name (e.g., import com.example.Foo),
 	// try the dependency index, filtered by the import's package.
@@ -940,11 +952,78 @@ fn uint find_call_parent_of_lambda_def(ParseResult* pr, uint lambda_idx) {
  * parameter with a receiver function type (e.g., Module.() -> Unit).
  * Searches the same-file AST for the function declaration.
  */
+
+/**
+ * Find the type of a variable by looking at its declaration's type_text in the AST.
+ * Searches from the reference point upward through scopes.
+ */
+fn String find_variable_type_in_ast(ParseResult* pr, uint ref_offset, String var_name) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != PROPERTY_DECL && n.kind != PARAM) continue;
+		if (n.name != var_name) continue;
+		if (n.type_text.len > 0) {
+			// Strip generics and nullable for simple type name
+			String t = n.type_text;
+			for (usz k = 0; k < t.len; k++) {
+				if (t[k] == '<' || t[k] == '?') {
+					return t[:k];
+				}
+			}
+			return t;
+		}
+	}
+	return "";
+}
+
 fn String find_receiver_type_for_call_def(ParseResult* pr, uint call_idx) {
 	AstNode* call = &pr.nodes[call_idx];
 	String callee_name = call.name;
 
 	if (callee_name.len == 0) return "";
+
+	// ── Handle scope functions (apply/run) ────────────────────────
+	// For `receiver.apply { ... }`, the lambda's `this` is the receiver type.
+	// We need to resolve the receiver expression's type from the DOT_EXPR.
+	if (callee_name == "apply" || callee_name == "run") {
+		// The CALL_EXPR for apply is typically a child or sibling of a DOT_EXPR.
+		// Check if there's a DOT_EXPR child whose member is "apply"/"run".
+		for (uint i = 0; i < pr.node_count; i++) {
+			if (pr.nodes[i].parent != call_idx) continue;
+			if (pr.nodes[i].kind != DOT_EXPR) continue;
+
+			// Found DOT_EXPR child — look for receiver (NAME_EXPR or CALL_EXPR)
+			uint dot_idx = i;
+			for (uint j = 0; j < pr.node_count; j++) {
+				if (pr.nodes[j].parent != dot_idx) continue;
+
+				if (pr.nodes[j].kind == NAME_EXPR) {
+					String recv_name = pr.nodes[j].name;
+					// Try to find this variable's type from declarations
+					String var_type = find_variable_type_in_ast(pr, call_idx, recv_name);
+					if (var_type.len > 0) return var_type;
+					// Could be a class name itself
+					if (recv_name.len > 0 && recv_name[0] >= 'A' && recv_name[0] <= 'Z') {
+						return recv_name;
+					}
+					break;
+				}
+
+				if (pr.nodes[j].kind == CALL_EXPR) {
+					String ctor_name = pr.nodes[j].name;
+					if (ctor_name.len > 0 && ctor_name[0] >= 'A' && ctor_name[0] <= 'Z') {
+						return ctor_name;
+					}
+					// Factory method — return type needs deeper resolution
+					// (handled by caller via workspace lookup if we return "")
+					break;
+				}
+				break; // only check first child
+			}
+			break;
+		}
+		return "";
+	}
 
 	// Search all FUN_DECL nodes with matching name
 	for (uint i = 0; i < pr.node_count; i++) {
@@ -1222,4 +1301,87 @@ fn bool uri_filename_matches(String uri, String name) {
 		return stem == name;
 	}
 	return false;
+}
+
+// ── Inheritance-aware member definition lookup ────────────────────
+
+faultdef NOT_INHERITED_MEMBER;
+
+/**
+ * Find a bare call/reference that resolves to a member of a supertype.
+ *
+ * When inside a class body, bare identifiers can refer to inherited members
+ * (via implicit `this`). This function:
+ * 1. Finds the enclosing class/object at the cursor position
+ * 2. Looks up its supertypes (from workspace index)
+ * 3. Searches member_cache for each supertype in the hierarchy
+ *
+ * This avoids false positives because it ONLY matches members of classes
+ * that the enclosing class actually inherits from.
+ */
+fn Object*? find_inherited_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
+		DocumentStore* store, String target_name, uint cursor_offset, String current_uri) {
+	// Find the enclosing class/interface/object containing the cursor
+	String enclosing_class = find_enclosing_class_name(pr, cursor_offset);
+	if (enclosing_class.len == 0) return NOT_INHERITED_MEMBER~;
+
+	log::debug("[def:inherit] enclosing class='%s', looking for '%s'", enclosing_class, target_name);
+
+	// First check: is it a member of the enclosing class itself (cross-file)?
+	// This handles the case where the class is defined in another file.
+	if (try result = find_member_in_workspace_class(workspace, store, enclosing_class, target_name)) {
+		return result;
+	}
+
+	// Get the enclosing class's supertypes from the workspace index
+	if (try indices = workspace.lookup_by_name(enclosing_class)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+				sym.kind != SymbolKind.OBJECT) continue;
+
+			// Search each supertype's members (with depth limit)
+			for (usz s = 0; s < sym.supertype_count; s++) {
+				if (try result = find_member_in_workspace_class_depth(
+						workspace, store, sym.supertypes[s], target_name, 0)) {
+					return result;
+				}
+			}
+		}
+	}
+
+	// Also check supertypes declared in the same-file AST
+	// (the class might have supertypes only visible in the local AST)
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) continue;
+		if (n.name != enclosing_class) continue;
+		if (!(cursor_offset >= n.start_offset && cursor_offset < n.end_offset)) continue;
+
+		// Check supertypes from the AST node's extra_text
+		// The parser stores supertypes as comma-separated in extra_text for class nodes
+		// But we also have them from workspace index — so just check member_cache
+		// by walking child SUPERTYPE_ENTRY nodes if they exist
+		break;
+	}
+
+	return NOT_INHERITED_MEMBER~;
+}
+
+/**
+ * Find the name of the class/interface/object whose body contains the cursor.
+ * Walks the AST to find the innermost class-like scope enclosing the offset.
+ */
+fn String find_enclosing_class_name(ParseResult* pr, uint cursor_offset) {
+	String result = "";
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) continue;
+		if (n.name.len == 0) continue;
+		if (cursor_offset >= n.start_offset && cursor_offset < n.end_offset) {
+			// Deeper (later in array) = more specific
+			result = n.name;
+		}
+	}
+	return result;
 }

@@ -1285,6 +1285,52 @@ fn bool is_member_of_class(ParseResult* ast, String class_name, String member_na
 }
 
 /**
+ * Check if a NAME_EXPR is inside a class body and refers to an inherited member.
+ *
+ * Walks the parent chain to find an enclosing CLASS_DECL/INTERFACE_DECL/OBJECT_DECL,
+ * then checks if the name is a member of any of that class's supertypes via member_cache.
+ */
+fn bool is_inherited_member(ParseResult* ast, uint node_idx, String name, WorkspaceIndex* workspace) {
+	// Walk parent chain to find enclosing class
+	uint current = ast.nodes[node_idx].parent;
+	while (current != ast::NO_PARENT) {
+		AstNode* n = &ast.nodes[current];
+		if ((n.kind == CLASS_DECL || n.kind == INTERFACE_DECL || n.kind == OBJECT_DECL) && n.name.len > 0) {
+			// Found enclosing class — check supertypes
+			String class_name = n.name;
+
+			// Look up the class in workspace to get supertypes
+			if (try indices = workspace.lookup_by_name(class_name)) {
+				for (usz i = 0; i < indices.len(); i++) {
+					WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+					if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
+						sym.kind != SymbolKind.OBJECT) continue;
+
+					for (usz s = 0; s < sym.supertype_count; s++) {
+						if (is_member_of_class(ast, sym.supertypes[s], name, workspace)) {
+							return true;
+						}
+					}
+				}
+			}
+
+			// Also check member_cache directly for this class
+			// (handles case where member is declared in a cross-file partial of the same class)
+			if (try members = workspace.lookup_members(class_name)) {
+				for (usz i = 0; i < members.len(); i++) {
+					MemberDecl* m = &(*members)[i];
+					if (m.name == name) return true;
+				}
+			}
+
+			// Don't break — keep walking outward (nested class might inherit)
+		}
+		current = n.parent;
+	}
+	return false;
+}
+
+/**
  * Check if a NAME_EXPR is inside an extension function/property body and
  * could refer to an implicit `this` member of the receiver type.
  *
@@ -1338,6 +1384,24 @@ fn bool is_receiver_lambda_member(ParseResult* ast, uint node_idx, String name, 
 				if (is_member_of_class(ast, receiver_type, name, workspace)) {
 					return true;
 				}
+			} else {
+				// If the callee is a scope function (apply/run/with) but we
+				// can't resolve the receiver type, be conservative and assume
+				// the name could be a receiver member. This handles chained calls
+				// like `factory.createFoo().apply { member = ... }`.
+				AstNode* call = &ast.nodes[call_idx];
+				String callee = call.name;
+				if (callee.len == 0) {
+					for (uint i = 0; i < ast.node_count; i++) {
+						if (ast.nodes[i].parent == call_idx && ast.nodes[i].kind == NAME_EXPR) {
+							callee = ast.nodes[i].name;
+							break;
+						}
+					}
+				}
+				if (callee == "apply" || callee == "run" || callee == "with") {
+					return true;
+				}
 			}
 		}
 
@@ -1385,6 +1449,9 @@ fn void add_unresolved_reference_diagnostics(Object* diagnostics, String content
 		// member of the receiver type (e.g., `src` inside Module.() -> Unit)
 		// This check is per-occurrence (not cached) because it's position-dependent.
 		if (is_receiver_lambda_member(ast, i, name, workspace)) continue;
+
+		// Skip if inside a class and the name is an inherited member
+		if (workspace != null && is_inherited_member(ast, i, name, workspace)) continue;
 
 		// Check the dedup cache
 		bool already_checked = false;
