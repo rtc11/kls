@@ -22,13 +22,13 @@ fn Object* handle_initialize(Object* args) {
 }
 
 // Handle DAP disconnect request
+// Note: actual disconnect logic (JDWP close, process kill) is in server.c3 dispatch
 fn Object* handle_disconnect(Object* args) {
-	// TODO Phase 2: terminate debuggee if running, close JDWP connection
 	return object::new_obj(tmem);  // empty body = success
 }
 
 // Handle DAP terminate request
+// Note: actual terminate logic (JDWP exit_vm, process kill) is in server.c3 dispatch
 fn Object* handle_terminate(Object* args) {
-	// TODO Phase 2: send JDWP VirtualMachine.Exit to debuggee
 	return object::new_obj(tmem);  // empty body = success
 }

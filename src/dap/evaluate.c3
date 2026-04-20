@@ -8,7 +8,7 @@ import kls::dap::jdwp::ids;
 import kls::dap::variables;
 
 // Handle evaluate request
-// Currently supports simple name lookups only (no expression parsing)
+// Supports "this" and local variable name lookups
 fn Object* handle_evaluate(JdwpConnection* conn, IdManager* id_mgr, Object* args) {
 	Object* body = object::new_obj(tmem);
 
@@ -26,10 +26,8 @@ fn Object* handle_evaluate(JdwpConnection* conn, IdManager* id_mgr, Object* args
 		return evaluate_this(conn, id_mgr, frame_id);
 	}
 
-	// For now, return expression as-is with note about limited evaluation
-	body.set("result", expression);
-	body.set("variablesReference", 0);
-	return body;
+	// Try local variable lookup
+	return evaluate_local(conn, id_mgr, frame_id, expression);
 }
 
 fn Object* evaluate_this(JdwpConnection* conn, IdManager* id_mgr, int dap_frame_id) {
@@ -90,5 +88,132 @@ fn Object* evaluate_this(JdwpConnection* conn, IdManager* id_mgr, int dap_frame_
 		body.set("variablesReference", 0);
 	}
 
+	return body;
+}
+
+// Evaluate a local variable by name in the given frame
+fn Object* evaluate_local(JdwpConnection* conn, IdManager* id_mgr, int dap_frame_id, String name) {
+	Object* body = object::new_obj(tmem);
+
+	FrameRef frame_ref;
+	if (try ref = id_mgr.get_frame(dap_frame_id)) {
+		frame_ref = ref;
+	} else {
+		body.set("result", "<no frame>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	// Get variable table for this method
+	JdwpReply vt_reply;
+	if (try r = protocol::get_variable_table(conn, frame_ref.class_id, frame_ref.method_id)) {
+		vt_reply = r;
+	} else {
+		body.set("result", "<cannot read variables>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	if (vt_reply.error_code != 0 || vt_reply.data.len < 8) {
+		body.set("result", "<variable table unavailable>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	// Parse variable table: skip argCnt (4 bytes), read slot count
+	usz pos = 4;
+	int slot_count = transport::get_int_be(vt_reply.data, pos); pos += 4;
+
+	// Search for matching variable name
+	int target_slot = -1;
+	char target_tag = 0;
+	for (int i = 0; i < slot_count; i++) {
+		if (pos + 8 > vt_reply.data.len) break;
+		pos += 8; // skip codeIndex (long)
+
+		// Name
+		if (pos + 4 > vt_reply.data.len) break;
+		int name_len = transport::get_int_be(vt_reply.data, pos); pos += 4;
+		String var_name = "";
+		if (name_len > 0 && pos + (usz)name_len <= vt_reply.data.len) {
+			var_name = (String)vt_reply.data[pos:name_len];
+		}
+		pos += (usz)name_len;
+
+		// Signature
+		if (pos + 4 > vt_reply.data.len) break;
+		int sig_len = transport::get_int_be(vt_reply.data, pos); pos += 4;
+		String sig = "";
+		if (sig_len > 0 && pos + (usz)sig_len <= vt_reply.data.len) {
+			sig = (String)vt_reply.data[pos:sig_len];
+		}
+		pos += (usz)sig_len;
+
+		// Length + slot
+		if (pos + 8 > vt_reply.data.len) break;
+		pos += 4; // skip length
+		int slot = transport::get_int_be(vt_reply.data, pos); pos += 4;
+
+		if (var_name == name) {
+			target_slot = slot;
+			target_tag = variables::sig_to_tag(sig);
+			break;
+		}
+	}
+
+	if (target_slot < 0) {
+		body.set("result", "<not found>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	// Read the value from the frame
+	int[1] slots = { target_slot };
+	char[1] tag_arr = { target_tag };
+	JdwpReply val_reply;
+	if (try r = protocol::get_frame_values(conn, frame_ref.thread_id, frame_ref.frame_id, slots[..], tag_arr[..])) {
+		val_reply = r;
+	} else {
+		body.set("result", "<read error>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	if (val_reply.error_code != 0 || val_reply.data.len < 5) {
+		body.set("result", "<unavailable>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	// Parse: count (4) + tag (1) + value
+	usz vpos = 4;
+	char val_tag = val_reply.data[vpos]; vpos++;
+	int val_size = variables::tag_value_size(val_tag);
+
+	if (vpos + (usz)val_size > val_reply.data.len) {
+		body.set("result", "<truncated>");
+		body.set("variablesReference", 0);
+		return body;
+	}
+
+	String val_str = variables::format_tagged_value(conn, val_tag, val_reply.data, vpos);
+
+	int child_ref = 0;
+	if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
+		long obj_id = transport::get_long_be(val_reply.data, vpos);
+		if (obj_id != 0) {
+			VarRef var_ref;
+			var_ref.thread_id = frame_ref.thread_id;
+			var_ref.frame_id = frame_ref.frame_id;
+			var_ref.scope = ScopeKind.THIS_OBJECT;
+			var_ref.object_id = obj_id;
+			var_ref.class_id = 0;
+			var_ref.method_id = 0;
+			child_ref = id_mgr.register_var_ref(var_ref);
+		}
+	}
+
+	body.set("result", val_str);
+	body.set("variablesReference", child_ref);
 	return body;
 }

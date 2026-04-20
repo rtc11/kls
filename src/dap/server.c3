@@ -275,12 +275,20 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 			self.handle_attach(request_seq, command, args);
 
 		case "disconnect":
+			bool should_terminate = true;
+			if (args != null) {
+				if (try val = args.get_bool("terminateDebuggee")) {
+					should_terminate = val;
+				}
+			}
 			if (self.is_connected) {
-				if (catch excuse = protocol::exit_vm(&self.conn, 0)) {}
+				if (should_terminate) {
+					if (catch excuse = protocol::exit_vm(&self.conn, 0)) {}
+				}
 				self.conn.close();
 				self.is_connected = false;
 			}
-			if (self.has_process) {
+			if (self.has_process && should_terminate) {
 				(void)self.proc.destroy();
 				self.has_process = false;
 			}
@@ -292,6 +300,10 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 				if (catch excuse = protocol::exit_vm(&self.conn, 1)) {}
 				self.conn.close();
 				self.is_connected = false;
+			}
+			if (self.has_process) {
+				(void)self.proc.destroy();
+				self.has_process = false;
 			}
 			self.send_response(request_seq, command, object::new_obj(tmem));
 			self.send_event("terminated", null);
