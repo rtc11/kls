@@ -898,8 +898,8 @@ fn void check_workspace_arg_mismatch(Object* diagnostics, ParseResult* ast, Type
 	};
 
 	if (best_match == null) return;
-	// Multiple candidates with different param counts = ambiguous, skip
-	if (candidate_count > 1 && best_distance > 0) return;
+	// Multiple candidates = ambiguous without scope/import awareness, skip
+	if (candidate_count > 1) return;
 
 	// Check each arg against corresponding param of best match
 	usz check_count = arg_indices.len < best_match.param_count ? arg_indices.len : best_match.param_count;
