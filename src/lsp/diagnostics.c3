@@ -868,53 +868,73 @@ fn uint find_function_decl(ParseResult* ast, String name, usz arg_count) {
 /**
  * Check argument types against workspace member declarations (class methods).
  * Uses member_cache which stores param_types for class member functions.
+ * Selects best overload by param count proximity to avoid false positives
+ * from matching wrong overloads across unrelated classes.
  */
 fn void check_workspace_arg_mismatch(Object* diagnostics, ParseResult* ast, TypeInfo* ti,
 		uint[] arg_indices, String call_name, WorkspaceIndex* workspace) {
-	// Search all member caches for a function with this name
+	// First pass: find best matching overload by param count.
+	// Candidate must have param_count >= arg_count (caller may omit defaults,
+	// but cannot pass more args than params). Pick closest param_count.
+	MemberDecl* best_match = null;
+	usz best_distance = usz.max;
+	usz candidate_count = 0;
+
 	workspace.member_cache.@each(; String key, List{MemberDecl} members) {
 		foreach (&member : members) {
 			if (member.name != call_name) continue;
 			if (member.node_kind != FUN_DECL) continue;
 			if (member.param_count == 0) continue;
+			// Candidate must accept at least as many args as provided
+			if (member.param_count < arg_indices.len) continue;
 
-			// Check each arg against corresponding param
-			usz check_count = arg_indices.len < member.param_count ? arg_indices.len : member.param_count;
-			for (usz p = 0; p < check_count; p++) {
-				uint arg_idx = arg_indices[p];
-				if (!ti.has_type[arg_idx]) continue;
-
-				TypeRef arg_type = ti.node_types[arg_idx];
-				if (arg_type.kind == UNKNOWN) continue;
-
-				String param_type_text = member.param_types[p];
-				if (param_type_text.len == 0) continue;
-
-				TypeRef param_type = types::parse_type_text(param_type_text);
-				if (param_type.kind == UNKNOWN) continue;
-
-				if (!types::is_assignable_to(arg_type, param_type)) {
-					String src_name = types::format_type_for_diagnostic(&arg_type);
-					String tgt_name = types::format_type_for_diagnostic(&param_type);
-					String param_name = member.param_names[p];
-					String msg;
-					if (param_name.len > 0) {
-						msg = string::tformat(
-							"Type mismatch: inferred type is %s, but %s was expected for parameter '%s'",
-							src_name, tgt_name, param_name);
-					} else {
-						msg = string::tformat(
-							"Type mismatch: inferred type is %s, but %s was expected",
-							src_name, tgt_name);
-					}
-					AstNode* arg_node = &ast.nodes[arg_idx];
-					diagnostics.push(make_diagnostic(arg_node.start_line, arg_node.start_col,
-						arg_node.end_line, arg_node.end_col, 1, msg));
-				}
+			candidate_count++;
+			usz distance = member.param_count - arg_indices.len;
+			if (distance < best_distance) {
+				best_distance = distance;
+				best_match = member;
 			}
-			return; // found matching function
 		}
 	};
+
+	if (best_match == null) return;
+	// Multiple candidates with different param counts = ambiguous, skip
+	if (candidate_count > 1 && best_distance > 0) return;
+
+	// Check each arg against corresponding param of best match
+	usz check_count = arg_indices.len < best_match.param_count ? arg_indices.len : best_match.param_count;
+	for (usz p = 0; p < check_count; p++) {
+		uint arg_idx = arg_indices[p];
+		if (!ti.has_type[arg_idx]) continue;
+
+		TypeRef arg_type = ti.node_types[arg_idx];
+		if (arg_type.kind == UNKNOWN) continue;
+
+		String param_type_text = best_match.param_types[p];
+		if (param_type_text.len == 0) continue;
+
+		TypeRef param_type = types::parse_type_text(param_type_text);
+		if (param_type.kind == UNKNOWN) continue;
+
+		if (!types::is_assignable_to(arg_type, param_type)) {
+			String src_name = types::format_type_for_diagnostic(&arg_type);
+			String tgt_name = types::format_type_for_diagnostic(&param_type);
+			String param_name = best_match.param_names[p];
+			String msg;
+			if (param_name.len > 0) {
+				msg = string::tformat(
+					"Type mismatch: inferred type is %s, but %s was expected for parameter '%s'",
+					src_name, tgt_name, param_name);
+			} else {
+				msg = string::tformat(
+					"Type mismatch: inferred type is %s, but %s was expected",
+					src_name, tgt_name);
+			}
+			AstNode* arg_node = &ast.nodes[arg_idx];
+			diagnostics.push(make_diagnostic(arg_node.start_line, arg_node.start_col,
+				arg_node.end_line, arg_node.end_col, 1, msg));
+		}
+	}
 }
 
 // ── Unreachable code diagnostic ───────────────────────────────────

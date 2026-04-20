@@ -2875,6 +2875,11 @@ fn bool is_assignable_to(TypeRef source, TypeRef target) {
 		return !source.nullable;                    // Any accepts non-nullable only
 	}
 
+	// Type parameters (T, V, K, etc.) accept any type — we can't verify
+	// without generic substitution, so be permissive to avoid false positives
+	if (is_type_parameter(target.name)) return true;
+	if (is_type_parameter(source.name)) return true;
+
 	// Numeric literal widening: Kotlin allows integer literals to widen
 	// Int -> Long, Float -> Double, Byte -> Short/Int/Long, Short -> Int/Long
 	if (is_numeric_widening(source.name, target.name)) return true;
