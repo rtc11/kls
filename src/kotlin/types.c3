@@ -1004,6 +1004,12 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 				}
 			}
 		}
+
+		// Dep index: resolve class/interface/enum/object types by import
+		if (g_workspace.dep_index.initialized) {
+			TypeRef dep_result = resolve_dep_name_by_import(&g_workspace.dep_index, pr, node.name);
+			if (dep_result.kind != UNKNOWN) return dep_result;
+		}
 	}
 
 	return TYPE_UNKNOWN;
@@ -2343,20 +2349,108 @@ fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, TypeRef receiver,
 		if (best == null) best = member_matches[i];
 	}
 
-	if (best == null) return TYPE_UNKNOWN;
-
-	// Extract return type from signature
-	String sig = best.signature;
-	if (sig.len == 0) return TYPE_UNKNOWN;
-
-	if (best.kind == DEP_FIELD) {
-		return parse_type_text(sig);
+	if (best == null) {
+		// Walk supertypes to find inherited/extension members
+		if (best_class != null) {
+			for (usz s = 0; s < jar_index::MAX_DEP_SUPERTYPES; s++) {
+				if (best_class.supertypes[s].len == 0) break;
+				TypeRef super_result = resolve_dep_member_in_class(dep_index, best_class.supertypes[s], member_name);
+				if (super_result.kind != UNKNOWN) return super_result;
+			}
+		}
+		return TYPE_UNKNOWN;
 	}
 
-	// Method: find ": " after closing paren
+	return extract_dep_return_type(best);
+}
+
+/**
+ * Look up a member by class_name in dep index and return its type.
+ * Used for supertype walk.
+ */
+fn TypeRef resolve_dep_member_in_class(DependencyIndex* dep_index, String class_name, String member_name) {
+	DepSymbol*[32] matches;
+	usz count = dep_index.lookup_by_name(member_name, &matches);
+
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].class_name != class_name) continue;
+		if (matches[i].kind != DEP_METHOD && matches[i].kind != DEP_FIELD) continue;
+		return extract_dep_return_type(matches[i]);
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Extract return type from a DepSymbol's Kotlin-style signature.
+ * Methods: "fun name(Int, String): ReturnType" -> parse ReturnType
+ * Fields: "val name: Type" -> parse Type
+ */
+fn TypeRef extract_dep_return_type(DepSymbol* sym) {
+	String sig = sym.signature;
+	if (sig.len == 0) return TYPE_UNKNOWN;
+
+	// Both methods and fields use ": Type" format:
+	// Method: "fun name(Int, String): ReturnType"
+	// Field:  "val name: Type" / "var name: Type"
+	// Find last ": " to extract the type
+	usz last_colon = 0;
+	bool found = false;
 	for (usz j = 0; j + 1 < sig.len; j++) {
 		if (sig[j] == ':' && sig[j + 1] == ' ') {
-			return parse_type_text(sig[j + 2..]);
+			last_colon = j;
+			found = true;
+		}
+	}
+	if (found) {
+		return parse_type_text(sig[last_colon + 2..]);
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Resolve a name to a dep type by matching against file imports.
+ * Handles class/interface/enum/object names imported explicitly or via star.
+ * Also handles top-level functions (returns their return type).
+ */
+fn TypeRef resolve_dep_name_by_import(DependencyIndex* dep_index, ParseResult* pr, String name) {
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(name, &matches);
+	if (count == 0) return TYPE_UNKNOWN;
+
+	ImportMap imports = workspace::build_import_map(pr);
+
+	// Check explicit imports first
+	for (usz i = 0; i < count; i++) {
+		for (usz j = 0; j < imports.import_count; j++) {
+			if (imports.is_star[j]) continue;
+			if (imports.import_names[j] != name) continue;
+			String pkg = workspace::get_import_package(imports.import_paths[j]);
+			if (pkg != matches[i].package_name) continue;
+
+			if (matches[i].kind == DEP_CLASS || matches[i].kind == DEP_INTERFACE ||
+				matches[i].kind == DEP_ENUM || matches[i].kind == DEP_OBJECT) {
+				return { .kind = SIMPLE, .name = name };
+			}
+			if (matches[i].kind == DEP_METHOD) {
+				return extract_dep_return_type(matches[i]);
+			}
+		}
+	}
+
+	// Check star imports
+	for (usz i = 0; i < count; i++) {
+		for (usz j = 0; j < imports.import_count; j++) {
+			if (!imports.is_star[j]) continue;
+			if (imports.star_packages[j] != matches[i].package_name) continue;
+
+			if (matches[i].kind == DEP_CLASS || matches[i].kind == DEP_INTERFACE ||
+				matches[i].kind == DEP_ENUM || matches[i].kind == DEP_OBJECT) {
+				return { .kind = SIMPLE, .name = name };
+			}
+			if (matches[i].kind == DEP_METHOD) {
+				return extract_dep_return_type(matches[i]);
+			}
 		}
 	}
 
