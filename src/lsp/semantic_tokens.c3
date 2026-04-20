@@ -726,6 +726,7 @@ fn int map_token_type(TokenKind kind) {
 		case ARROW:        return TT_OPERATOR;
 		case DOUBLE_ARROW: return TT_OPERATOR;
 		case RANGE:        return TT_OPERATOR;
+		case RANGE_UNTIL:  return TT_OPERATOR;
 		case COLONCOLON:   return TT_OPERATOR;
 		case HASH:         return TT_OPERATOR;
 		case AT:           return TT_OPERATOR;

@@ -1246,6 +1246,7 @@ fn String? describe_token(Token tok) {
 		case ELVIS:        return "**?:** (elvis operator)\n\nReturns the left operand if non-null, otherwise the right operand.";
 		case NOT_NULL:     return "**!!** (not-null assertion)\n\nAsserts that a value is non-null, throwing NullPointerException if it is null.";
 		case RANGE:        return "**..** (range operator)\n\nCreates a range from the left to the right operand (inclusive).";
+		case RANGE_UNTIL:  return "**..<** (range-until operator)\n\nCreates a range from the left operand (inclusive) to the right operand (exclusive).";
 		case COLONCOLON:   return "**::** (member reference)\n\nCreates a reference to a function, property, or constructor.";
 		case ARROW:        return "**->** (arrow)\n\nSeparates parameters from the body in a lambda, or conditions from results in a `when` branch.";
 		case DOUBLE_ARROW: return "**=>** (double arrow)\n\nUsed in certain annotation and builder contexts.";

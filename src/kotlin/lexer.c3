@@ -683,7 +683,11 @@ fn Token Lexer.lex_operator(Lexer* self, usz start, uint start_line, uint start_
 
 	switch (c) {
 		case '.':
-			if (self.peek() == '.') { self.advance(); return self.make_token_at(RANGE, start, start_line, start_col); }
+			if (self.peek() == '.') {
+				self.advance();
+				if (self.peek() == '<') { self.advance(); return self.make_token_at(RANGE_UNTIL, start, start_line, start_col); }
+				return self.make_token_at(RANGE, start, start_line, start_col);
+			}
 			return self.make_token_at(DOT, start, start_line, start_col);
 		case ',': return self.make_token_at(COMMA, start, start_line, start_col);
 		case '(': return self.make_token_at(LPAREN, start, start_line, start_col);

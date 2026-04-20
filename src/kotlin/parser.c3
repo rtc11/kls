@@ -2294,6 +2294,7 @@ fn int infix_precedence(TokenKind kind) {
 		case NOT_IS:       return PREC_NAMED_CHECK;
 		case ELVIS:        return PREC_ELVIS;
 		case RANGE:        return PREC_RANGE;
+		case RANGE_UNTIL:  return PREC_RANGE;
 		case ADD:          return PREC_ADDITIVE;
 		case SUB:          return PREC_ADDITIVE;
 		case MULT:         return PREC_MULTIPLICATIVE;

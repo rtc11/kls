@@ -135,6 +135,7 @@ enum TokenKind : int {
 	ARROW,         // ->
 	DOUBLE_ARROW,  // =>
 	RANGE,         // ..
+	RANGE_UNTIL,   // ..<
 	COLONCOLON,    // ::
 	HASH,          // #
 	AT,            // @
