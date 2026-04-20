@@ -283,7 +283,9 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 			}
 			if (self.is_connected) {
 				if (should_terminate) {
-					if (catch excuse = protocol::exit_vm(&self.conn, 0)) {}
+					if (catch excuse = protocol::exit_vm(&self.conn, 0)) {
+						log::debug("[dap] Error during VM exit on disconnect: %s", excuse);
+					}
 				}
 				self.conn.close();
 				self.is_connected = false;
@@ -297,7 +299,9 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 
 		case "terminate":
 			if (self.is_connected) {
-				if (catch excuse = protocol::exit_vm(&self.conn, 1)) {}
+				if (catch excuse = protocol::exit_vm(&self.conn, 1)) {
+					log::debug("[dap] Error during VM exit on terminate: %s", excuse);
+				}
 				self.conn.close();
 				self.is_connected = false;
 			}

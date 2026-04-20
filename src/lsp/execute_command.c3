@@ -236,7 +236,12 @@ fn void run_standalone_main(String root, String uri) {
 	// kotlinc file.kt -include-runtime -d /tmp/kls_run.jar && kotlin -jar /tmp/kls_run.jar
 	DString jar_path;
 	jar_path.tinit();
-	jar_path.appendf("/tmp/kls_run_%d.jar", (int)file_path.len); // simple unique-ish name
+	// Use hash of file path for unique JAR name (avoid collisions from same-length paths)
+	uint path_hash = 5381;
+	foreach (c : file_path) {
+		path_hash = path_hash * 33 + (uint)c;
+	}
+	jar_path.appendf("/tmp/kls_run_%x.jar", path_hash);
 
 	run_command(root, {"kotlinc", file_path, "-include-runtime", "-d", jar_path.str_view()});
 

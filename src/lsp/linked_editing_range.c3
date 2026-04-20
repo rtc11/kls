@@ -6,6 +6,8 @@ import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::lsp::definition;
+import kls::lsp::references;
 
 /**
  * Handle textDocument/linkedEditingRange request.
@@ -38,16 +40,21 @@ fn Object* handle_linked_editing_range(DocumentStore* store, Object* params) {
 
 	String target_name = tok.text;
 
-	// Use AST scope analysis to restrict to same-scope references
+	// Use AST for scope-aware binding resolution
 	ParseResult* pr = store.get_ast(uri) ?? null;
 
-	// Find the scope (enclosing block/function/class) of the cursor token
-	uint cursor_scope = 0; // FILE level default
+	// Resolve cursor's identifier to its declaration
+	uint decl_offset = uint.max;
 	if (pr != null) {
-		cursor_scope = find_enclosing_scope(pr, tok.offset);
+		if (try decl_node = definition::find_definition_in_ast(pr, target_name, tok.offset, false)) {
+			decl_offset = decl_node.name_offset;
+		}
+		if (decl_offset == uint.max && references::is_declaration_name(pr, tok.offset)) {
+			decl_offset = tok.offset;
+		}
 	}
 
-	// Collect all matching IDENTIFIER tokens within the same scope
+	// Collect matching IDENTIFIER tokens that resolve to same declaration
 	Object* ranges = object::new_obj(tmem); // JSON array
 
 	Lexer lex = lexer::init(doc.content);
@@ -57,8 +64,18 @@ fn Object* handle_linked_editing_range(DocumentStore* store, Object* params) {
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
 
-		// If we have AST, restrict to same scope
-		if (pr != null) {
+		// Scope-aware filtering via binding resolution
+		if (pr != null && decl_offset != uint.max) {
+			if (t.offset == decl_offset) {
+				// Declaration itself — include
+			} else if (try candidate = definition::find_definition_in_ast(pr, target_name, t.offset, false)) {
+				if (candidate.name_offset != decl_offset) continue;
+			} else {
+				continue;
+			}
+		} else if (pr != null) {
+			// Fallback: enclosing scope comparison
+			uint cursor_scope = find_enclosing_scope(pr, tok.offset);
 			uint tok_scope = find_enclosing_scope(pr, t.offset);
 			if (tok_scope != cursor_scope) continue;
 		}

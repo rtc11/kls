@@ -3558,20 +3558,42 @@ fn void Parser.parse_property_accessor(Parser* self) {
 
 /**
  * Skip a delegation expression after 'by'.
+ * Handles nested parens, angle brackets, and curly braces for
+ * complex delegation expressions (e.g., lambdas, generic calls).
  */
 fn void Parser.skip_delegation_expression(Parser* self) {
-	// Simple heuristic: skip until comma, '{', or end of type list
-	int depth = 0;
+	int paren_depth = 0;
+	int angle_depth = 0;
+	int curl_depth = 0;
 	while (!self.at_eof()) {
-		if (self.at(LPAREN)) { depth++; self.advance(); continue; }
+		if (self.at(LPAREN)) { paren_depth++; self.advance(); continue; }
 		if (self.at(RPAREN)) {
-			if (depth == 0) return;
-			depth--;
+			if (paren_depth == 0) return;
+			paren_depth--;
 			self.advance();
 			continue;
 		}
-		if (depth == 0) {
-			if (self.at(COMMA) || self.at(LCURL) || self.at(KW_WHERE)) return;
+		if (self.at(LANGLE)) { angle_depth++; self.advance(); continue; }
+		if (self.at(RANGLE)) {
+			if (angle_depth > 0) angle_depth--;
+			self.advance();
+			continue;
+		}
+		if (self.at(LCURL)) {
+			if (paren_depth == 0 && angle_depth == 0 && curl_depth == 0) return;
+			curl_depth++;
+			self.advance();
+			continue;
+		}
+		if (self.at(RCURL)) {
+			if (curl_depth == 0) return;
+			curl_depth--;
+			self.advance();
+			continue;
+		}
+		// At top level (no nesting), comma/where terminates delegation
+		if (paren_depth == 0 && angle_depth == 0 && curl_depth == 0) {
+			if (self.at(COMMA) || self.at(KW_WHERE)) return;
 		}
 		self.advance();
 	}

@@ -333,10 +333,9 @@ fn void add_keyword_completions(Object* items, String prefix) {
 fn void add_identifier_completions(Object* items, String content, String prefix) {
 	if (content.len == 0) return;
 
-	// Collect unique identifiers using a simple array + linear scan for dedup.
-	// For typical file sizes this is fast enough.
-	String[256] seen_buf;
-	usz seen_count = 0;
+	// Collect unique identifiers using a temp HashMap for O(1) dedup.
+	HashMap{String, bool} seen;
+	seen.tinit();
 
 	Lexer lex = lexer::init(content);
 	while (true) {
@@ -353,20 +352,10 @@ fn void add_identifier_completions(Object* items, String content, String prefix)
 		if (prefix.len > 0 && name == prefix) continue;
 
 		// Skip if already seen (dedup)
-		bool already_seen = false;
-		for (usz i = 0; i < seen_count; i++) {
-			if (seen_buf[i] == name) {
-				already_seen = true;
-				break;
-			}
-		}
-		if (already_seen) continue;
+		if (try existing = seen.get(name)) continue;
 
 		// Track as seen
-		if (seen_count < 256) {
-			seen_buf[seen_count] = name;
-			seen_count++;
-		}
+		seen.set(name, true);
 
 		Object* item = object::new_obj(tmem);
 		item.set("label", name);
