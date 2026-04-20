@@ -1067,7 +1067,13 @@ fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx
 	    method_name == "takeIf" || method_name == "takeUnless") {
 		// The CALL_EXPR might be a child of a DOT_EXPR
 		// Look for the DOT_EXPR receiver to get the type
-		return find_call_receiver_type(pr, info, call_idx);
+		TypeRef recv = find_call_receiver_type(pr, info, call_idx);
+		// If the call uses safe-call operator (?.), the lambda only executes
+		// when receiver is non-null, so `it` is the non-nullable type.
+		if (recv.nullable && is_safe_call(pr, call_idx)) {
+			recv.nullable = false;
+		}
+		return recv;
 	}
 
 	// Case 2: Collection HOFs — `it` is the element type T
@@ -1157,6 +1163,26 @@ fn TypeRef find_call_receiver_type(ParseResult* pr, TypeInfo* info, uint call_id
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * Check if a CALL_EXPR uses safe-call operator (?.) on its receiver.
+ * The parser stores extra_text = "?." on DOT_EXPR nodes for safe calls.
+ */
+fn bool is_safe_call(ParseResult* pr, uint call_idx) {
+	// Check if CALL_EXPR has a DOT_EXPR child with extra_text "?."
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind == DOT_EXPR) {
+			return pr.nodes[j].extra_text == "?.";
+		}
+	}
+	// Check if CALL_EXPR's parent is a DOT_EXPR with safe call
+	uint parent = pr.nodes[call_idx].parent;
+	if (parent != ast::NO_PARENT && pr.nodes[parent].kind == DOT_EXPR) {
+		return pr.nodes[parent].extra_text == "?.";
+	}
+	return false;
 }
 
 /**
