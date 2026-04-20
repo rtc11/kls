@@ -622,7 +622,7 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 		// parse-based lookup (handles duplicate class names across files)
 	}
 
-	// Fall back to parsing (cache miss)
+	// Fall back to parsing (cache miss or member not found in cached class)
 	if (try indices = workspace.lookup_by_name(class_name)) {
 		for (usz i = 0; i < indices.len(); i++) {
 			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
@@ -657,6 +657,56 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 			// Not found in direct class — check supertypes
 			for (usz s = 0; s < sym.supertype_count; s++) {
 				if (try result = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1)) {
+					return result;
+				}
+			}
+		}
+	}
+
+	// Last resort: search member_cache for entries where the class_name appears
+	// as a nested class/interface/object member. This handles nested types not
+	// in the workspace name_index (e.g., DocumentedErrors.Async.Utbetaling).
+	if (try all_members = workspace.lookup_members(class_name)) {
+		// Already checked above — try finding other classes with same name
+		// by scanning all member_cache entries for nested class members
+	}
+	// Search all cached member lists for a nested class with this name,
+	// then check if THAT nested class has our target member
+	foreach (&key : workspace.member_cache.tkeys()) {
+		if (try parent_members = workspace.member_cache.get_ref(*key)) {
+			for (usz i = 0; i < parent_members.len(); i++) {
+				MemberDecl* pm = &(*parent_members)[i];
+				if (pm.name != class_name) continue;
+				if (pm.node_kind != CLASS_DECL && pm.node_kind != INTERFACE_DECL && pm.node_kind != OBJECT_DECL) continue;
+				// Found a nested class with this name — check if its members are cached
+				if (try nested_members = workspace.lookup_members(class_name)) {
+					for (usz j = 0; j < nested_members.len(); j++) {
+						MemberDecl* nm = &(*nested_members)[j];
+						if (nm.name != member_name) continue;
+						if (ast::is_declaration(nm.node_kind)) return build_location_from_member(nm);
+						if (nm.node_kind == PARAM && ((nm.mod_flags & ast::MOD_VAR) != 0 || (nm.mod_flags & ast::MOD_FINAL) != 0)) {
+							return build_location_from_member(nm);
+						}
+					}
+				}
+				// Members not cached — parse the file containing this nested class
+				String content;
+				char[] disk_data;
+				if (try doc = store.get(pm.uri)) {
+					content = doc.content;
+				} else {
+					String file_path = workspace::uri_to_path(pm.uri);
+					if (try d = std::io::file::load(tmem, file_path)) {
+						disk_data = d;
+						content = (String)disk_data;
+					} else {
+						continue;
+					}
+				}
+				ParseResult* pr = mem::new(ParseResult);
+				defer mem::free(pr);
+				parser::parse(content, pr);
+				if (try result = find_member_in_class_ast(pr, class_name, member_name, pm.uri)) {
 					return result;
 				}
 			}
@@ -1443,6 +1493,17 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 					break;
 				}
 			}
+			// If not a variable, it might be a class/object reference
+			if (recv_type.kind == UNKNOWN) {
+				recv_type = { .kind = SIMPLE, .name = var_name };
+			}
+		} else if (pr.nodes[j].kind == DOT_EXPR) {
+			// Recursive chain: a.b.c — resolve inner DOT_EXPR type
+			recv_type = resolve_dot_expr_type(pr, ti, workspace, j);
+		} else if (pr.nodes[j].kind == CALL_EXPR) {
+			if (ti.has_type[j]) {
+				recv_type = ti.node_types[j];
+			}
 		}
 		break;
 	}
@@ -1459,7 +1520,7 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 					return types::parse_type_text(m.type_text);
 				}
 				// For constructor-like members (class name = type)
-				if (m.node_kind == CLASS_DECL || m.node_kind == OBJECT_DECL) {
+				if (m.node_kind == CLASS_DECL || m.node_kind == INTERFACE_DECL || m.node_kind == OBJECT_DECL) {
 					return { .kind = SIMPLE, .name = m.name };
 				}
 				break;

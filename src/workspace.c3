@@ -338,6 +338,10 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 				existing.free();
 			}
 			self.member_cache.set(class_name, members);
+
+			// Recursively index nested class-like members
+			self.index_nested_members(pr, i, uri);
+
 			break; // Found the class node, done
 		}
 	}
@@ -411,6 +415,110 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
  */
 fn List{MemberDecl}*? WorkspaceIndex.lookup_members(WorkspaceIndex* self, String class_name) {
 	return self.member_cache.get_ref(class_name);
+}
+
+/**
+ * Recursively index members of nested class-like declarations.
+ * For each direct child that is a CLASS_DECL/INTERFACE_DECL/OBJECT_DECL,
+ * index its members into member_cache (if not already cached).
+ */
+fn void WorkspaceIndex.index_nested_members(WorkspaceIndex* self, ParseResult* pr, uint parent_idx, String uri) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != parent_idx) continue;
+		if (child.kind != CLASS_DECL && child.kind != INTERFACE_DECL && child.kind != OBJECT_DECL) continue;
+		if (child.name.len == 0) continue;
+
+		String nested_name = child.name;
+		// Skip if already cached (don't overwrite — duplicate names handled by parse fallback)
+		if (try existing = self.member_cache.get_ref(nested_name)) {
+			// Still recurse to index sub-nested classes
+			self.index_nested_members(pr, j, uri);
+			continue;
+		}
+
+		// Build member list for this nested class
+		List{MemberDecl} members;
+		members.init(mem);
+
+		for (uint k = 0; k < pr.node_count; k++) {
+			AstNode* m_node = &pr.nodes[k];
+			if (m_node.parent != j) continue;
+			if (m_node.name.len == 0) continue;
+
+			MemberDecl m;
+			bool valid = false;
+
+			switch (m_node.kind) {
+				case FUN_DECL:
+					m = {
+						.name = m_node.name.copy(mem),
+						.type_text = m_node.type_text.len > 0 ? m_node.type_text.copy(mem) : "",
+						.uri = uri.copy(mem),
+						.node_kind = FUN_DECL,
+						.mod_flags = m_node.mod_flags,
+						.line = m_node.name_line,
+						.col = m_node.name_col,
+						.name_len = m_node.name_len,
+						.param_count = 0,
+					};
+					valid = true;
+				case PROPERTY_DECL:
+					m = {
+						.name = m_node.name.copy(mem),
+						.type_text = m_node.type_text.len > 0 ? m_node.type_text.copy(mem) : "",
+						.uri = uri.copy(mem),
+						.node_kind = PROPERTY_DECL,
+						.mod_flags = m_node.mod_flags,
+						.line = m_node.name_line,
+						.col = m_node.name_col,
+						.name_len = m_node.name_len,
+						.param_count = 0,
+					};
+					valid = true;
+				case CLASS_DECL:
+				case INTERFACE_DECL:
+				case OBJECT_DECL:
+					m = {
+						.name = m_node.name.copy(mem),
+						.type_text = "",
+						.uri = uri.copy(mem),
+						.node_kind = m_node.kind,
+						.mod_flags = m_node.mod_flags,
+						.line = m_node.name_line,
+						.col = m_node.name_col,
+						.name_len = m_node.name_len,
+						.param_count = 0,
+					};
+					valid = true;
+				case PARAM:
+					if ((m_node.mod_flags & ast::MOD_VAR) != 0 || (m_node.mod_flags & ast::MOD_FINAL) != 0) {
+						m = {
+							.name = m_node.name.copy(mem),
+							.type_text = m_node.type_text.len > 0 ? m_node.type_text.copy(mem) : "",
+							.uri = uri.copy(mem),
+							.node_kind = PARAM,
+							.mod_flags = m_node.mod_flags,
+							.line = m_node.name_line,
+							.col = m_node.name_col,
+							.name_len = m_node.name_len,
+							.param_count = 0,
+						};
+						valid = true;
+					}
+				default:
+			}
+
+			if (valid) {
+				members.push(m);
+			}
+		}
+
+		self.member_cache.set(nested_name, members);
+
+		// Recurse into this nested class
+		self.index_nested_members(pr, j, uri);
+	}
 }
 
 // ── Set workspace root ─────────────────────────────────────────────
