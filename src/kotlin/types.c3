@@ -1529,6 +1529,24 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			}
 		}
 
+		// Constructor call from dependency: check dep index for class name
+		if (g_workspace.dep_index.initialized) {
+			DepSymbol*[4] dep_matches;
+			usz dep_count = g_workspace.dep_index.lookup_by_name(node.name, &dep_matches);
+			for (usz i = 0; i < dep_count; i++) {
+				if (dep_matches[i].kind == DEP_CLASS || dep_matches[i].kind == DEP_INTERFACE ||
+					dep_matches[i].kind == DEP_ENUM || dep_matches[i].kind == DEP_OBJECT) {
+					return { .kind = SIMPLE, .name = node.name };
+				}
+			}
+		}
+
+		// PascalCase heuristic: if name starts with uppercase and wasn't found
+		// in any index, it's almost certainly a constructor call
+		if (node.name[0] >= 'A' && node.name[0] <= 'Z') {
+			return { .kind = SIMPLE, .name = node.name };
+		}
+
 		// Method call on a receiver: g.greet() — resolve via receiver type + member cache
 		TypeRef receiver_type = find_call_receiver_type(pr, info, idx);
 		if (receiver_type.kind != UNKNOWN && receiver_type.name.len > 0) {
