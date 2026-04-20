@@ -14,6 +14,7 @@ struct Parser {
 	ParseResult* result;
 	String last_annotations;  // set by parse_modifiers, read by declaration parsers
 	bool allow_angle_comparison;  // when true, treat < > as comparison in expressions
+	bool is_script;  // when true, allow top-level statements/expressions (.kts files)
 }
 
 // ── Public entry point ─────────────────────────────────────────────
@@ -22,14 +23,16 @@ struct Parser {
  * Parse a complete Kotlin source file into the given ParseResult.
  * The result's node_count and error_count are reset to 0 before parsing.
  */
-fn void parse(String source, ParseResult* result) {
+fn void parse(String source, ParseResult* result, bool is_script = false) {
 	result.node_count = 0;
 	result.error_count = 0;
+	result.is_script = is_script;
 
 	Parser p = {
 		.source = source,
 		.lexer = lexer::init(source),
 		.result = result,
+		.is_script = is_script,
 	};
 
 	// Prime the parser with the first token
@@ -320,16 +323,36 @@ fn void Parser.parse_file(Parser* self) {
 		self.parse_import_decl();
 	}
 
-	// Top-level declarations
+	// Top-level declarations (and statements/expressions in script mode)
 	while (!self.at_eof()) {
+		// Script mode: if current token doesn't look like a declaration or modifier,
+		// go straight to statement parsing (avoids consuming soft-keyword identifiers as modifiers)
+		if (self.is_script && !is_modifier_keyword(self.current.kind) && !self.at(AT) && !is_declaration_start(self.current.kind)) {
+			if (!self.parse_statement()) {
+				if (!self.at_eof()) {
+					self.add_error("Unexpected token in script");
+					self.advance();
+				}
+			}
+			continue;
+		}
+
 		uint mods = self.parse_modifiers();
 		if (self.at_eof()) break;
 
 		if (!self.parse_declaration(mods)) {
-			// Could not parse a declaration -- skip token and try again
-			if (!self.at_eof()) {
-				self.add_error("Unexpected token at top level");
-				self.advance();
+			if (self.is_script) {
+				// Modifiers consumed but no declaration — try as statement/expression
+				if (!self.at_eof() && !self.parse_expression_statement()) {
+					self.add_error("Unexpected token in script");
+					self.advance();
+				}
+			} else {
+				// Could not parse a declaration -- skip token and try again
+				if (!self.at_eof()) {
+					self.add_error("Unexpected token at top level");
+					self.advance();
+				}
 			}
 		}
 	}

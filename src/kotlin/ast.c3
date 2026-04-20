@@ -169,6 +169,7 @@ struct ParseResult {
 	uint node_count;
 	ParseError[MAX_ERRORS] errors;
 	usz error_count;
+	bool is_script;  // true for .kts files (top-level statements allowed)
 }
 
 // ── AST query helpers ──────────────────────────────────────────────

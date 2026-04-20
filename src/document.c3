@@ -393,7 +393,7 @@ fn ParseResult*? DocumentStore.get_ast(DocumentStore* self, String uri) {
 
 	if (doc.cached_ast == null) {
 		doc.cached_ast = mem::new(ParseResult);
-		parser::parse(doc.content, doc.cached_ast);
+		parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"));
 
 		// Build chunk map for incremental parsing
 		if (doc.cached_chunks == null) {
@@ -424,7 +424,7 @@ fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
 		// Ensure AST is available first
 		if (doc.cached_ast == null) {
 			doc.cached_ast = mem::new(ParseResult);
-			parser::parse(doc.content, doc.cached_ast);
+			parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"));
 		}
 		doc.cached_types = mem::new(TypeInfo);
 		if (self.workspace != null) {
