@@ -53,6 +53,8 @@ struct CpEntry {
 	ushort name_and_type_index;
 	// For NameAndType:
 	ushort descriptor_index;
+	// For Integer:
+	int int_value;
 }
 
 // ── Parsed member (method or field) ────────────────────────────────
@@ -77,6 +79,13 @@ struct ClassInfo {
 	usz method_count;
 	ClassMember[MAX_MEMBERS] fields;
 	usz field_count;
+	// @kotlin.Metadata annotation data (if present)
+	bool has_kotlin_metadata;
+	char[] metadata_d1;        // protobuf-encoded metadata (raw bytes from d1)
+	usz metadata_d1_len;
+	String[256] metadata_d2;   // string table entries
+	usz metadata_d2_len;
+	int metadata_kind;         // k field: 1=Class, 2=File, etc.
 }
 
 // ── Parse errors ───────────────────────────────────────────────────
@@ -126,6 +135,11 @@ fn void? parse_class(char[] data, ClassInfo* info) {
 				pos += (usz)len;
 
 			case CONSTANT_INTEGER:
+				if (pos + 4 <= data.len) {
+					cp[i].int_value = (int)read_u32(data, &pos)!;
+				} else {
+					pos += 4;
+				}
 			case CONSTANT_FLOAT:
 				pos += 4; // skip 4 bytes
 
@@ -225,6 +239,10 @@ fn void? parse_class(char[] data, ClassInfo* info) {
 			}
 		}
 	}
+
+	// ── Class-level attributes (extract @kotlin.Metadata) ──────
+	info.has_kotlin_metadata = false;
+	parse_class_attributes(data, &pos, cp, cp_len, info)!;
 }
 
 // ── Constant pool resolution ───────────────────────────────────────
@@ -250,6 +268,190 @@ fn void? skip_attributes(char[] data, usz* pos) {
 		uint attr_len = read_u32(data, pos)!;
 		if (*pos + (usz)attr_len > data.len) return TRUNCATED~;
 		*pos += (usz)attr_len;
+	}
+}
+
+// ── Class-level attribute parsing (extract @kotlin.Metadata) ───────
+
+fn void? parse_class_attributes(char[] data, usz* pos, CpEntry[] cp, usz cp_len, ClassInfo* info) {
+	if (*pos + 2 > data.len) return;  // no attributes section
+	ushort attr_count = read_u16(data, pos)!;
+
+	for (usz i = 0; i < (usz)attr_count; i++) {
+		ushort name_idx = read_u16(data, pos)!;
+		uint attr_len = read_u32(data, pos)!;
+		usz attr_end = *pos + (usz)attr_len;
+		if (attr_end > data.len) return TRUNCATED~;
+
+		String attr_name = resolve_utf8(cp, cp_len, name_idx) ?? "";
+		if (attr_name == "RuntimeVisibleAnnotations") {
+			parse_annotations(data, pos, attr_end, cp, cp_len, info)!;
+		} else {
+			*pos = attr_end;
+		}
+	}
+}
+
+fn void? parse_annotations(char[] data, usz* pos, usz attr_end, CpEntry[] cp, usz cp_len, ClassInfo* info) {
+	ushort num_annotations = read_u16(data, pos)!;
+
+	for (usz a = 0; a < (usz)num_annotations; a++) {
+		usz ann_start = *pos;
+		ushort type_idx = read_u16(data, pos)!;
+		String type_desc = resolve_utf8(cp, cp_len, type_idx) ?? "";
+		ushort num_pairs = read_u16(data, pos)!;
+
+		if (type_desc == "Lkotlin/Metadata;") {
+			parse_kotlin_metadata_pairs(data, pos, num_pairs, cp, cp_len, info)!;
+		} else {
+			// Skip element-value pairs for other annotations
+			for (usz p = 0; p < (usz)num_pairs; p++) {
+				read_u16(data, pos)!; // element_name_index
+				skip_element_value(data, pos)!;
+			}
+		}
+	}
+}
+
+fn void? parse_kotlin_metadata_pairs(char[] data, usz* pos, ushort num_pairs,
+		CpEntry[] cp, usz cp_len, ClassInfo* info) {
+	for (usz p = 0; p < (usz)num_pairs; p++) {
+		ushort name_idx = read_u16(data, pos)!;
+		String name = resolve_utf8(cp, cp_len, name_idx) ?? "";
+
+		if (name == "k") {
+			// Integer element: tag='I', u2 const_value_index → CONSTANT_INTEGER
+			if (*pos >= data.len) return TRUNCATED~;
+			char tag = data[*pos]; *pos += 1;
+			if (tag == 'I') {
+				ushort val_idx = read_u16(data, pos)!;
+				if ((usz)val_idx < cp_len && cp[val_idx].tag == CONSTANT_INTEGER) {
+					info.metadata_kind = cp[val_idx].int_value;
+				}
+			} else {
+				skip_element_value_after_tag(data, pos, tag)!;
+			}
+		} else if (name == "d1") {
+			read_string_array_element(data, pos, cp, cp_len, info, true)!;
+		} else if (name == "d2") {
+			read_string_array_element(data, pos, cp, cp_len, info, false)!;
+		} else {
+			skip_element_value(data, pos)!;
+		}
+	}
+	info.has_kotlin_metadata = true;
+}
+
+/**
+ * Read an array-of-strings element value for d1 or d2.
+ * For d1: concatenate all strings into metadata_d1 bytes.
+ * For d2: store each string in metadata_d2 array.
+ */
+fn void? read_string_array_element(char[] data, usz* pos, CpEntry[] cp, usz cp_len,
+		ClassInfo* info, bool is_d1) {
+	if (*pos >= data.len) return TRUNCATED~;
+	char tag = data[*pos]; *pos += 1;
+	if (tag != '[') {
+		skip_element_value_after_tag(data, pos, tag)!;
+		return;
+	}
+
+	ushort num_values = read_u16(data, pos)!;
+
+	if (is_d1) {
+		// d1: concatenate all strings into byte array
+		// First pass: calculate total length
+		usz save_pos = *pos;
+		usz total_len = 0;
+		for (usz v = 0; v < (usz)num_values; v++) {
+			if (*pos >= data.len) return TRUNCATED~;
+			char vtag = data[*pos]; *pos += 1;
+			if (vtag == 's') {
+				ushort str_idx = read_u16(data, pos)!;
+				String s = resolve_utf8(cp, cp_len, str_idx) ?? "";
+				total_len += s.len;
+			} else {
+				skip_element_value_after_tag(data, pos, vtag)!;
+			}
+		}
+		// Allocate and second pass: copy bytes
+		char[] buf = mem::talloc_array(char, total_len);
+		*pos = save_pos;
+		usz offset = 0;
+		for (usz v = 0; v < (usz)num_values; v++) {
+			if (*pos >= data.len) return TRUNCATED~;
+			char vtag = data[*pos]; *pos += 1;
+			if (vtag == 's') {
+				ushort str_idx = read_u16(data, pos)!;
+				String s = resolve_utf8(cp, cp_len, str_idx) ?? "";
+				for (usz b = 0; b < s.len; b++) {
+					buf[offset + b] = s[b];
+				}
+				offset += s.len;
+			} else {
+				skip_element_value_after_tag(data, pos, vtag)!;
+			}
+		}
+		info.metadata_d1 = buf;
+		info.metadata_d1_len = total_len;
+	} else {
+		// d2: store individual strings
+		info.metadata_d2_len = 0;
+		for (usz v = 0; v < (usz)num_values; v++) {
+			if (*pos >= data.len) return TRUNCATED~;
+			char vtag = data[*pos]; *pos += 1;
+			if (vtag == 's') {
+				ushort str_idx = read_u16(data, pos)!;
+				String s = resolve_utf8(cp, cp_len, str_idx) ?? "";
+				if (info.metadata_d2_len < 256) {
+					info.metadata_d2[info.metadata_d2_len] = s;
+					info.metadata_d2_len++;
+				}
+			} else {
+				skip_element_value_after_tag(data, pos, vtag)!;
+			}
+		}
+	}
+}
+
+/**
+ * Skip an element_value (reads tag byte first).
+ */
+fn void? skip_element_value(char[] data, usz* pos) {
+	if (*pos >= data.len) return TRUNCATED~;
+	char tag = data[*pos]; *pos += 1;
+	return skip_element_value_after_tag(data, pos, tag);
+}
+
+/**
+ * Skip element_value content after tag byte already consumed.
+ */
+fn void? skip_element_value_after_tag(char[] data, usz* pos, char tag) {
+	switch (tag) {
+		case 'B': nextcase; case 'C': nextcase; case 'D': nextcase;
+		case 'F': nextcase; case 'I': nextcase; case 'J': nextcase;
+		case 'S': nextcase; case 'Z': nextcase; case 's':
+			read_u16(data, pos)!; // const_value_index
+		case 'e':
+			read_u16(data, pos)!; // type_name_index
+			read_u16(data, pos)!; // const_name_index
+		case 'c':
+			read_u16(data, pos)!; // class_info_index
+		case '@':
+			// nested annotation
+			read_u16(data, pos)!; // type_index
+			ushort num_pairs = read_u16(data, pos)!;
+			for (usz p = 0; p < (usz)num_pairs; p++) {
+				read_u16(data, pos)!; // element_name_index
+				skip_element_value(data, pos)!;
+			}
+		case '[':
+			ushort num_values = read_u16(data, pos)!;
+			for (usz v = 0; v < (usz)num_values; v++) {
+				skip_element_value(data, pos)!;
+			}
+		default:
+			break;
 	}
 }
 

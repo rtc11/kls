@@ -6,6 +6,7 @@ import std::compression::zip;
 import std::thread;
 import kls::deps::classfile;
 import kls::deps::classpath;
+import kls::deps::kotlin_metadata;
 import kls::log;
 import kls::lsp::progress;
 
@@ -315,6 +316,19 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 	// Skip classes with empty or weird names
 	if (simple_name.len == 0) return;
 
+	// Try to parse Kotlin metadata for accurate type info
+	KmClass* km = null;
+	bool has_km = false;
+	if (info.has_kotlin_metadata) {
+		km = mem::new(KmClass);
+		has_km = kotlin_metadata::parse_metadata(info, km);
+		if (!has_km) {
+			mem::free(km);
+			km = null;
+		}
+	}
+	defer { if (km != null) mem::free(km); }
+
 	// Add the class/interface itself as a symbol (if public)
 	if ((info.access_flags & classfile::ACC_PUBLIC) != 0) {
 		DepSymbolKind class_kind = DEP_CLASS;
@@ -373,12 +387,22 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			&class_supertypes, class_supertype_count, jar_path_interned: true);
 	}
 
+	// Build metadata function lookup: name_id -> KmFunction index
+	// Used to match JVM methods to their Kotlin metadata counterparts
+	// (We iterate JVM methods as primary, metadata as enrichment)
+
 	// Add public methods as symbols
 	for (usz i = 0; i < info.method_count; i++) {
 		ClassMember* m = &info.methods[i];
 
 		// Skip constructors and class initializers
 		if (m.name == "<init>" || m.name == "<clinit>") continue;
+
+		// Try to find matching metadata function for this method
+		KmFunction* km_fn = null;
+		if (has_km) {
+			km_fn = find_km_function(km, m.name, info.metadata_d2[..], info.metadata_d2_len);
+		}
 
 		// Build method signature
 		DString sig;
@@ -387,21 +411,58 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		bool is_static = (m.access_flags & classfile::ACC_STATIC) != 0;
 
 		sig.appendf("fun ");
-		// For static methods on Kt classes, it's a top-level function
-		if (!is_static && simple_name.len > 0) {
+
+		// If metadata has receiver type, this is an extension function
+		if (km_fn != null && km_fn.has_receiver_type) {
+			String recv_name = kotlin_metadata::resolve_km_type_to_string(
+				&km_fn.receiver_type, km, info.metadata_d2[..], info.metadata_d2_len);
+			if (recv_name.len > 0) {
+				sig.appendf("%s.", recv_name);
+			}
+		} else if (!is_static && simple_name.len > 0) {
+			// For non-static methods on Kt classes, it's a member function
 			sig.appendf("%s.", simple_name);
 		}
+
 		sig.appendf("%s", m.name);
-		classfile::method_descriptor_to_kotlin(m.descriptor, &sig);
+
+		// Use metadata for return type if available
+		if (km_fn != null && km_fn.has_return_type) {
+			// Build param list from metadata
+			sig.appendf("(");
+			for (usz p = 0; p < km_fn.param_count; p++) {
+				if (p > 0) sig.appendf(", ");
+				String pname = kotlin_metadata::resolve_string(
+					km_fn.params[p].name_id, info.metadata_d2[..], info.metadata_d2_len);
+				String ptype = kotlin_metadata::resolve_km_type_to_string(
+					&km_fn.params[p].type, km, info.metadata_d2[..], info.metadata_d2_len);
+				if (pname.len > 0 && ptype.len > 0) {
+					sig.appendf("%s: %s", pname, ptype);
+				} else if (ptype.len > 0) {
+					sig.appendf("%s", ptype);
+				}
+			}
+			sig.appendf("): ");
+			String ret_name = kotlin_metadata::resolve_km_type_to_string(
+				&km_fn.return_type, km, info.metadata_d2[..], info.metadata_d2_len);
+			sig.appendf("%s", ret_name.len > 0 ? ret_name : "Unit");
+		} else {
+			classfile::method_descriptor_to_kotlin(m.descriptor, &sig);
+		}
 
 		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD,
 			null, 0, jar_path_interned: true);
 
-		// For static methods in *Kt facade classes, detect extension functions
-		// and additionally index them under the receiver type name.
-		// Kotlin compiles `fun Iterable<T>.toSet()` as a static method in CollectionsKt
-		// with the receiver as the first parameter.
-		if (is_static && simple_name.len > 2 && simple_name[simple_name.len - 2..] == "Kt") {
+		// For extension functions, also index under receiver type name
+		if (km_fn != null && km_fn.has_receiver_type) {
+			String recv_type_name = kotlin_metadata::resolve_type_name(
+				km, km_fn.receiver_type.class_name_id, info.metadata_d2[..], info.metadata_d2_len);
+			if (recv_type_name.len > 0 && recv_type_name != simple_name) {
+				add_dep_symbol(idx, m.name, sig.str_view(), pkg, recv_type_name, jar_path, DEP_METHOD,
+					null, 0, jar_path_interned: true);
+			}
+		} else if (is_static && simple_name.len > 2 && simple_name[simple_name.len - 2..] == "Kt") {
+			// Fallback: JVM descriptor heuristic for Kt facade classes without metadata
 			String receiver_name = classfile::descriptor_first_param_class(m.descriptor);
 			if (receiver_name.len > 0 && receiver_name != simple_name) {
 				add_dep_symbol(idx, m.name, sig.str_view(), pkg, receiver_name, jar_path, DEP_METHOD,
@@ -410,8 +471,6 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		}
 
 		// Register Kotlin property name for getter/setter methods.
-		// Kotlin compiles `val Foo` as `getFoo()` and `var Foo` as `getFoo()`/`setFoo()`.
-		// Register the property name so lookup("Foo") finds the getter.
 		if (m.name.len > 3 && m.name[..2] == "get" && m.name[3] >= 'A' && m.name[3] <= 'Z') {
 			String prop_name = m.name[3..];
 			DString prop_sig;
@@ -430,13 +489,55 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		DString sig;
 		sig.tinit();
 
+		// Try to find matching metadata property
+		KmProperty* km_prop = null;
+		if (has_km) {
+			km_prop = find_km_property(km, f.name, info.metadata_d2[..], info.metadata_d2_len);
+		}
+
 		bool is_final = (f.access_flags & classfile::ACC_FINAL) != 0;
-		sig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
-		classfile::descriptor_to_kotlin_type(f.descriptor, &sig);
+
+		if (km_prop != null && km_prop.has_return_type) {
+			sig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
+			String type_name = kotlin_metadata::resolve_km_type_to_string(
+				&km_prop.return_type, km, info.metadata_d2[..], info.metadata_d2_len);
+			sig.appendf("%s", type_name.len > 0 ? type_name : "Any");
+		} else {
+			sig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
+			classfile::descriptor_to_kotlin_type(f.descriptor, &sig);
+		}
 
 		add_dep_symbol(idx, f.name, sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD,
 			null, 0, jar_path_interned: true);
 	}
+}
+
+/**
+ * Find a KmFunction in the metadata that matches a JVM method name.
+ * Returns null if no match found.
+ */
+fn KmFunction* find_km_function(KmClass* km, String method_name, String[] d2, usz d2_len) {
+	for (usz i = 0; i < km.function_count; i++) {
+		String fn_name = kotlin_metadata::resolve_string(km.functions[i].name_id, d2, d2_len);
+		if (fn_name == method_name) {
+			return &km.functions[i];
+		}
+	}
+	return null;
+}
+
+/**
+ * Find a KmProperty in the metadata that matches a JVM field name.
+ * Returns null if no match found.
+ */
+fn KmProperty* find_km_property(KmClass* km, String field_name, String[] d2, usz d2_len) {
+	for (usz i = 0; i < km.property_count; i++) {
+		String prop_name = kotlin_metadata::resolve_string(km.properties[i].name_id, d2, d2_len);
+		if (prop_name == field_name) {
+			return &km.properties[i];
+		}
+	}
+	return null;
 }
 
 fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
