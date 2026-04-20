@@ -3,6 +3,7 @@ module kls::server;
 import std::io;
 import std::encoding::json;
 import std::collections::object;
+import std::thread;
 import kls::log;
 import kls::json_rpc;
 import kls::document;
@@ -41,12 +42,30 @@ import kls::deps::jar_index;
 import kls::deps::jdk_index;
 import kls::deps::kotlin_fallback;
 
+// ── Async reindex state ────────────────────────────────────────────
+
+struct ReindexState {
+	Mutex mu;
+	bool pending;           // build file change detected, debounce timer running
+	bool in_progress;       // background thread is working
+	bool complete;          // background thread finished, results ready to swap
+	bool cancel;            // signal background thread to restart debounce
+	Classpath* new_classpath;
+	DependencyIndex* new_dep_index;
+	String root_path;       // copy for background thread
+	Classpath* old_classpath;  // for incremental diff
+	DependencyIndex* old_dep_index;  // for incremental copy
+}
+
+const int REINDEX_DEBOUNCE_MS = 2000;
+
 struct Server {
 	bool is_running;
 	bool is_initialized;
 	bool is_shutdown;
 	DocumentStore documents;
 	WorkspaceIndex workspace;
+	ReindexState reindex;
 }
 
 fn void Server.init(Server* self) {
@@ -55,6 +74,18 @@ fn void Server.init(Server* self) {
 	self.is_shutdown = false;
 	self.documents.init();
 	self.workspace.init();
+	if (catch excuse = self.reindex.mu.init()) {
+		log::err("[kls] Failed to init reindex mutex: %s", excuse);
+	}
+	self.reindex.pending = false;
+	self.reindex.in_progress = false;
+	self.reindex.complete = false;
+	self.reindex.cancel = false;
+	self.reindex.new_classpath = null;
+	self.reindex.new_dep_index = null;
+	self.reindex.old_classpath = null;
+	self.reindex.old_dep_index = null;
+	self.reindex.root_path = "";
 }
 
 fn void Server.run(Server* self) {
@@ -72,6 +103,9 @@ fn void Server.run(Server* self) {
 					log::err("[kls] Error processing message: %s", excuse);
 				}
 			}
+
+			// Check if async reindex completed
+			self.check_reindex_complete();
 		};
 	}
 }
@@ -515,7 +549,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "workspace/didChangeWatchedFiles":
 			if (params != null) {
-				handle_did_change_watched_files(&self.workspace, params);
+				handle_did_change_watched_files(self, params);
 			}
 
 		case "workspace/symbol":
@@ -567,10 +601,11 @@ const int FILE_CHANGE_CREATED = 1;
 const int FILE_CHANGE_CHANGED = 2;
 const int FILE_CHANGE_DELETED = 3;
 
-fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* params) {
+fn void handle_did_change_watched_files(Server* server, Object* params) {
 	Object* changes = params.get("changes") ?? null;
 	if (changes == null) return;
 
+	WorkspaceIndex* workspace = &server.workspace;
 	bool build_file_changed = false;
 
 	for (sz i = 0; i < changes.get_len(); i++) {
@@ -606,37 +641,189 @@ fn void handle_did_change_watched_files(WorkspaceIndex* workspace, Object* param
 		}
 	}
 
-	// Re-resolve classpath if any build file changed
+	// Schedule async reindex if any build file changed
 	if (build_file_changed) {
-		log::info("[kls] Build file changed, re-resolving classpath...");
-		progress::create("kls-reindex");
-		progress::begin("kls-reindex", "Kotlin Language Server", 0);
-
-		progress::report("kls-reindex", "Re-resolving classpath...", 20);
-		workspace.classpath.free();
-		workspace.classpath.init();
-		classpath::resolve_classpath(&workspace.classpath, workspace.root_path, "kls-reindex");
-
-		// Re-scan workspace with updated module source roots
-		progress::report("kls-reindex", "Re-scanning workspace...", 40);
-		workspace.scan_workspace();
-
-		progress::report("kls-reindex", "Re-indexing dependencies...", 60);
-		workspace.dep_index.free();
-		workspace.dep_index.init();
-		workspace.dep_index.index_classpath(&workspace.classpath, "kls-reindex", 60, 75);
-
-		progress::report("kls-reindex", "Indexing JDK...", 75);
-		jdk_index::index_jdk(&workspace.dep_index, "kls-reindex", 75, 90);
-
-		// Fallback: if no build system resolved any JARs, try system Kotlin stdlib
-		if (workspace.classpath.jar_count == 0) {
-			progress::report("kls-reindex", "Indexing Kotlin stdlib...", 90);
-			kotlin_fallback::index_system_kotlin(&workspace.dep_index);
-		}
-
-		progress::end("kls-reindex", "Ready");
+		schedule_reindex(server);
 	}
+}
+
+// ── Async reindex with debounce ────────────────────────────────────
+
+fn void schedule_reindex(Server* server) {
+	server.reindex.mu.lock();
+	defer server.reindex.mu.unlock();
+
+	if (server.reindex.in_progress) {
+		// Already reindexing — signal restart (debounce reset)
+		server.reindex.cancel = true;
+		log::info("[kls] Build file changed again, will restart reindex after current debounce");
+		return;
+	}
+
+	if (server.reindex.pending) {
+		// Debounce thread already sleeping — signal it to restart timer
+		server.reindex.cancel = true;
+		log::info("[kls] Build file changed again, resetting debounce timer");
+		return;
+	}
+
+	server.reindex.pending = true;
+	server.reindex.cancel = false;
+	server.reindex.root_path = server.workspace.root_path;
+
+	// Spawn debounce + reindex thread
+	Thread thr;
+	if (catch excuse = thr.create(&reindex_thread_fn, server)) {
+		log::err("[kls] Failed to spawn reindex thread: %s", excuse);
+		server.reindex.pending = false;
+		return;
+	}
+	thr.detach()!!;
+	log::info("[kls] Scheduled async reindex (debounce %d ms)", REINDEX_DEBOUNCE_MS);
+}
+
+fn int reindex_thread_fn(void* arg) {
+	@pool_init(mem, 1024 * 256) {
+		reindex_thread_body((Server*)arg);
+	};
+	return 0;
+}
+
+fn void reindex_thread_body(Server* server) {
+	ReindexState* state = &server.reindex;
+
+	// Debounce loop: sleep, then check if cancelled (more changes arrived)
+	while (true) {
+		thread::sleep_ms(REINDEX_DEBOUNCE_MS);
+
+		state.mu.lock();
+		if (state.cancel) {
+			// More changes arrived during debounce — restart timer
+			state.cancel = false;
+			state.mu.unlock();
+			log::debug("[kls] Reindex debounce reset, sleeping again");
+			continue;
+		}
+		state.in_progress = true;
+		state.pending = false;
+		state.mu.unlock();
+		break;
+	}
+
+	log::info("[kls] Async reindex starting...");
+
+	// Resolve new classpath
+	Classpath* new_cp = mem::new(Classpath);
+	new_cp.init();
+	classpath::resolve_classpath(new_cp, state.root_path, "");
+
+	// Build new dep index with incremental diff
+	DependencyIndex* new_idx = mem::new(DependencyIndex);
+	new_idx.init();
+
+	// Compute which JARs are new vs unchanged
+	DependencyIndex* old_idx = &server.workspace.dep_index;
+	Classpath* old_cp = &server.workspace.classpath;
+
+	// Build set of old JAR paths for fast lookup
+	usz copied_count = 0;
+	usz new_jar_count = 0;
+
+	for (usz i = 0; i < new_cp.jar_count; i++) {
+		String new_path = new_cp.jars[i].path;
+		bool found_in_old = false;
+		for (usz j = 0; j < old_cp.jar_count; j++) {
+			if (old_cp.jars[j].path == new_path) {
+				found_in_old = true;
+				break;
+			}
+		}
+		if (found_in_old) {
+			// Copy symbols from old index (no disk I/O)
+			new_idx.copy_symbols_from_jar(old_idx, new_path);
+			copied_count++;
+		} else {
+			// New JAR — must parse from disk
+			@pool() {
+				new_idx.index_jar(new_path);
+			};
+			new_jar_count++;
+		}
+	}
+
+	log::info("[kls] Incremental reindex: %d JARs copied, %d JARs newly parsed",
+		(int)copied_count, (int)new_jar_count);
+
+	// Index JDK into new index
+	jdk_index::index_jdk(new_idx, "", 0, 0);
+
+	// Fallback: if no JARs, try system Kotlin stdlib
+	if (new_cp.jar_count == 0) {
+		kotlin_fallback::index_system_kotlin(new_idx);
+	}
+
+	// Store results for main thread to swap in
+	state.mu.lock();
+	state.new_classpath = new_cp;
+	state.new_dep_index = new_idx;
+	state.in_progress = false;
+	state.complete = true;
+	state.mu.unlock();
+
+	log::info("[kls] Async reindex complete, waiting for main thread to swap");
+}
+
+/**
+ * Called from main loop after each message. If background reindex finished,
+ * swap in new classpath/dep_index, re-scan workspace, invalidate doc caches.
+ */
+fn void Server.check_reindex_complete(Server* self) {
+	self.reindex.mu.lock();
+	bool complete = self.reindex.complete;
+	if (!complete) {
+		self.reindex.mu.unlock();
+		return;
+	}
+
+	Classpath* new_cp = self.reindex.new_classpath;
+	DependencyIndex* new_idx = self.reindex.new_dep_index;
+	self.reindex.complete = false;
+	self.reindex.new_classpath = null;
+	self.reindex.new_dep_index = null;
+	self.reindex.mu.unlock();
+
+	log::info("[kls] Swapping in new classpath and dependency index");
+
+	progress::create("kls-reindex");
+	progress::begin("kls-reindex", "Kotlin Language Server", 0);
+	progress::report("kls-reindex", "Applying updated dependencies...", 50);
+
+	// Free old, swap in new
+	self.workspace.classpath.free();
+	self.workspace.classpath = *new_cp;
+	mem::free(new_cp);
+
+	self.workspace.dep_index.free();
+	self.workspace.dep_index = *new_idx;
+	mem::free(new_idx);
+
+	// Re-scan workspace with updated module source roots
+	progress::report("kls-reindex", "Re-scanning workspace...", 70);
+	self.workspace.scan_workspace();
+
+	// Invalidate all open document caches so cross-file resolution uses new deps
+	progress::report("kls-reindex", "Invalidating caches...", 90);
+	self.documents.invalidate_all_caches();
+
+	// Re-publish diagnostics for all open docs
+	@pool() {
+		foreach (&doc : self.documents.docs.tvalues()) {
+			diagnostics::publish_diagnostics(&self.documents, doc.uri, &self.workspace);
+		}
+	};
+
+	progress::end("kls-reindex", "Ready");
+	log::info("[kls] Reindex swap complete");
 }
 
 /**
@@ -647,5 +834,8 @@ fn bool is_build_file(String uri) {
 		|| uri.ends_with("/build.gradle")
 		|| uri.ends_with("/settings.gradle.kts")
 		|| uri.ends_with("/settings.gradle")
-		|| uri.ends_with("/pom.xml");
+		|| uri.ends_with("/pom.xml")
+		|| uri.ends_with("/gradle.properties")
+		|| uri.ends_with("/libs.versions.toml")
+		|| uri.ends_with("/gradle-wrapper.properties");
 }

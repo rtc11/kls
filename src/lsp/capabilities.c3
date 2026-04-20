@@ -170,6 +170,24 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	pom_watcher.set("kind", 7);
 	watchers.push(pom_watcher);
 
+	// Watch gradle.properties
+	Object* gradle_props_watcher = object::new_obj(tmem);
+	gradle_props_watcher.set("globPattern", "**/gradle.properties");
+	gradle_props_watcher.set("kind", 7);
+	watchers.push(gradle_props_watcher);
+
+	// Watch Gradle version catalog (libs.versions.toml)
+	Object* version_catalog_watcher = object::new_obj(tmem);
+	version_catalog_watcher.set("globPattern", "**/gradle/libs.versions.toml");
+	version_catalog_watcher.set("kind", 7);
+	watchers.push(version_catalog_watcher);
+
+	// Watch gradle-wrapper.properties (Gradle version changes)
+	Object* wrapper_watcher = object::new_obj(tmem);
+	wrapper_watcher.set("globPattern", "**/gradle/wrapper/gradle-wrapper.properties");
+	wrapper_watcher.set("kind", 7);
+	watchers.push(wrapper_watcher);
+
 	Object* change_reg = object::new_obj(tmem);
 	change_reg.set("watchers", watchers);
 	file_operations.set("didChangeWatchedFiles", change_reg);

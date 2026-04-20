@@ -135,6 +135,35 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 }
 
 /**
+ * Invalidate cached ASTs and types on all open documents.
+ * Called after dependency re-index so cross-file resolution picks up new deps.
+ */
+fn void DocumentStore.invalidate_all_caches(DocumentStore* self) {
+	@pool() {
+		foreach (&doc : self.docs.tvalues()) {
+			if (doc.cached_ast != null) {
+				doc.cached_ast.free_errors();
+				mem::free(doc.cached_ast);
+				doc.cached_ast = null;
+			}
+			if (doc.cached_types != null) {
+				mem::free(doc.cached_types);
+				doc.cached_types = null;
+			}
+			if (doc.cached_chunks != null) {
+				mem::free(doc.cached_chunks);
+				doc.cached_chunks = null;
+			}
+			if (doc.cached_tokens != null) {
+				mem::free(doc.cached_tokens);
+				doc.cached_tokens = null;
+			}
+			// Keep cached_semantic — delta support needs previous result
+		}
+	};
+}
+
+/**
  * Apply a single incremental change to a document.
  * The change replaces the byte range [start_offset, end_offset) with new_text.
  * Attempts incremental re-parse if a chunk map is available; falls back to

@@ -521,6 +521,69 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 // ── Lookup functions ───────────────────────────────────────────────
 
 /**
+ * Copy all symbols from a source index that belong to the given JAR path.
+ * Used for incremental re-indexing: unchanged JARs get their symbols copied
+ * instead of re-parsed from disk.
+ */
+fn void DependencyIndex.copy_symbols_from_jar(DependencyIndex* self, DependencyIndex* source, String jar_path) {
+	// Intern jar_path once for all copied symbols
+	String interned = jar_path.copy(mem);
+
+	for (usz i = 0; i < source.symbols.len(); i++) {
+		DepSymbol* src = &source.symbols[i];
+		if (src.jar_path != jar_path) continue;
+
+		if (self.symbols.len() >= MAX_DEP_SYMBOLS) {
+			if (!self.limit_warned) {
+				log::warn("[kls] Warning: dependency symbol limit reached (%d), some symbols may be missing", MAX_DEP_SYMBOLS);
+				self.limit_warned = true;
+			}
+			return;
+		}
+
+		DepSymbol sym = {
+			.name = src.name.copy(mem),
+			.signature = src.signature.copy(mem),
+			.package_name = src.package_name.len > 0 ? src.package_name.copy(mem) : "",
+			.class_name = src.class_name.copy(mem),
+			.jar_path = interned,
+			.kind = src.kind,
+			.jar_path_shared = true,
+			.supertype_count = src.supertype_count,
+		};
+		for (usz s = 0; s < src.supertype_count; s++) {
+			sym.supertypes[s] = src.supertypes[s].copy(mem);
+		}
+
+		usz sym_idx = self.symbols.len();
+		self.symbols.push(sym);
+
+		// Update name index
+		if (try list_ref = self.name_index.get_ref(src.name)) {
+			list_ref.push(sym_idx);
+		} else {
+			List{usz} new_list;
+			new_list.init(mem);
+			new_list.push(sym_idx);
+			self.name_index.set(sym.name, new_list);
+		}
+
+		// Update super_index
+		for (usz s = 0; s < sym.supertype_count; s++) {
+			if (sym.supertypes[s].len == 0) continue;
+			if (try list_ref = self.super_index.get_ref(src.supertypes[s])) {
+				list_ref.push(sym_idx);
+			} else {
+				List{usz} new_list;
+				new_list.init(mem);
+				new_list.push(sym_idx);
+				self.super_index.set(sym.supertypes[s], new_list);
+			}
+		}
+	}
+}
+
+/**
  * Look up all dependency symbols with the exact given name.
  * Writes matching pointers into out_buf and returns the count.
  */
