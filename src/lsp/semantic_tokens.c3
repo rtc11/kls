@@ -292,9 +292,9 @@ fn bool is_type_param_use(TypeParamScope[] table, usz count, String name, uint o
  * Handle textDocument/semanticTokens/full request.
  * Returns a SemanticTokens object { data: [...] } or null if unknown doc.
  */
-fn Object* handle_semantic_tokens_full(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_semantic_tokens_full(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {
@@ -321,9 +321,9 @@ fn Object* handle_semantic_tokens_full(DocumentStore* store, Object* params) {
  * Handle textDocument/semanticTokens/range request.
  * Returns tokens only within the requested line range.
  */
-fn Object* handle_semantic_tokens_range(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_semantic_tokens_range(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
@@ -332,11 +332,11 @@ fn Object* handle_semantic_tokens_range(DocumentStore* store, Object* params) {
 	if (pr == null) return null;
 
 	// Extract range
-	Object* range = params.get("range")!!;
-	Object* range_start = range.get("start")!!;
-	Object* range_end = range.get("end")!!;
-	uint start_line = (uint)range_start.get_int("line")!!;
-	uint end_line = (uint)range_end.get_int("line")!!;
+	Object* range = params.get("range")!;
+	Object* range_start = range.get("start")!;
+	Object* range_end = range.get("end")!;
+	uint start_line = (uint)range_start.get_int("line")!;
+	uint end_line = (uint)range_end.get_int("line")!;
 
 	return encode_semantic_tokens(doc.content, pr, start_line, end_line);
 }
@@ -348,9 +348,9 @@ fn Object* handle_semantic_tokens_range(DocumentStore* store, Object* params) {
  * If previousResultId matches cached data, returns a SemanticTokensDelta
  * with minimal edits. Otherwise falls back to full response.
  */
-fn Object* handle_semantic_tokens_delta(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_semantic_tokens_delta(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
@@ -360,7 +360,7 @@ fn Object* handle_semantic_tokens_delta(DocumentStore* store, Object* params) {
 
 	// Compute new tokens
 	Object* new_result = encode_semantic_tokens(doc.content, pr, 0, uint.max);
-	Object* new_data = new_result.get("data")!!;
+	Object* new_data = new_result.get("data")!;
 
 	// Check for previous result
 	String prev_id_str = "";

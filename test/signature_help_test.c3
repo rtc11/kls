@@ -37,7 +37,7 @@ fn void sig_help_after_open_paren() @test {
 		//          0123456789012345678901
 		//                                greet starts at 14, ( at 19, cursor at 20
 		Object* params = make_params("file:///test.kt", 1, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -68,7 +68,7 @@ fn void sig_help_second_param() @test {
 		//          0123456789012345678901234
 		//                            add( at 17, 1 at 18, comma at 19, space at 20, 2 at 21
 		Object* params = make_params("file:///test.kt", 1, 21);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		int active_param = result.get_int("activeParameter")!!;
@@ -99,7 +99,7 @@ fn void sig_help_third_param() @test {
 		//          0123456789012345678901234567
 		//                             make( at 18, 1 at 19, comma at 20, 2 at 22, comma at 23, 3 at 25
 		Object* params = make_params("file:///test.kt", 1, 26);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		int active_param = result.get_int("activeParameter")!!;
@@ -120,7 +120,7 @@ fn void sig_help_not_in_call() @test {
 
 		// Cursor on "val x = 42" which is not inside any call
 		Object* params = make_params("file:///test.kt", 1, 4);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result == null, "expected null when not in a call");
 	};
@@ -141,7 +141,7 @@ fn void sig_help_no_params() @test {
 		//          0123456789012345678901
 		//                         doWork( at 19, cursor at 20
 		Object* params = make_params("file:///test.kt", 1, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -169,7 +169,7 @@ fn void sig_help_with_return_type() @test {
 		//          0123456789012345678901234
 		//                          compute( at 20, cursor at 21
 		Object* params = make_params("file:///test.kt", 1, 22);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		Object* sigs = result.get("signatures")!!;
@@ -192,7 +192,7 @@ fn void sig_help_param_label_offsets() @test {
 
 		// Cursor inside the call
 		Object* params = make_params("file:///test.kt", 1, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -245,7 +245,7 @@ fn void sig_help_nested_call() @test {
 		//          01234567890123456789012345678
 		//                            outer( at 19, inner( at 25, cursor at 26
 		Object* params = make_params("file:///test.kt", 2, 26);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		Object* sigs = result.get("signatures")!!;
@@ -273,7 +273,7 @@ fn void sig_help_with_modifiers() @test {
 		//          0123456789012345678901234
 		//                          fetch( at 19, cursor at 20
 		Object* params = make_params("file:///test.kt", 1, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		Object* sigs = result.get("signatures")!!;
@@ -300,7 +300,7 @@ fn void sig_help_cursor_right_after_comma() @test {
 		//          0123456789012345678901
 		//                         add( at 17, 1 at 18, comma at 19, cursor at 20
 		Object* params = make_params("file:///test.kt", 1, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		int active_param = result.get_int("activeParameter")!!;
@@ -317,7 +317,7 @@ fn void sig_help_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -342,7 +342,7 @@ fn void sig_help_active_param_clamped() @test {
 		//          012345678901234567890123456789
 		//                              greet( at 19, a at 20, comma at 21, b at 23, comma at 24, c at 26
 		Object* params = make_params("file:///test.kt", 1, 26);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 		int active_param = result.get_int("activeParameter")!!;
@@ -373,7 +373,7 @@ fn void sig_help_kdoc_on_signature() @test {
 		// Cursor inside greet() on last line
 		// Line 4: "fun main() { greet("Alice") }"
 		Object* params = make_params("file:///test.kt", 4, 21);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -410,7 +410,7 @@ fn void sig_help_line_comment_doc() @test {
 
 		// Line 3: "fun main() { add(1, 2) }"
 		Object* params = make_params("file:///test.kt", 3, 19);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -436,7 +436,7 @@ fn void sig_help_no_doc_without_comment() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 1, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -480,7 +480,7 @@ fn void sig_help_param_doc_from_kdoc() @test {
 		// Cursor inside send() on last line
 		// Line 6: `fun main() { send("Bob", "Hi") }`
 		Object* params = make_params("file:///test.kt", 6, 20);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 
@@ -534,7 +534,7 @@ fn void sig_help_kdoc_multiline() @test {
 
 		// Line 6: "fun main() { factorial(5) }"
 		Object* params = make_params("file:///test.kt", 6, 23);
-		Object* result = signature_help::handle_signature_help(&store, params);
+		Object* result = signature_help::handle_signature_help(&store, params) ?? null;
 
 		assert(result != null, "expected SignatureHelp result");
 

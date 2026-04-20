@@ -47,7 +47,7 @@ fun main() {
 
 		// Cursor on "x" at line 2, col 8
 		Object* params = make_params("file:///test.kt", 2, 8);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		// Should navigate to MyClass declaration at line 0, col 6
 		assert_location(result, 0, 6);
@@ -71,7 +71,7 @@ fun main() {
 
 		// Cursor on "x" at line 3, col 8
 		Object* params = make_params("file:///test.kt", 3, 8);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		// Should navigate to Foo declaration at line 0, col 6
 		// (depends on type inference resolving create() -> Foo)
@@ -98,7 +98,7 @@ fun main() {
 
 		// Cursor on "MyClass" in the type annotation at line 2, col 11
 		Object* params = make_params("file:///test.kt", 2, 11);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		// Should navigate to MyClass declaration at line 0, col 6
 		assert_location(result, 0, 6);
@@ -118,7 +118,7 @@ fn void type_def_on_class_declaration_returns_null() @test {
 
 		// Cursor on "MyClass" in the class declaration at line 0, col 6
 		Object* params = make_params("file:///test.kt", 0, 6);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		// Should return null - cursor is on the type itself
 		assert(result == null, "expected null for cursor on class declaration");
@@ -138,7 +138,7 @@ fn void type_def_on_keyword_returns_null() @test {
 
 		// Cursor on "fun" keyword at line 0, col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -158,7 +158,7 @@ fun greet(user: User) {}`;
 
 		// Cursor on "user" parameter at line 1, col 10
 		Object* params = make_params("file:///test.kt", 1, 10);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		// Should navigate to User class at line 0, col 6
 		assert_location(result, 0, 6);
@@ -174,7 +174,7 @@ fn void type_def_unknown_document_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -194,7 +194,7 @@ fun execute(r: Runnable) {}`;
 
 		// Cursor on "r" parameter at line 1, col 12
 		Object* params = make_params("file:///test.kt", 1, 12);
-		Object* result = type_definition::handle_type_definition(&store, null, params);
+		Object* result = type_definition::handle_type_definition(&store, null, params) ?? null;
 
 		// Should navigate to Runnable interface at line 0, col 10
 		assert_location(result, 0, 10);

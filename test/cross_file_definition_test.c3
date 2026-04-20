@@ -43,7 +43,7 @@ fn void cross_file_function_definition() @test {
 
 		// Cursor on "helper" in file B at line 0, col 14
 		Object* params = make_params("file:///b.kt", 0, 14);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file Location result");
 		String uri = result.get_string("uri")!!;
@@ -80,7 +80,7 @@ fn void cross_file_class_definition() @test {
 
 		// Cursor on "Widget" at col 14 (return type)
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file Location for class");
 		String uri = result.get_string("uri")!!;
@@ -115,7 +115,7 @@ fn void same_file_takes_priority_over_workspace() @test {
 
 		// Cursor on "greet" call at line 1, col 13
 		Object* params = make_params("file:///main.kt", 1, 13);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		assert(result != null, "expected Location");
 		String uri = result.get_string("uri")!!;
@@ -149,7 +149,7 @@ fn void cross_file_prefers_function_in_call_context() @test {
 
 		// Cursor on "config" call
 		Object* params = make_params("file:///c.kt", 0, 14);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file Location");
 		String uri = result.get_string("uri")!!;
@@ -179,7 +179,7 @@ fn void cross_file_no_match_returns_null() @test {
 
 		// Cursor on "unknownSymbol"
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		assert(result == null, "expected null when not found in workspace");
 	};
@@ -198,7 +198,7 @@ fn void null_workspace_still_works_for_same_file() @test {
 
 		// null workspace: same-file definition still works
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = definition::handle_definition(&store, null, params);
+		Object* result = definition::handle_definition(&store, null, params)!!;
 
 		assert(result != null, "expected same-file Location with null workspace");
 		String uri = result.get_string("uri")!!;
@@ -225,7 +225,7 @@ fn void cross_file_skips_current_doc_symbols() @test {
 
 		// "unknown" not declared in any file
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		// Should NOT find "main" from workspace index since it's the same file
 		assert(result == null, "expected null, workspace should skip same-file symbols");
@@ -252,7 +252,7 @@ fn void cross_file_range_covers_name() @test {
 
 		// Cursor on "MyService" at col 11
 		Object* params = make_params("file:///main.kt", 0, 11);
-		Object* result = definition::handle_definition(&store, &ws, params);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file Location");
 		Object* range = result.get("range")!!;

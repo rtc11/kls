@@ -49,7 +49,7 @@ fn void cross_file_hover_function() @test {
 
 		// Cursor on "helperFunction" at col 14
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected hover result");
 		String value = get_hover_value(result);
@@ -79,7 +79,7 @@ fn void cross_file_hover_class() @test {
 
 		// Cursor on "UserProfile" at col 14
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected hover result");
 		String value = get_hover_value(result);
@@ -108,7 +108,7 @@ fn void cross_file_hover_same_file_priority() @test {
 
 		// Cursor on "greet" call at line 1, col 13
 		Object* params = make_params("file:///main.kt", 1, 13);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected hover result");
 		String value = get_hover_value(result);
@@ -127,7 +127,7 @@ fn void hover_null_workspace() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result with null workspace");
 		String value = get_hover_value(result);
@@ -156,7 +156,7 @@ fn void cross_file_hover_basic_fallback() @test {
 
 		// Cursor on "helper"
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected hover result (basic fallback)");
 		String value = get_hover_value(result);
@@ -186,7 +186,7 @@ fn void cross_file_hover_interface() @test {
 
 		// Cursor on "Repository" at col 11
 		Object* params = make_params("file:///main.kt", 0, 11);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected hover result");
 		String value = get_hover_value(result);
@@ -214,7 +214,7 @@ fn void cross_file_hover_no_match_falls_to_describe_token() @test {
 
 		// Cursor on "unknownThing" at col 14
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected basic hover for unresolved identifier");
 		String value = get_hover_value(result);
@@ -242,7 +242,7 @@ fn void cross_file_hover_shows_package() @test {
 		store.open("file:///main.kt", "kotlin", 1, file);
 
 		Object* params = make_params("file:///main.kt", 0, 11);
-		Object* result = hover::handle_hover(&store, &ws, params);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
 
 		assert(result != null, "expected hover result");
 		String value = get_hover_value(result);

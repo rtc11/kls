@@ -20,13 +20,13 @@ import kls::log;
  * Handle textDocument/prepareCallHierarchy request.
  * Returns a CallHierarchyItem[] for the function at cursor, or null.
  */
-fn Object* handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
@@ -101,10 +101,10 @@ fn Object* handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Objec
  * Handle callHierarchy/incomingCalls request.
  * Finds all call sites of the target function, grouped by enclosing function.
  */
-fn Object* handle_incoming_calls(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* item = params.get("item")!!;
-	String target_name = item.get_string("name")!!;
-	String target_uri = item.get_string("uri")!!;
+fn Object*? handle_incoming_calls(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* item = params.get("item")!;
+	String target_name = item.get_string("name")!;
+	String target_uri = item.get_string("uri")!;
 
 	log::debug("[callHierarchy] incoming calls for '%s'", target_name);
 
@@ -133,10 +133,10 @@ fn Object* handle_incoming_calls(DocumentStore* store, WorkspaceIndex* workspace
  * Handle callHierarchy/outgoingCalls request.
  * Finds all function calls made from within the target function body.
  */
-fn Object* handle_outgoing_calls(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* item = params.get("item")!!;
-	String target_name = item.get_string("name")!!;
-	String target_uri = item.get_string("uri")!!;
+fn Object*? handle_outgoing_calls(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* item = params.get("item")!;
+	String target_name = item.get_string("name")!;
+	String target_uri = item.get_string("uri")!;
 
 	log::debug("[callHierarchy] outgoing calls from '%s'", target_name);
 

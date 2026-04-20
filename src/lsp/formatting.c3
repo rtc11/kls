@@ -23,9 +23,9 @@ import kls::log;
  *   options: { tabSize: int, insertSpaces: bool, ... }
  * }
  */
-fn Object* handle_formatting(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_formatting(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {
@@ -108,9 +108,9 @@ fn Object* handle_formatting(DocumentStore* store, Object* params) {
  *   options: { tabSize: int, insertSpaces: bool, ... }
  * }
  */
-fn Object* handle_range_formatting(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_range_formatting(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {
@@ -118,11 +118,11 @@ fn Object* handle_range_formatting(DocumentStore* store, Object* params) {
 	}
 
 	// Parse range
-	Object* range_obj = params.get("range")!!;
-	Object* start_obj = range_obj.get("start")!!;
-	Object* end_obj = range_obj.get("end")!!;
-	uint start_line = (uint)start_obj.get_int("line")!!;
-	uint end_line = (uint)end_obj.get_int("line")!!;
+	Object* range_obj = params.get("range")!;
+	Object* start_obj = range_obj.get("start")!;
+	Object* end_obj = range_obj.get("end")!;
+	uint start_line = (uint)start_obj.get_int("line")!;
+	uint end_line = (uint)end_obj.get_int("line")!;
 
 	// Parse formatting options
 	int tab_size = 4;
@@ -832,16 +832,16 @@ fn Object* build_whole_doc_edit(String old_content, String new_content) {
  *   options: { tabSize: int, insertSpaces: bool }
  * }
  */
-fn Object* handle_on_type_formatting(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_on_type_formatting(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	String ch = params.get_string("ch") ?? "";
 	if (ch.len == 0) return null;

@@ -298,7 +298,7 @@ fn usz build_source_candidates(String package_name, String class_name, String[] 
  */
 fn String? find_source_entry_in_jar(String source_jar_path, String package_name, String class_name) {
 	ZipArchive archive = zip::open(tmem, source_jar_path, "r")!;
-	defer archive.close()!!;
+	defer (void)archive.close();
 
 	// Build candidate paths
 	String[8] candidates;
@@ -413,7 +413,7 @@ fn String? extract_source_to_cache(String source_jar_path, String entry_name) {
 
 	// Read the source file from the JAR
 	ZipArchive archive = zip::open(tmem, source_jar_path, "r")!;
-	defer archive.close()!!;
+	defer (void)archive.close();
 
 	char[] data = archive.read_file_all(tmem, entry_name)!;
 
@@ -777,7 +777,7 @@ fn String find_kotlin_stdlib_jar(DependencyIndex* dep_index) {
  */
 fn String? find_standard_kt_entry(String source_jar_path) {
 	ZipArchive archive = zip::open(tmem, source_jar_path, "r")!;
-	defer archive.close()!!;
+	defer (void)archive.close();
 
 	usz entry_count = archive.count();
 	for (usz i = 0; i < entry_count; i++) {

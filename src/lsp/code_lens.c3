@@ -12,9 +12,9 @@ import kls::kotlin::ast;
  *   - "▶ Run Tests" on classes containing @Test methods
  * Returns null if the document is unknown.
  */
-fn Object* handle_code_lens(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_code_lens(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	ParseResult* pr = store.get_ast(uri) ?? null;
 	if (pr == null) {
@@ -144,6 +144,6 @@ fn Object* build_lens(AstNode* node, String uri, String title, String command_id
  * Since we always include commands in the initial response, this simply
  * returns the code lens as-is.
  */
-fn Object* handle_code_lens_resolve(Object* code_lens) {
+fn Object*? handle_code_lens_resolve(Object* code_lens) {
 	return code_lens;
 }

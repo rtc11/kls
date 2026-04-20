@@ -82,7 +82,7 @@ fn void prepare_rename_on_identifier() @test {
 
 		// Cursor on "greet" at line 0, col 4
 		Object* params = make_prepare_params("file:///test.kt", 0, 4);
-		Object* result = rename::handle_prepare_rename(&store, params);
+		Object* result = rename::handle_prepare_rename(&store, params) ?? null;
 
 		assert(result != null, "expected prepare rename result");
 
@@ -111,7 +111,7 @@ fn void prepare_rename_on_keyword() @test {
 
 		// Cursor on "fun" keyword at col 0
 		Object* params = make_prepare_params("file:///test.kt", 0, 0);
-		Object* result = rename::handle_prepare_rename(&store, params);
+		Object* result = rename::handle_prepare_rename(&store, params) ?? null;
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -126,7 +126,7 @@ fn void prepare_rename_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_prepare_params("file:///unknown.kt", 0, 0);
-		Object* result = rename::handle_prepare_rename(&store, params);
+		Object* result = rename::handle_prepare_rename(&store, params) ?? null;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -145,7 +145,7 @@ fn void rename_function() @test {
 
 		// Cursor on "greet" in the call at line 1, col 14
 		Object* params = make_rename_params("file:///test.kt", 1, 14, "hello");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -180,7 +180,7 @@ fn void rename_variable() @test {
 
 		// Cursor on "x" at line 1, col 8 (usage)
 		Object* params = make_rename_params("file:///test.kt", 1, 8, "count");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -213,7 +213,7 @@ fn void rename_class() @test {
 
 		// Cursor on "Foo" at line 0, col 6 (declaration)
 		Object* params = make_rename_params("file:///test.kt", 0, 6, "Bar");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -254,7 +254,7 @@ fn void rename_parameter() @test {
 
 		// Cursor on "a" at line 0, col 31 (usage in expression)
 		Object* params = make_rename_params("file:///test.kt", 0, 31, "first");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -284,7 +284,7 @@ fn void rename_on_keyword_returns_null() @test {
 
 		// Cursor on "fun" keyword at col 0
 		Object* params = make_rename_params("file:///test.kt", 0, 0, "function");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for keyword rename");
 	};
@@ -302,7 +302,7 @@ fn void rename_same_name_returns_null() @test {
 
 		// Rename "greet" to "greet" (same name)
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "greet");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for same-name rename");
 	};
@@ -317,7 +317,7 @@ fn void rename_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_rename_params("file:///unknown.kt", 0, 0, "newName");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -336,7 +336,7 @@ fn void rename_multiple_references() @test {
 
 		// Cursor on "x" at line 0, col 9 (parameter declaration)
 		Object* params = make_rename_params("file:///test.kt", 0, 9, "value");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -365,7 +365,7 @@ fn void rename_does_not_affect_other_identifiers() @test {
 
 		// Cursor on "foo" at line 0, col 4
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "baz");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -395,7 +395,7 @@ fn void prepare_rename_on_variable_in_expression() @test {
 
 		// Cursor on "count" at line 1, col 11 (usage in expression)
 		Object* params = make_prepare_params("file:///test.kt", 1, 11);
-		Object* result = rename::handle_prepare_rename(&store, params);
+		Object* result = rename::handle_prepare_rename(&store, params) ?? null;
 
 		assert(result != null, "expected prepare rename result");
 
@@ -425,7 +425,7 @@ fn void rename_interface() @test {
 
 		// Cursor on "Drawable" at line 0, col 10 (declaration)
 		Object* params = make_rename_params("file:///test.kt", 0, 10, "Renderable");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -459,7 +459,7 @@ fn void rename_declaration_only() @test {
 
 		// Cursor on "unused" at line 0, col 4
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "notUsed");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -485,7 +485,7 @@ fn void rename_skips_package_path() @test {
 
 		// Cursor on "model" at line 1, col 4 (the variable declaration)
 		Object* params = make_rename_params("file:///test.kt", 1, 4, "info");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -519,7 +519,7 @@ fn void rename_skips_import_path() @test {
 
 		// Cursor on "Foo" at line 1, col 6 (class declaration)
 		Object* params = make_rename_params("file:///test.kt", 1, 6, "Bar");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -553,7 +553,7 @@ fn void rename_skips_wildcard_import() @test {
 
 		// Cursor on "example" at line 1, col 4
 		Object* params = make_rename_params("file:///test.kt", 1, 4, "sample");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -584,7 +584,7 @@ fn void rename_scoped_to_function() @test {
 
 		// Cursor on "x" at line 1, col 8 (val x in foo)
 		Object* params = make_rename_params("file:///test.kt", 1, 8, "value");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -618,7 +618,7 @@ fn void rename_from_usage_scoped() @test {
 
 		// Cursor on "x" at line 6, col 12 (usage in bar's println)
 		Object* params = make_rename_params("file:///test.kt", 6, 12, "num");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -647,7 +647,7 @@ fn void rename_with_shadowing() @test {
 
 		// Cursor on "x" at line 1, col 8 (outer val x = 1)
 		Object* params = make_rename_params("file:///test.kt", 1, 8, "outer");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -675,7 +675,7 @@ fn void rename_inner_shadowed_variable() @test {
 
 		// Cursor on "x" at line 3, col 12 (inner val x = 2)
 		Object* params = make_rename_params("file:///test.kt", 3, 12, "inner");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -702,7 +702,7 @@ fn void rename_top_level_function_all_sites() @test {
 
 		// Cursor on "greet" at line 0, col 4 (declaration)
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "hello");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -730,7 +730,7 @@ fn void rename_parameter_scoped() @test {
 
 		// Cursor on "n" at line 0, col 8 (param in add)
 		Object* params = make_rename_params("file:///test.kt", 0, 8, "value");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -760,7 +760,7 @@ fn void rename_top_level_val_across_functions() @test {
 
 		// Cursor on "limit" at line 0, col 4 (declaration)
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "max");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected workspace edit");
 
@@ -787,7 +787,7 @@ fn void prepare_rename_rejects_package_path() @test {
 
 		// Cursor on "app" at line 0, col 20 (inside package path)
 		Object* params = make_prepare_params("file:///test.kt", 0, 20);
-		Object* result = rename::handle_prepare_rename(&store, params);
+		Object* result = rename::handle_prepare_rename(&store, params) ?? null;
 
 		assert(result == null, "expected null for identifier in package path");
 	};
@@ -805,7 +805,7 @@ fn void prepare_rename_rejects_import_path() @test {
 
 		// Cursor on "Foo" at line 0, col 19 (inside import path)
 		Object* params = make_prepare_params("file:///test.kt", 0, 19);
-		Object* result = rename::handle_prepare_rename(&store, params);
+		Object* result = rename::handle_prepare_rename(&store, params) ?? null;
 
 		assert(result == null, "expected null for identifier in import path");
 	};
@@ -822,7 +822,7 @@ fn void rename_rejects_empty_name() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for empty new name");
 	};
@@ -837,7 +837,7 @@ fn void rename_rejects_name_starting_with_digit() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "123abc");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for name starting with digit");
 	};
@@ -852,7 +852,7 @@ fn void rename_rejects_hard_keyword() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "class");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for hard keyword 'class'");
 	};
@@ -867,7 +867,7 @@ fn void rename_rejects_name_with_special_chars() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "foo-bar");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for name with special chars");
 	};
@@ -883,7 +883,7 @@ fn void rename_accepts_soft_keyword() @test {
 
 		// Soft keywords like "data" are valid identifiers
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "data");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected rename to succeed with soft keyword 'data'");
 	};
@@ -898,7 +898,7 @@ fn void rename_accepts_valid_name() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "hello_world");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected rename to succeed with valid name");
 	};
@@ -913,7 +913,7 @@ fn void rename_accepts_underscore_start() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_rename_params("file:///test.kt", 0, 4, "_private");
-		Object* result = rename::handle_rename(&store, null, params);
+		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected rename to succeed with underscore-prefixed name");
 	};

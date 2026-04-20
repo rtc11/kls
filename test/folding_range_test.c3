@@ -25,7 +25,7 @@ fn void empty_document_returns_empty_array() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "");
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null, "expected empty array, not null");
 		assert(result.get_len() == 0, "expected 0 ranges, got %d", (int)result.get_len());
@@ -39,7 +39,7 @@ fn void unknown_document_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -53,7 +53,7 @@ fn void single_line_function_no_fold() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		assert(result.get_len() == 0, "single-line function should not fold, got %d ranges", (int)result.get_len());
@@ -74,7 +74,7 @@ fn void multiline_function_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Should have at least a fold for the function
@@ -106,7 +106,7 @@ fn void multiline_class_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_class_fold = false;
@@ -137,7 +137,7 @@ fn void multiline_interface_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_iface_fold = false;
@@ -169,7 +169,7 @@ import com.example.Baz
 fun main() {}`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_import_fold = false;
@@ -201,7 +201,7 @@ fn void single_import_no_fold() @test {
 fun main() {}`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -229,7 +229,7 @@ fn void multiline_block_comment_folds() @test {
 fun main() {}`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_comment_fold = false;
@@ -257,7 +257,7 @@ fn void single_line_block_comment_no_fold() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "/* single line */ fun main() {}");
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -285,7 +285,7 @@ fn void kdoc_comment_folds() @test {
 fun main() {}`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_comment_fold = false;
@@ -319,7 +319,7 @@ fn void when_expression_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Should have folds for the function and the when expression
@@ -345,7 +345,7 @@ fn void if_expression_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Should have folds for the function and the if expression
@@ -369,7 +369,7 @@ fn void lambda_expression_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Should have folds for the function and the lambda
@@ -398,7 +398,7 @@ fn void nested_class_and_function_fold() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Outer class + method + Inner class + innerMethod = at least 4 folds
@@ -424,7 +424,7 @@ fn void try_catch_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Function + try + catch = at least 3 folds
@@ -448,7 +448,7 @@ fn void for_loop_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Function + for loop = at least 2 folds
@@ -472,7 +472,7 @@ fn void while_loop_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		// Function + while loop = at least 2 folds
@@ -495,7 +495,7 @@ fn void object_declaration_folds() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_object_fold = false;
@@ -531,7 +531,7 @@ fun main() {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		bool found_imports = false;
@@ -568,7 +568,7 @@ fn void folding_range_has_correct_fields() @test {
 }`
 		);
 		Object* params = make_params("file:///test.kt");
-		Object* result = folding_range::handle_folding_range(&store, params);
+		Object* result = folding_range::handle_folding_range(&store, params)!!;
 
 		assert(result != null);
 		assert(result.get_len() >= 1, "expected at least 1 range");

@@ -163,8 +163,8 @@ fn JdwpEvent? read_event(JdwpConnection* conn) {
 			event.request_id = transport::get_int_be(data, pos); pos += 4;
 
 		default:
-			log::debug("[dap] Unhandled event kind: %d", (int)event_kind);
-			continue;  // skip unknown events, try next in composite
+			log::debug("[dap] Unhandled event kind: %d, aborting composite parse", (int)event_kind);
+			break;  // can't advance pos reliably for unknown events
 		}
 
 		// Stash parsed event: first one returned, rest buffered

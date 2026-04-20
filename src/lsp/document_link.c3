@@ -13,7 +13,7 @@ import kls::log;
  * Returns DocumentLink[] with clickable URLs in comments and strings,
  * and import paths that resolve to workspace files.
  */
-fn Object* handle_document_link(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+fn Object*? handle_document_link(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument") ?? null;
 	if (td == null) return object::new_obj(tmem);
 

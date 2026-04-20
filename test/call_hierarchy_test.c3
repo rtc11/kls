@@ -61,7 +61,7 @@ fn void prepare_unknown_document_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params)!!;
 		assert(result == null, "expected null for unknown document");
 	};
 }
@@ -76,7 +76,7 @@ fn void prepare_on_keyword_returns_null() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 		Object* params = make_params("file:///test.kt", 0, 0); // on "fun"
-		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params)!!;
 		assert(result == null, "expected null for keyword");
 	};
 }
@@ -91,7 +91,7 @@ fn void prepare_has_selection_range() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "fun hello() {}");
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected result");
 		Object* item = result.get_at(0);
@@ -120,7 +120,7 @@ fun main() { greet() }`;
 
 		// Cursor on "greet" declaration at line 0, col 4
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected CallHierarchyItem array");
 		assert(result.get_len() == 1, "expected 1 item, got %d", (int)result.get_len());
@@ -148,7 +148,7 @@ fun main() { greet() }`;
 
 		// Cursor on "greet" call at line 1, col 14
 		Object* params = make_params("file:///test.kt", 1, 14);
-		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected CallHierarchyItem array");
 		assert(result.get_len() == 1, "expected 1 item");
@@ -172,7 +172,7 @@ fn void prepare_on_variable_returns_null() @test {
 
 		// Cursor on "x" — a property, not a function
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_prepare(&store, null, params);
+		Object* result = call_hierarchy::handle_prepare(&store, null, params)!!;
 
 		// Should be null — x is a property, not a function
 		assert(result == null, "expected null for non-function");
@@ -194,7 +194,7 @@ fun test() { greet() }`;
 
 		// Build incoming call params for greet at line 0, col 4
 		Object* params = make_item_params("greet", "file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params);
+		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params)!!;
 
 		assert(result != null, "expected incoming calls");
 		// main and test both call greet
@@ -224,7 +224,7 @@ fun main() { foo(); bar() }`;
 
 		// Outgoing calls from main at line 2, col 4
 		Object* params = make_item_params("main", "file:///test.kt", 2, 4);
-		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params);
+		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params)!!;
 
 		assert(result != null, "expected outgoing calls");
 		assert(result.get_len() == 2, "expected 2 outgoing calls, got %d", (int)result.get_len());
@@ -250,7 +250,7 @@ fn void outgoing_calls_empty() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_item_params("main", "file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params);
+		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params)!!;
 
 		assert(result == null, "expected null when no outgoing calls");
 	};
@@ -269,7 +269,7 @@ fun main() { greet(); greet() }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_item_params("greet", "file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params);
+		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params)!!;
 
 		assert(result != null, "expected incoming calls");
 		// Should be 1 caller (main) with 2 fromRanges
@@ -292,7 +292,7 @@ fn void incoming_calls_no_callers() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun lonely() {}");
 
 		Object* params = make_item_params("lonely", "file:///test.kt", 0, 4);
-		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params);
+		Object* result = call_hierarchy::handle_incoming_calls(&store, null, params)!!;
 
 		assert(result == null, "expected null for no callers");
 	};
@@ -327,7 +327,7 @@ fun wrapper() {
 		ws.index_file("file:///b.kt", b_content);
 
 		Object* params = make_item_params("doWork", "file:///a.kt", 0, 4);
-		Object* result = call_hierarchy::handle_incoming_calls(&store, &ws, params);
+		Object* result = call_hierarchy::handle_incoming_calls(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file incoming calls");
 		bool found = false;
@@ -362,7 +362,7 @@ fn void prepare_cross_file() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 1, 4);
-		Object* result = call_hierarchy::handle_prepare(&store, &ws, params);
+		Object* result = call_hierarchy::handle_prepare(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file prepare result");
 		Object* item = result.get_at(0);
@@ -388,7 +388,7 @@ fun main() {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_item_params("main", "file:///test.kt", 1, 4);
-		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params);
+		Object* result = call_hierarchy::handle_outgoing_calls(&store, null, params)!!;
 
 		assert(result != null, "expected outgoing calls");
 		assert(result.get_len() == 1, "expected 1 outgoing (grouped), got %d", (int)result.get_len());

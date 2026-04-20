@@ -23,13 +23,13 @@ const int WRITE = 3;
  * then classifies each as Write (declaration sites) or Read (usage sites)
  * using the AST.
  */
-fn Object* handle_document_highlight(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_document_highlight(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {

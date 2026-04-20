@@ -44,7 +44,7 @@ fn void declaration_unknown_doc_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///nonexistent.kt", 0, 0);
-		Object* result = declaration::handle_declaration(&store, null, params);
+		Object* result = declaration::handle_declaration(&store, null, params)!!;
 		assert(result == null, "expected null for unknown document");
 	};
 }
@@ -60,7 +60,7 @@ fn void declaration_on_keyword_returns_null() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 		// Cursor on "fun" keyword at col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = declaration::handle_declaration(&store, null, params);
+		Object* result = declaration::handle_declaration(&store, null, params)!!;
 		assert(result == null, "expected null for keyword");
 	};
 }
@@ -78,7 +78,7 @@ fn void declaration_non_override_falls_back() @test {
 
 		// Cursor on "greet" call at line 1, col 14
 		Object* params = make_params("file:///test.kt", 1, 14);
-		Object* result = declaration::handle_declaration(&store, null, params);
+		Object* result = declaration::handle_declaration(&store, null, params)!!;
 
 		// Should fall back to definition — find greet at line 0
 		assert(result != null, "expected a result from definition fallback");
@@ -111,7 +111,7 @@ fn void declaration_override_to_supertype() @test {
 		// Cursor on "speak" in Dog's override at line 1
 		// "override fun speak" — "speak" starts at col 17
 		Object* params = make_params("file:///Dog.kt", 1, 17);
-		Object* result = declaration::handle_declaration(&store, &workspace, params);
+		Object* result = declaration::handle_declaration(&store, &workspace, params)!!;
 
 		assert(result != null, "expected location in supertype");
 		String uri = get_uri(result);
@@ -143,7 +143,7 @@ fn void declaration_override_no_supertype_method_falls_back() @test {
 
 		// Cursor on "speak" in Dog
 		Object* params = make_params("file:///Dog.kt", 1, 17);
-		Object* result = declaration::handle_declaration(&store, &workspace, params);
+		Object* result = declaration::handle_declaration(&store, &workspace, params)!!;
 
 		// Should fall back to definition (finds speak in Dog itself)
 		// Result may or may not be null depending on definition fallback
@@ -164,7 +164,7 @@ fn void declaration_no_workspace_falls_back() @test {
 
 		Object* params = make_params("file:///test.kt", 1, 14);
 		// Pass null workspace
-		Object* result = declaration::handle_declaration(&store, null, params);
+		Object* result = declaration::handle_declaration(&store, null, params)!!;
 
 		// Should still work via definition fallback
 		assert(result != null, "expected result with null workspace");

@@ -25,13 +25,13 @@ import kls::log;
  * Returns a JSON array of TypeHierarchyItem, or null if the cursor
  * is not on a type name.
  */
-fn Object* handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
@@ -103,10 +103,10 @@ fn Object* handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Objec
  * Handle typeHierarchy/supertypes request.
  * Given a TypeHierarchyItem, returns its direct supertypes.
  */
-fn Object* handle_supertypes(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* item = params.get("item")!!;
-	String name = item.get_string("name")!!;
-	String uri = item.get_string("uri")!!;
+fn Object*? handle_supertypes(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* item = params.get("item")!;
+	String name = item.get_string("name")!;
+	String uri = item.get_string("uri")!;
 
 	Object* supertypes = object::new_obj(tmem);
 
@@ -137,10 +137,10 @@ fn Object* handle_supertypes(DocumentStore* store, WorkspaceIndex* workspace, Ob
  * Handle typeHierarchy/subtypes request.
  * Given a TypeHierarchyItem, returns its direct subtypes/implementors.
  */
-fn Object* handle_subtypes(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* item = params.get("item")!!;
-	String name = item.get_string("name")!!;
-	String uri = item.get_string("uri")!!;
+fn Object*? handle_subtypes(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* item = params.get("item")!;
+	String name = item.get_string("name")!;
+	String uri = item.get_string("uri")!;
 
 	Object* subtypes = object::new_obj(tmem);
 

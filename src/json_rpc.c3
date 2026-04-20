@@ -4,6 +4,7 @@ import std::io;
 import std::encoding::json;
 import std::collections::object;
 import std::core::mem;
+import kls::log;
 
 // JSON-RPC 2.0 error codes
 const int PARSE_ERROR = -32700;
@@ -88,7 +89,9 @@ fn void send_response(Object* id, Object* result) {
 		response.set("result", null_val);
 	}
 
-	write_message(response);
+	if (catch excuse = write_message(response)) {
+		log::err("[kls] Failed to write response: %s", excuse);
+	}
 }
 
 /**
@@ -107,7 +110,9 @@ fn void send_error_response(Object* id, int code, String message) {
 	}
 	response.set("error", error_obj);
 
-	write_message(response);
+	if (catch excuse = write_message(response)) {
+		log::err("[kls] Failed to write error response: %s", excuse);
+	}
 }
 
 /**
@@ -121,7 +126,9 @@ fn void send_notification(String method, Object* params) {
 		msg.set("params", params);
 	}
 
-	write_message(msg);
+	if (catch excuse = write_message(msg)) {
+		log::err("[kls] Failed to write notification: %s", excuse);
+	}
 }
 
 /**
@@ -140,14 +147,16 @@ fn int send_request(String method, Object* params) {
 		msg.set("params", params);
 	}
 
-	write_message(msg);
+	if (catch excuse = write_message(msg)) {
+		log::err("[kls] Failed to write request: %s", excuse);
+	}
 	return id;
 }
 
 /**
  * Write a JSON object as an LSP message to stdout.
  */
-fn void write_message(Object* msg) {
+fn void? write_message(Object* msg) {
 	// Serialize JSON body to a temp DString using our
 	// custom serializer that properly escapes strings.
 	DString body;
@@ -157,9 +166,9 @@ fn void write_message(Object* msg) {
 
 	// Write Content-Length header + body
 	OutStream stdout = io::stdout();
-	io::fprintf(stdout, "Content-Length: %d\r\n\r\n", body_str.len)!!;
-	io::fprint(stdout, body_str)!!;
-	stdout.flush()!!;
+	io::fprintf(stdout, "Content-Length: %d\r\n\r\n", body_str.len)!;
+	io::fprint(stdout, body_str)!;
+	stdout.flush()!;
 }
 
 // ── Custom JSON serializer with proper string escaping ─────────────

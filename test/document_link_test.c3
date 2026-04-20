@@ -27,7 +27,7 @@ fn void url_in_line_comment() @test {
 fun main() {}`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"));
+		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"))!!;
 		assert(result.is_array(), "expected links array");
 		assert(result.get_len() >= 1, "expected at least 1 URL link, got %d", (int)result.get_len());
 
@@ -54,7 +54,7 @@ fn void url_in_block_comment() @test {
 fun main() {}`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"));
+		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"))!!;
 		assert(result.is_array(), "expected links array");
 		assert(result.get_len() >= 1, "expected at least 1 URL link, got %d", (int)result.get_len());
 
@@ -79,7 +79,7 @@ fn void multiple_urls() @test {
 // https://second.com/other`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"));
+		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"))!!;
 		assert(result.is_array(), "expected links array");
 		assert(result.get_len() == 2, "expected 2 URL links, got %d", (int)result.get_len());
 
@@ -101,7 +101,7 @@ fn void no_urls_no_links() @test {
 }`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"));
+		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"))!!;
 		assert(result.is_indexable());
 		assert(result.get_len() == 0, "expected no links, got %d", (int)result.get_len());
 	};
@@ -116,7 +116,7 @@ fn void url_strips_trailing_punctuation() @test {
 		String content = `// See https://example.com/path.`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"));
+		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"))!!;
 		assert(result.is_array(), "expected links array");
 		assert(result.get_len() >= 1, "expected at least 1 link");
 
@@ -135,7 +135,7 @@ fn void https_url_range_correct() @test {
 		String content = `// https://example.com`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"));
+		Object* result = document_link::handle_document_link(&store, null, make_params("file:///test.kt"))!!;
 		assert(result.is_array());
 		assert(result.get_len() == 1);
 

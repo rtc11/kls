@@ -178,298 +178,339 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "textDocument/didOpen":
 			if (params != null) {
-				sync::handle_did_open(&self.documents, &self.workspace, params);
+				if (catch excuse = sync::handle_did_open(&self.documents, &self.workspace, params)) {
+					log::err("[kls] didOpen failed: %s", excuse);
+				}
 			}
 
 		case "textDocument/didChange":
 			if (params != null) {
-				sync::handle_did_change(&self.documents, &self.workspace, params);
+				if (catch excuse = sync::handle_did_change(&self.documents, &self.workspace, params)) {
+					log::err("[kls] didChange failed: %s", excuse);
+				}
 			}
 
 		case "textDocument/didClose":
 			if (params != null) {
-				sync::handle_did_close(&self.documents, params);
+				if (catch excuse = sync::handle_did_close(&self.documents, params)) {
+					log::err("[kls] didClose failed: %s", excuse);
+				}
 			}
 
-		// #3: All request handlers send error response when params is null
+		// All request handlers: catch faults from malformed params, return error response
 		case "textDocument/hover":
-			if (params != null) {
-				Object* result = hover::handle_hover(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = hover::handle_hover(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/signatureHelp":
-			if (params != null) {
-				Object* result = signature_help::handle_signature_help(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = signature_help::handle_signature_help(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/completion":
-			if (params != null) {
-				Object* result = completion::handle_completion(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = completion::handle_completion(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "completionItem/resolve":
-			if (params != null) {
-				Object* result = completion::handle_completion_resolve(&self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = completion::handle_completion_resolve(&self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/definition":
-			if (params != null) {
-				Object* result = definition::handle_definition(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = definition::handle_definition(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/declaration":
-			if (params != null) {
-				Object* result = declaration::handle_declaration(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = declaration::handle_declaration(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/typeDefinition":
-			if (params != null) {
-				Object* result = type_definition::handle_type_definition(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = type_definition::handle_type_definition(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/implementation":
-			if (params != null) {
-				Object* result = implementation::handle_implementation(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = implementation::handle_implementation(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/references":
-			if (params != null) {
-				Object* result = references::handle_references(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = references::handle_references(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/documentHighlight":
-			if (params != null) {
-				Object* result = document_highlight::handle_document_highlight(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = document_highlight::handle_document_highlight(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/linkedEditingRange":
-			if (params != null) {
-				Object* result = linked_editing_range::handle_linked_editing_range(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = linked_editing_range::handle_linked_editing_range(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/documentLink":
-			if (params != null) {
-				Object* result = document_link::handle_document_link(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = document_link::handle_document_link(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/documentSymbol":
-			if (params != null) {
-				Object* result = document_symbols::handle_document_symbol(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = document_symbols::handle_document_symbol(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/foldingRange":
-			if (params != null) {
-				Object* result = folding_range::handle_folding_range(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = folding_range::handle_folding_range(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/selectionRange":
-			if (params != null) {
-				Object* result = selection_range::handle_selection_range(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = selection_range::handle_selection_range(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/formatting":
-			if (params != null) {
-				Object* result = formatting::handle_formatting(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = formatting::handle_formatting(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/rangeFormatting":
-			if (params != null) {
-				Object* result = formatting::handle_range_formatting(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = formatting::handle_range_formatting(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/onTypeFormatting":
-			if (params != null) {
-				Object* result = formatting::handle_on_type_formatting(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = formatting::handle_on_type_formatting(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/codeAction":
-			if (params != null) {
-				Object* result = code_actions::handle_code_action(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = code_actions::handle_code_action(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "codeAction/resolve":
-			if (params != null) {
-				Object* result = code_actions::handle_code_action_resolve(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = code_actions::handle_code_action_resolve(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/codeLens":
-			if (params != null) {
-				Object* result = code_lens::handle_code_lens(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = code_lens::handle_code_lens(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "codeLens/resolve":
-			if (params != null) {
-				Object* result = code_lens::handle_code_lens_resolve(params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = code_lens::handle_code_lens_resolve(params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/semanticTokens/full":
-			if (params != null) {
-				Object* result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = semantic_tokens::handle_semantic_tokens_full(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/semanticTokens/full/delta":
-			if (params != null) {
-				Object* result = semantic_tokens::handle_semantic_tokens_delta(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = semantic_tokens::handle_semantic_tokens_delta(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/semanticTokens/range":
-			if (params != null) {
-				Object* result = semantic_tokens::handle_semantic_tokens_range(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = semantic_tokens::handle_semantic_tokens_range(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/inlayHint":
-			if (params != null) {
-				Object* result = inlay_hints::handle_inlay_hints(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = inlay_hints::handle_inlay_hints(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "inlayHint/resolve":
-			if (params != null) {
-				Object* result = inlay_hints::handle_inlay_hint_resolve(params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = inlay_hints::handle_inlay_hint_resolve(params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/prepareRename":
-			if (params != null) {
-				Object* result = rename::handle_prepare_rename(&self.documents, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = rename::handle_prepare_rename(&self.documents, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/rename":
-			if (params != null) {
-				Object* result = rename::handle_rename(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = rename::handle_rename(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/prepareCallHierarchy":
-			if (params != null) {
-				Object* result = call_hierarchy::handle_prepare(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = call_hierarchy::handle_prepare(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "callHierarchy/incomingCalls":
-			if (params != null) {
-				Object* result = call_hierarchy::handle_incoming_calls(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = call_hierarchy::handle_incoming_calls(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "callHierarchy/outgoingCalls":
-			if (params != null) {
-				Object* result = call_hierarchy::handle_outgoing_calls(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = call_hierarchy::handle_outgoing_calls(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "textDocument/prepareTypeHierarchy":
-			if (params != null) {
-				Object* result = type_hierarchy::handle_prepare(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = type_hierarchy::handle_prepare(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "typeHierarchy/supertypes":
-			if (params != null) {
-				Object* result = type_hierarchy::handle_supertypes(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = type_hierarchy::handle_supertypes(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "typeHierarchy/subtypes":
-			if (params != null) {
-				Object* result = type_hierarchy::handle_subtypes(&self.documents, &self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = type_hierarchy::handle_subtypes(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "workspace/didChangeWatchedFiles":
@@ -478,19 +519,21 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			}
 
 		case "workspace/symbol":
-			if (params != null) {
-				Object* result = workspace_symbols::handle_workspace_symbol(&self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = workspace_symbols::handle_workspace_symbol(&self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "workspace/executeCommand":
-			if (params != null) {
-				Object* result = execute_command::handle_execute_command(&self.workspace, params);
+			if (params == null) {
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+			} else if (try result = execute_command::handle_execute_command(&self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
-				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
+				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
 			}
 
 		case "$/cancelRequest":
@@ -499,7 +542,9 @@ fn void Server.dispatch(Server* self, Object* msg) {
 
 		case "textDocument/didSave":
 			if (params != null) {
-				sync::handle_did_save(&self.documents, &self.workspace, params);
+				if (catch excuse = sync::handle_did_save(&self.documents, &self.workspace, params)) {
+					log::err("[kls] didSave failed: %s", excuse);
+				}
 			}
 
 		case "workspace/didChangeConfiguration":

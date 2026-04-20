@@ -51,7 +51,7 @@ fn String? extract_dep_doc(DepSymbol* sym) {
 	} else {
 		return NO_DOC~;
 	}
-	defer archive.close()!!;
+	defer (void)archive.close();
 
 	char[] data;
 	if (try d = archive.read_file_all(tmem, entry_name)) {

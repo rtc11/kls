@@ -137,7 +137,7 @@ class Circle : Drawable {
 
 		// Cursor on "Drawable" (the interface name) at line 0, col 10
 		Object* params = make_params("file:///test.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result != null, "expected implementation results");
 		usz len = result.get_len();
@@ -171,7 +171,7 @@ class Rectangle : Shape() {
 
 		// Cursor on "Shape" at line 0, col 16
 		Object* params = make_params("file:///test.kt", 0, 16);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result != null, "expected implementation results");
 		usz len = result.get_len();
@@ -210,7 +210,7 @@ class Bird : Animal {
 
 		// Cursor on "Animal" at line 0, col 10
 		Object* params = make_params("file:///test.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result != null, "expected implementation results");
 		usz len = result.get_len();
@@ -237,7 +237,7 @@ object ConsoleLogger : Logger {
 
 		// Cursor on "Logger" at line 0, col 10
 		Object* params = make_params("file:///test.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result != null, "expected implementation results");
 		usz len = result.get_len();
@@ -264,7 +264,7 @@ fn void implementation_no_implementations() @test {
 
 		// Cursor on "Foo" at line 0, col 10
 		Object* params = make_params("file:///test.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result == null, "expected null when no implementations exist");
 	};
@@ -283,7 +283,7 @@ fn void implementation_on_keyword_returns_null() @test {
 
 		// Cursor on "interface" keyword at line 0, col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -298,7 +298,7 @@ fn void implementation_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///nonexistent.kt", 0, 0);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -326,7 +326,7 @@ fn void implementation_cross_file() @test {
 
 		// Cursor on "Repository" at line 0, col 10 in file A
 		Object* params = make_params("file:///a.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, &ws, params);
+		Object* result = implementation::handle_implementation(&store, &ws, params) ?? null;
 
 		assert(result != null, "expected cross-file implementation result");
 		usz len = result.get_len();
@@ -361,7 +361,7 @@ fn void implementation_cross_file_multiple() @test {
 
 		// Cursor on "Service" at line 0, col 10
 		Object* params = make_params("file:///service.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, &ws, params);
+		Object* result = implementation::handle_implementation(&store, &ws, params) ?? null;
 
 		assert(result != null, "expected cross-file implementations");
 		usz len = result.get_len();
@@ -388,7 +388,7 @@ class MyInt : Comparable<MyInt> {
 
 		// Cursor on "Comparable" at line 0, col 10
 		Object* params = make_params("file:///test.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result != null, "expected implementation for generic interface");
 		usz len = result.get_len();
@@ -411,7 +411,7 @@ class Derived(id: Int) : Base(id) {}`;
 
 		// Cursor on "Base" at line 0, col 16
 		Object* params = make_params("file:///test.kt", 0, 16);
-		Object* result = implementation::handle_implementation(&store, null, params);
+		Object* result = implementation::handle_implementation(&store, null, params) ?? null;
 
 		assert(result != null, "expected implementation result");
 		usz len = result.get_len();
@@ -448,7 +448,7 @@ class EmailValidator : Validator {}`;
 
 		// Cursor on "Validator" at line 0, col 10
 		Object* params = make_params("file:///main.kt", 0, 10);
-		Object* result = implementation::handle_implementation(&store, &ws, params);
+		Object* result = implementation::handle_implementation(&store, &ws, params) ?? null;
 
 		assert(result != null, "expected implementation results");
 		usz len = result.get_len();

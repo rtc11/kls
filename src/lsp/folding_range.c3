@@ -23,9 +23,9 @@ import kls::kotlin::ast;
  *   kind?:          "comment" | "imports" | "region"
  * }
  */
-fn Object* handle_folding_range(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_folding_range(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {

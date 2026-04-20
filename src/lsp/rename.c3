@@ -17,13 +17,13 @@ import kls::workspace;
  * Returns a { range, placeholder } object if the identifier at the cursor
  * can be renamed, or null if renaming is not possible at this position.
  */
-fn Object* handle_prepare_rename(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_prepare_rename(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) return null;
@@ -75,15 +75,15 @@ fn Object* handle_prepare_rename(DocumentStore* store, Object* params) {
  * The WorkspaceEdit uses the "changes" map format:
  *   { "changes": { "uri1": [TextEdit, ...], "uri2": [...] } }
  */
-fn Object* handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
-	String new_name = params.get_string("newName")!!;
+	String new_name = params.get_string("newName")!;
 
 	// #17: Validate that the new name is a legal Kotlin identifier
 	if (new_name.len == 0) return null;

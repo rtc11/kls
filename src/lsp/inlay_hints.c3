@@ -23,16 +23,16 @@ const int HINT_KIND_PARAMETER = 2;
  * - Parameter name hints at call argument positions (kind=2)
  * - Type annotation hints for val/var without explicit types (kind=1)
  */
-fn Object* handle_inlay_hints(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_inlay_hints(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	// Extract the requested range
-	Object* range_obj = params.get("range")!!;
-	Object* range_start = range_obj.get("start")!!;
-	Object* range_end = range_obj.get("end")!!;
-	uint start_line = (uint)range_start.get_int("line")!!;
-	uint end_line = (uint)range_end.get_int("line")!!;
+	Object* range_obj = params.get("range")!;
+	Object* range_start = range_obj.get("start")!;
+	Object* range_end = range_obj.get("end")!;
+	uint start_line = (uint)range_start.get_int("line")!;
+	uint end_line = (uint)range_end.get_int("line")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {
@@ -1150,6 +1150,6 @@ fn uint offset_to_col(String content, uint offset) {
  * since tooltips are computed eagerly. This handler exists so clients
  * that send resolve requests don't get errors.
  */
-fn Object* handle_inlay_hint_resolve(Object* hint) {
+fn Object*? handle_inlay_hint_resolve(Object* hint) {
 	return hint;
 }

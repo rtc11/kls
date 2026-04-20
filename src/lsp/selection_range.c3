@@ -17,9 +17,9 @@ import kls::kotlin::ast;
  * cursor position, then builds a chain from innermost to outermost via
  * the parent index.
  */
-fn Object* handle_selection_range(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_selection_range(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {
@@ -29,13 +29,13 @@ fn Object* handle_selection_range(DocumentStore* store, Object* params) {
 	// Get cached AST (parses lazily if needed)
 	ParseResult* pr = store.get_ast(uri) ?? null;
 
-	Object* positions = params.get("positions")!!;
+	Object* positions = params.get("positions")!;
 	Object* result = object::new_obj(tmem); // JSON array
 
 	for (sz i = 0; i < positions.get_len(); i++) {
 		Object* pos = positions.get_at(i);
-		uint line = (uint)pos.get_int("line")!!;
-		uint character = (uint)pos.get_int("character")!!;
+		uint line = (uint)pos.get_int("line")!;
+		uint character = (uint)pos.get_int("character")!;
 
 		Object* sel = build_selection_range(doc, pr, line, character);
 		result.push(sel);

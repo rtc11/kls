@@ -502,7 +502,9 @@ fn void DapServer.send_response(DapServer* self, int request_seq, String command
 	if (body != null) {
 		response.set("body", body);
 	}
-	json_rpc::write_message(response);
+	if (catch excuse = json_rpc::write_message(response)) {
+		log::err("[dap] Failed to write response: %s", excuse);
+	}
 }
 
 fn void DapServer.send_error_response(DapServer* self, int request_seq, String command, String message) {
@@ -514,7 +516,9 @@ fn void DapServer.send_error_response(DapServer* self, int request_seq, String c
 	response.set("success", false);
 	response.set("command", command);
 	response.set("message", message);
-	json_rpc::write_message(response);
+	if (catch excuse = json_rpc::write_message(response)) {
+		log::err("[dap] Failed to write error response: %s", excuse);
+	}
 }
 
 fn void DapServer.send_event(DapServer* self, String event, Object* body) {
@@ -526,5 +530,7 @@ fn void DapServer.send_event(DapServer* self, String event, Object* body) {
 	if (body != null) {
 		msg.set("body", body);
 	}
-	json_rpc::write_message(msg);
+	if (catch excuse = json_rpc::write_message(msg)) {
+		log::err("[dap] Failed to write event: %s", excuse);
+	}
 }

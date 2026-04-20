@@ -15,6 +15,7 @@ fn Object* build_capabilities(bool client_supports_utf8) {
 	Object* text_doc_sync = object::new_obj(tmem);
 	text_doc_sync.set("openClose", true);
 	text_doc_sync.set("change", 2); // TextDocumentSyncKind.Incremental
+	text_doc_sync.set("save", true);
 	caps.set("textDocumentSync", text_doc_sync);
 
 	// #6: Only claim UTF-8 position encoding if client supports it

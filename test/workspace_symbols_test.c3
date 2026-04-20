@@ -23,7 +23,7 @@ fn void workspace_symbol_empty_query_returns_all() @test {
 		idx.index_file("file:///test.kt", "fun greet() {}\nclass Foo {}");
 
 		Object* params = make_params("");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result != null, "expected result array");
 		assert(result.get_len() == 2, "expected 2 symbols, got %d", (int)result.get_len());
@@ -39,7 +39,7 @@ fn void workspace_symbol_filters_by_query() @test {
 		idx.index_file("file:///test.kt", "fun greet() {}\nclass Foo {}\nfun getUser() {}");
 
 		Object* params = make_params("gre");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result != null, "expected result array");
 		assert(result.get_len() == 1, "expected 1 symbol matching 'gre', got %d", (int)result.get_len());
@@ -60,7 +60,7 @@ fn void workspace_symbol_case_insensitive() @test {
 
 		// Search with lowercase should find MyClass
 		Object* params = make_params("myclass");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result.get_len() == 1, "expected 1 symbol, got %d", (int)result.get_len());
 		String name = result.get_at(0).get_string("name")!!;
@@ -77,7 +77,7 @@ fn void workspace_symbol_no_match_returns_empty() @test {
 		idx.index_file("file:///test.kt", "fun greet() {}");
 
 		Object* params = make_params("nonexistent");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result != null, "expected result array");
 		assert(result.get_len() == 0, "expected 0 symbols, got %d", (int)result.get_len());
@@ -93,7 +93,7 @@ fn void workspace_symbol_has_correct_kind() @test {
 		idx.index_file("file:///test.kt", "fun greet() {}");
 
 		Object* params = make_params("greet");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		Object* sym = result.get_at(0);
 		int kind = sym.get_int("kind")!!;
@@ -110,7 +110,7 @@ fn void workspace_symbol_has_location() @test {
 		idx.index_file("file:///models.kt", "package com.app\n\nclass User {}");
 
 		Object* params = make_params("User");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result.get_len() == 1, "expected 1 symbol");
 		Object* sym = result.get_at(0);
@@ -138,7 +138,7 @@ fn void workspace_symbol_has_container_name() @test {
 		idx.index_file("file:///test.kt", "package com.example\n\nclass Foo {}");
 
 		Object* params = make_params("Foo");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		Object* sym = result.get_at(0);
 		String container = sym.get_string("containerName")!!;
@@ -157,7 +157,7 @@ fn void workspace_symbol_cross_file() @test {
 
 		// Search for "a" should match alpha, beta, gamma, Delta
 		Object* params = make_params("a");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		// alpha, gamma, Delta all contain 'a'
 		assert(result.get_len() >= 3, "expected at least 3 symbols containing 'a', got %d", (int)result.get_len());
@@ -171,7 +171,7 @@ fn void workspace_symbol_empty_index() @test {
 		defer idx.free();
 
 		Object* params = make_params("anything");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result != null, "expected result array");
 		assert(result.get_len() == 0, "expected 0 symbols for empty index");
@@ -188,7 +188,7 @@ fn void workspace_symbol_substring_match() @test {
 
 		// "User" is a substring of both function names
 		Object* params = make_params("User");
-		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params);
+		Object* result = workspace_symbols::handle_workspace_symbol(&idx, params)!!;
 
 		assert(result.get_len() == 2, "expected 2 symbols containing 'User', got %d", (int)result.get_len());
 	};

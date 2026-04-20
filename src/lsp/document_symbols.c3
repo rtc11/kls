@@ -9,9 +9,9 @@ import kls::kotlin::ast;
  * Returns a hierarchical array of DocumentSymbol objects built from the
  * parser AST.  Returns null if the document is unknown.
  */
-fn Object* handle_document_symbol(DocumentStore* store, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_document_symbol(DocumentStore* store, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
 	// Get cached AST (parses lazily if needed)
 	ParseResult* pr = store.get_ast(uri) ?? null;

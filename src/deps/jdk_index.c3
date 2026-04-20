@@ -252,7 +252,7 @@ fn void index_jmod(DependencyIndex* idx, String jmod_path) {
 		log::warn("[kls]   Skipping jmod (zip open failed): %s", jmod_path);
 		return;
 	}
-	defer archive.close()!!;
+	defer (void)archive.close();
 
 	usz entry_count = archive.count();
 	usz class_count = 0;

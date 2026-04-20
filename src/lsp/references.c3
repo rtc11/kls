@@ -22,13 +22,13 @@ import kls::workspace;
  * locations that correspond to AST declaration name positions.
  * Also scans workspace files for cross-file references.
  */
-fn Object* handle_references(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_references(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	// Check context.includeDeclaration (default true per LSP spec)
 	bool include_declaration = true;

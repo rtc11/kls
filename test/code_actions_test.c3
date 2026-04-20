@@ -156,7 +156,7 @@ fn void empty_diagnostics_returns_no_actions() @test {
 
 		Object* diags = object::new_obj(tmem);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.is_indexable());
 		assert(result.get_len() == 0, "expected 0 actions, got %d", (int)result.get_len());
@@ -176,7 +176,7 @@ fn void valid_code_no_actions() @test {
 
 		Object* diags = build_test_diagnostics(content);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.is_indexable());
 		assert(result.get_len() == 0, "expected 0 actions for valid code, got %d", (int)result.get_len());
@@ -199,7 +199,7 @@ fun main() { val _x = 42 }`;
 		assert(diags.get_len() == 1, "expected 1 diagnostic, got %d", (int)diags.get_len());
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.is_indexable());
 		// 1 quickfix + 1 organize imports (server-side)
@@ -227,7 +227,7 @@ fun main() { val _x = 42 }`;
 
 		Object* diags = build_test_diagnostics(content);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.get_len() >= 1);
 
@@ -259,7 +259,7 @@ fun main() { val _x = 42 }`;
 
 		Object* diags = build_test_diagnostics(content);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.get_len() >= 1);
 
@@ -286,7 +286,7 @@ fun main() { val _x = 42 }`;
 		assert(diags.get_len() == 2, "expected 2 diagnostics, got %d", (int)diags.get_len());
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.is_indexable());
 		// 2 individual "Remove unused import" + 1 "Remove all unused imports"
@@ -323,7 +323,7 @@ fun main() { val _x = 42 }`;
 
 		Object* diags = build_test_diagnostics(content);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// 1 quickfix + 1 organize imports (computed server-side)
 		assert(result.get_len() == 2, "expected 2 actions, got %d", (int)result.get_len());
@@ -348,7 +348,7 @@ fun main() { val _x = 42 }`;
 		// Client sends NO diagnostics (cursor is on line 2, not on imports)
 		Object* empty_diags = object::new_obj(tmem);
 		Object* params = make_code_action_params("file:///test.kt", empty_diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// Should still get the organize imports action (computed server-side)
 		assert(result.is_array());
@@ -406,7 +406,7 @@ fn void replace_pipe_with_double_pipe() @test {
 		assert(found_pipe, "expected diagnostic for '|'");
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found_fix = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -447,7 +447,7 @@ fn void insert_missing_close_paren() @test {
 		assert(found_paren_diag, "expected parser diagnostic for missing ')'");
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found_fix = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -492,7 +492,7 @@ fn void insert_missing_close_brace() @test {
 		assert(found_brace_diag, "expected parser diagnostic for missing '}'");
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found_fix = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -542,7 +542,7 @@ fn void no_action_for_expected_identifier() @test {
 		diags.push(diag);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// "Expected identifier" should NOT trigger any code action
 		// (because "identifier" is not a closing delimiter)
@@ -572,7 +572,7 @@ fun main() { val _x = 42 }`;
 
 		String[1] only = { "quickfix" };
 		Object* params = make_filtered_params("file:///test.kt", diags, only[0..0]);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// Should only return quickfix actions, not organize imports
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -599,7 +599,7 @@ fun main() { val _x = 42 }`;
 
 		String[1] only = { "source.organizeImports" };
 		Object* params = make_filtered_params("file:///test.kt", diags, only[0..0]);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// Should only return source.organizeImports actions, not individual quickfixes
 		assert(result.get_len() == 1, "expected 1 organize action, got %d", (int)result.get_len());
@@ -621,7 +621,7 @@ fun main() { val _x = 42 }`;
 
 		Object* diags = build_test_diagnostics(content);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.get_len() >= 1);
 
@@ -664,7 +664,7 @@ fn void unrecognized_character_no_fix() @test {
 		diags.push(diag);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// Should not offer any fix for '~' (not & or |)
 		// Result should have 0 actions
@@ -696,7 +696,7 @@ fun main() { val _x = 42 }`;
 		// Filter with just "source" should also match "source.organizeImports"
 		String[1] only = { "source" };
 		Object* params = make_filtered_params("file:///test.kt", diags, only[0..0]);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// Should return the organize imports action
 		assert(result.get_len() == 1, "expected 1 action with 'source' filter, got %d", (int)result.get_len());
@@ -717,7 +717,7 @@ fn void operator_fix_is_preferred() @test {
 
 		Object* diags = build_test_diagnostics(content);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -765,7 +765,7 @@ fn void unresolved_reference_offers_import_action() @test {
 		assert(found_diag, "expected 'Unresolved reference: KClass' diagnostic");
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should have at least one "Import 'kotlin.reflect.KClass'" action
 		bool found_import = false;
@@ -810,7 +810,7 @@ fun main() { val c = KClass }`;
 
 		Object* diags = object::new_obj(tmem); // empty diagnostics
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -842,7 +842,7 @@ fun main() { val c = KClass }`;
 		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -881,7 +881,7 @@ fun main() { val c = KClass }`;
 		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -942,7 +942,7 @@ fn void cursor_context_import_without_diagnostic() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should offer import action even without diagnostics
 		bool found_import = false;
@@ -996,7 +996,7 @@ fn void auto_imported_name_no_import_action() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1027,7 +1027,7 @@ fn void import_action_links_to_diagnostic() @test {
 		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1062,7 +1062,7 @@ fun main() { val c = KClass }`;
 
 		Object* diags = object::new_obj(tmem);
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1113,7 +1113,7 @@ fn void cursor_on_dot_member_offers_receiver_import() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should offer import for KClass (the receiver) even though cursor is on foo
 		bool found_import = false;
@@ -1169,7 +1169,7 @@ fn void cursor_on_receiver_still_offers_import() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should offer import for KClass directly
 		bool found_import = false;
@@ -1225,7 +1225,7 @@ fn void cursor_on_safe_call_member_offers_receiver_import() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should offer import for KClass (the receiver before ?.)
 		bool found_import = false;
@@ -1280,7 +1280,7 @@ fn void cursor_on_dot_member_of_local_no_import() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should NOT offer any import — receiver myVar is in scope
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1325,7 +1325,7 @@ fn void jdk_uuid_gets_import_action() @test {
 		assert(found_diag, "expected 'Unresolved reference: UUID' diagnostic");
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should have "Import 'java.util.UUID'" action
 		bool found_import = false;
@@ -1389,7 +1389,7 @@ fn void jdk_file_cursor_context_import() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should offer import action for java.io.File
 		bool found_import = false;
@@ -1444,7 +1444,7 @@ fn void jdk_java_lang_no_import_action() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		// Should NOT offer any import for Thread (it's from java.lang, auto-imported)
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1470,7 +1470,7 @@ fn void extract_variable_from_binary_expr() @test {
 
 		// Select "1 + 2" (col 21 to col 26)
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1516,7 +1516,7 @@ fn void extract_variable_from_call_expr() @test {
 
 		// Select "foo()" (col 21 to col 26)
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1548,7 +1548,7 @@ fn void no_extract_variable_for_name() @test {
 
 		// Select "y" (col 21 to col 22)
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 22);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1571,7 +1571,7 @@ fn void no_extract_variable_for_empty_selection() @test {
 
 		// Empty selection (same start and end)
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 21);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1594,7 +1594,7 @@ fn void no_extract_variable_for_partial_selection() @test {
 
 		// Select "1 +" (col 21 to col 24) — doesn't match any expression node
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 24);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1620,7 +1620,7 @@ fn void extract_variable_preserves_indentation() @test {
 		//          0123456789012345678
 		// "1 + 2" starts at col 12, ends at col 17 (exclusive)
 		Object* params = make_extract_params("file:///test.kt", 1, 12, 1, 17);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1679,7 +1679,7 @@ fn void extract_variable_only_filter() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		// Should include extract variable (refactor.extract.variable matches "refactor")
 		bool found = false;
@@ -1732,7 +1732,7 @@ fn void extract_variable_filtered_out_by_quickfix() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1757,7 +1757,7 @@ fn void extract_function_from_expression() @test {
 
 		// Select "1 + 2" (col 21 to col 26)
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1803,7 +1803,7 @@ fn void extract_function_from_statements() @test {
 		// Line 1: "    val y = 10"  (14 chars)
 		// Line 2: "    println(y)"  (14 chars)
 		Object* params = make_extract_params("file:///test.kt", 1, 0, 2, 14);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1844,7 +1844,7 @@ fn void extract_function_with_parameters() @test {
 		//          0         1         2
 		//          0123456789012345678901
 		Object* params = make_extract_params("file:///test.kt", 1, 0, 1, 22);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -1882,7 +1882,7 @@ fn void no_extract_function_for_empty_selection() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 21);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1905,7 +1905,7 @@ fn void no_extract_function_for_name() @test {
 
 		// Select "y" (col 21 to col 22)
 		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 22);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1951,7 +1951,7 @@ fn void extract_function_filtered_by_quickfix() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -1974,7 +1974,7 @@ fn void generate_to_string_for_data_class() @test {
 
 		// Cursor inside class (line 0, col 20)
 		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2008,7 +2008,7 @@ fn void generate_equals_for_data_class() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2045,7 +2045,7 @@ fn void generate_hash_code_for_data_class() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2080,7 +2080,7 @@ fn void no_generate_for_non_data_class() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 15, 0, 15);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -2102,7 +2102,7 @@ fn void no_generate_when_already_exists() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -2124,7 +2124,7 @@ fn void generate_all_three_for_data_class() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 20, 0, 20);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found_to_string = false;
 		bool found_equals = false;
@@ -2154,7 +2154,7 @@ fn void convert_fun_to_expression_body() @test {
 
 		// Cursor on function (col 5)
 		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2189,7 +2189,7 @@ fn void no_convert_for_multi_statement_fun() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -2211,7 +2211,7 @@ fn void no_convert_for_empty_fun() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -2234,7 +2234,7 @@ fn void convert_fun_with_expression_statement() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_extract_params("file:///test.kt", 0, 5, 0, 5);
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2289,7 +2289,7 @@ fn void convert_expression_body_filtered_by_quickfix() @test {
 		params.set("range", range);
 		params.set("context", context);
 
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -2322,7 +2322,7 @@ fn void import_all_unresolved_references() @test {
 		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2365,7 +2365,7 @@ fn void no_import_all_for_single_unresolved() @test {
 		Object* diags = diagnostics::build_diagnostics_array(content, pr, &workspace);
 
 		Object* params = make_code_action_params("file:///test.kt", diags);
-		Object* result = code_actions::handle_code_action(&store, &workspace, params);
+		Object* result = code_actions::handle_code_action(&store, &workspace, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);
@@ -2388,7 +2388,7 @@ fn void star_import_suggestion() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_code_action_params_source("file:///test.kt");
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		bool found = false;
 		for (sz i = 0; i < result.get_len(); i++) {
@@ -2421,7 +2421,7 @@ fn void no_star_import_for_two_imports() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_code_action_params_source("file:///test.kt");
-		Object* result = code_actions::handle_code_action(&store, null, params);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		for (sz i = 0; i < result.get_len(); i++) {
 			String title = get_action_title(result, (usz)i);

@@ -58,7 +58,7 @@ fn void cross_file_function_references() @test {
 
 		// Cursor on "helper" in file B at col 14
 		Object* params = make_params("file:///b.kt", 0, 14);
-		Object* result = references::handle_references(&store, &ws, params);
+		Object* result = references::handle_references(&store, &ws, params)!!;
 
 		assert(result != null, "expected references array");
 		// Same-file: 1 (the call in b.kt)
@@ -99,7 +99,7 @@ fn void cross_file_class_references() @test {
 
 		// Cursor on "Widget" at col 14 (return type) in main.kt
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = references::handle_references(&store, &ws, params);
+		Object* result = references::handle_references(&store, &ws, params)!!;
 
 		assert(result != null, "expected references array");
 		// main.kt has 2 occurrences of "Widget", models.kt has 1
@@ -120,7 +120,7 @@ fn void null_workspace_same_file_only() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = references::handle_references(&store, null, params);
+		Object* result = references::handle_references(&store, null, params)!!;
 
 		assert(result != null, "expected references");
 		assert(result.get_len() == 2, "expected 2 same-file refs, got %d", (int)result.get_len());
@@ -146,7 +146,7 @@ fn void cross_file_no_match_no_extra_refs() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = references::handle_references(&store, &ws, params);
+		Object* result = references::handle_references(&store, &ws, params)!!;
 
 		assert(result != null, "expected references");
 		// Only same-file refs
@@ -174,7 +174,7 @@ fn void cross_file_uris_correct() @test {
 		store.open("file:///main.kt", "kotlin", 1, file_b);
 
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = references::handle_references(&store, &ws, params);
+		Object* result = references::handle_references(&store, &ws, params)!!;
 
 		assert(result != null, "expected references");
 		// Check that cross-file location has correct URI
@@ -214,7 +214,7 @@ fn void cross_file_multiple_files() @test {
 		store.open("file:///c.kt", "kotlin", 1, file_c);
 
 		Object* params = make_params("file:///c.kt", 0, 14);
-		Object* result = references::handle_references(&store, &ws, params);
+		Object* result = references::handle_references(&store, &ws, params)!!;
 
 		assert(result != null, "expected references");
 		// c.kt: 1 ref, a.kt: 1 ref, b.kt: 1 ref = 3 total

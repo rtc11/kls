@@ -280,7 +280,7 @@ fn void hover_function_shows_signature() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet(name: String): String {}");
 		// Hover over "greet" at col 4
 		Object* params = make_hover_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -300,7 +300,7 @@ fn void hover_class_shows_signature() @test {
 		store.open("file:///test.kt", "kotlin", 1, "data class User(val name: String)");
 		// Hover over "User" at col 11
 		Object* params = make_hover_params("file:///test.kt", 0, 11);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -319,7 +319,7 @@ fn void hover_property_shows_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "val count: Int = 0");
 		// Hover over "count" at col 4
 		Object* params = make_hover_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -340,7 +340,7 @@ fn void hover_var_property_shows_var() @test {
 		store.open("file:///test.kt", "kotlin", 1, "var count: Int = 0");
 		// Hover over "count" at col 4
 		Object* params = make_hover_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result for var");
 		Object* contents = result.get("contents")!!;
@@ -360,7 +360,7 @@ fn void hover_val_property_shows_val() @test {
 		store.open("file:///test.kt", "kotlin", 1, "val name: String = \"hello\"");
 		// Hover over "name" at col 4
 		Object* params = make_hover_params("file:///test.kt", 0, 4);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result for val");
 		Object* contents = result.get("contents")!!;
@@ -394,7 +394,7 @@ fn void hover_shows_kdoc_for_function() @test {
 		// Line 4: "fun main() { greet("x") }"
 		//          01234567890123456
 		Object* params = make_hover_params("file:///test.kt", 4, 15);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -423,7 +423,7 @@ fn void hover_shows_line_comments_for_class() @test {
 		// Hover over "Box" in the call on line 2
 		// Line 2: "fun main() { Box(1) }"
 		Object* params = make_hover_params("file:///test.kt", 2, 15);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -444,7 +444,7 @@ fn void hover_no_doc_without_comment() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet(name: String) {}\nfun main() { greet(\"\") }");
 
 		Object* params = make_hover_params("file:///test.kt", 1, 15);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -473,7 +473,7 @@ fn void hover_apply_shows_doc() @test {
 		store.open("file:///test.kt", "kotlin", 1, source);
 		// Hover over "apply" at line 2, col 20
 		Object* params = make_hover_params("file:///test.kt", 2, 20);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result for .apply");
 		Object* contents = result.get("contents")!!;
@@ -502,7 +502,7 @@ fn void hover_let_shows_doc() @test {
 		store.open("file:///test.kt", "kotlin", 1, source);
 		// Hover over "let" at line 2, col 10
 		Object* params = make_hover_params("file:///test.kt", 2, 10);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result for .let");
 		Object* contents = result.get("contents")!!;
@@ -525,7 +525,7 @@ fn void hover_generic_class_shows_type_params() @test {
 		store.open("file:///test.kt", "kotlin", 1, "class Box<T>(val value: T)");
 		// Hover over "Box" at col 6
 		Object* params = make_hover_params("file:///test.kt", 0, 6);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -543,7 +543,7 @@ fn void hover_generic_fun_shows_type_params() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun <T> identity(x: T): T = x");
 		// Hover over "identity" at col 8
 		Object* params = make_hover_params("file:///test.kt", 0, 8);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -563,7 +563,7 @@ fn void hover_generic_class_with_bound_and_variance() @test {
 		store.open("file:///test.kt", "kotlin", 1, "class Sorter<out T : Comparable<T>>()");
 		// Hover over "Sorter" at col 6
 		Object* params = make_hover_params("file:///test.kt", 0, 6);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -582,7 +582,7 @@ fn void hover_fun_with_where_clause() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun <T> sort(list: List<T>) where T : Comparable<T> {}");
 		// Hover over "sort" at col 8
 		Object* params = make_hover_params("file:///test.kt", 0, 8);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;
@@ -601,7 +601,7 @@ fn void hover_typealias_with_type_params() @test {
 		store.open("file:///test.kt", "kotlin", 1, "typealias StringMap<V> = Map<String, V>");
 		// Hover over "StringMap" at col 10
 		Object* params = make_hover_params("file:///test.kt", 0, 10);
-		Object* result = hover::handle_hover(&store, null, params);
+		Object* result = hover::handle_hover(&store, null, params)!!;
 
 		assert(result != null, "expected hover result");
 		Object* contents = result.get("contents")!!;

@@ -318,7 +318,7 @@ fn void completion_resolve_stdlib_adds_documentation() @test {
 		item.set("data", data);
 
 		// Resolve should add documentation
-		Object* resolved = completion::handle_completion_resolve(null, item);
+		Object* resolved = completion::handle_completion_resolve(null, item)!!;
 		Object* doc_obj = resolved.get("documentation")!!;
 		String doc_kind = doc_obj.get_string("kind")!!;
 		assert(doc_kind == "markdown", "expected markdown, got '%s'", doc_kind);
@@ -339,7 +339,7 @@ fn void completion_resolve_member_adds_signature() @test {
 		data.set("signature", "val length: Int");
 		item.set("data", data);
 
-		Object* resolved = completion::handle_completion_resolve(null, item);
+		Object* resolved = completion::handle_completion_resolve(null, item)!!;
 		Object* doc_obj = resolved.get("documentation")!!;
 		String doc_value = doc_obj.get_string("value")!!;
 		assert(doc_value.contains("val length: Int"), "expected signature in doc");
@@ -352,7 +352,7 @@ fn void completion_resolve_no_data_returns_item_unchanged() @test {
 		item.set("label", "myVar");
 		item.set("kind", completion::COMPLETION_KIND_VARIABLE);
 
-		Object* resolved = completion::handle_completion_resolve(null, item);
+		Object* resolved = completion::handle_completion_resolve(null, item)!!;
 		// No data -> no documentation added
 		assert(resolved == item, "expected same item returned");
 		Object* doc = resolved.get("documentation") ?? null;

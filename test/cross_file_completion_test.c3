@@ -42,7 +42,7 @@ fn void workspace_completion_basic() @test {
 
 		// Cursor after "hel" at col 16
 		Object* params = make_params("file:///main.kt", 0, 16);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -81,7 +81,7 @@ fn void workspace_completion_class() @test {
 
 		// Cursor at col 16 (after "My")
 		Object* params = make_params("file:///main.kt", 0, 16);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 		bool found_widget = false;
@@ -122,7 +122,7 @@ fn void workspace_completion_skips_same_doc() @test {
 		ws.index_file("file:///other.kt", "fun localOther() {}");
 
 		Object* params = make_params("file:///main.kt", 1, 18);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 		bool found_other = false;
@@ -155,7 +155,7 @@ fn void workspace_completion_deduplicates() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 16);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 		usz count = 0;
@@ -181,7 +181,7 @@ fn void completion_with_null_workspace() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 15);
-		Object* result = completion::handle_completion(&store, null, params);
+		Object* result = completion::handle_completion(&store, null, params)!!;
 
 		assert(result != null, "expected completion result with null workspace");
 		Object* items = result.get("items")!!;
@@ -214,7 +214,7 @@ fn void workspace_completion_interface_kind() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 14);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 		for (usz i = 0; i < items.get_len(); i++) {
@@ -249,7 +249,7 @@ fn void workspace_completion_no_match() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 16);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 		// No workspace items should match prefix "xyz"
@@ -288,7 +288,7 @@ fn void dot_completion_workspace_class_function() @test {
 
 		// Cursor after "svc." on line 2, col 8
 		Object* params = make_params("file:///main.kt", 2, 8);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -333,7 +333,7 @@ fn void dot_completion_workspace_class_property() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 8);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 
@@ -380,7 +380,7 @@ fn void dot_completion_workspace_class_with_prefix() @test {
 
 		// Cursor after "svc.fe" on line 2, col 10
 		Object* params = make_params("file:///main.kt", 2, 10);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 
@@ -419,7 +419,7 @@ fn void dot_completion_workspace_data_class_params() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 6);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 
@@ -464,7 +464,7 @@ fn void dot_completion_workspace_inherited_members() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 6);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 
@@ -504,7 +504,7 @@ fn void dot_completion_workspace_interface_members() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 9);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		Object* items = result.get("items")!!;
 
@@ -539,7 +539,7 @@ fn void dot_completion_workspace_no_match_unknown_type() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 6);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		// Should still return a result (possibly with keyword/identifier completions)
 		assert(result != null, "expected completion result");
@@ -557,7 +557,7 @@ fn void dot_completion_workspace_null_workspace() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 6);
-		Object* result = completion::handle_completion(&store, null, params);
+		Object* result = completion::handle_completion(&store, null, params)!!;
 
 		assert(result != null, "expected completion result with null workspace");
 	};
@@ -588,7 +588,7 @@ fn void dot_completion_inferred_cross_file_type() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 2, 6);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -622,7 +622,7 @@ fn void annotation_completion_offers_kotlin_annotations() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 1);
-		Object* result = completion::handle_completion(&store, null, params);
+		Object* result = completion::handle_completion(&store, null, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -654,7 +654,7 @@ fn void annotation_completion_filters_by_prefix() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 4);
-		Object* result = completion::handle_completion(&store, null, params);
+		Object* result = completion::handle_completion(&store, null, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -693,7 +693,7 @@ fn void import_completion_offers_packages() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 11);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -725,7 +725,7 @@ fn void import_completion_offers_classes() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 19);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
@@ -760,7 +760,7 @@ fn void import_completion_filters_by_prefix() @test {
 		store.open("file:///main.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///main.kt", 0, 21);
-		Object* result = completion::handle_completion(&store, &ws, params);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;

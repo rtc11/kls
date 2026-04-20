@@ -40,7 +40,7 @@ fn void empty_document_returns_empty_data() @test {
 		store.open("file:///test.kt", "kotlin", 1, "");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null, "expected result, not null");
 		int[] data = get_data(result);
@@ -57,7 +57,7 @@ fn void unknown_document_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -74,7 +74,7 @@ fn void single_keyword_encoding() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -101,7 +101,7 @@ fn void two_tokens_same_line() @test {
 		store.open("file:///test.kt", "kotlin", 1, "val x");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -135,7 +135,7 @@ fn void tokens_different_lines() @test {
 		store.open("file:///test.kt", "kotlin", 1, "val\nfun");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -163,7 +163,7 @@ fn void modifier_keyword_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "abstract");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -183,7 +183,7 @@ fn void string_token_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, `"hello"`);
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -206,7 +206,7 @@ fn void number_token_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "42");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -227,7 +227,7 @@ fn void operator_token_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "+");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -247,7 +247,7 @@ fn void property_keyword_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "get");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -267,7 +267,7 @@ fn void line_comment_token_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "// hello");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -286,7 +286,7 @@ fn void block_comment_token_type() @test {
 		store.open("file:///test.kt", "kotlin", 1, "/* block */");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -308,7 +308,7 @@ fn void multiline_mixed() @test {
 		store.open("file:///test.kt", "kotlin", 1, "// comment\nval x = 42");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -358,7 +358,7 @@ fn void whitespace_only_empty_data() @test {
 		store.open("file:///test.kt", "kotlin", 1, "   \n\t\n  ");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -423,7 +423,7 @@ fn void real_kotlin_snippet() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -450,7 +450,7 @@ fn void function_name_classified() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -471,7 +471,7 @@ fn void class_name_classified() @test {
 		store.open("file:///test.kt", "kotlin", 1, "class Foo {}");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -491,7 +491,7 @@ fn void enum_entry_classified() @test {
 		store.open("file:///test.kt", "kotlin", 1, "enum class Color { RED }");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -513,7 +513,7 @@ fn void parameter_classified() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun add(a: Int) {}");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		int[] data = get_data(result);
@@ -537,7 +537,7 @@ fn void call_expr_classified_as_function() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun main() {\n    println(42)\n}");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 		assert(result != null);
 		int[] data = get_data(result);
 
@@ -567,7 +567,7 @@ fn void member_access_classified_as_property() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun foo() {\n    name.length\n}");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 		assert(result != null);
 		int[] data = get_data(result);
 
@@ -595,7 +595,7 @@ fn void member_call_classified_as_function() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun foo() {\n    x.toString()\n}");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 		assert(result != null);
 		int[] data = get_data(result);
 
@@ -624,7 +624,7 @@ fn void type_param_declaration_gets_type_parameter_token() @test {
 		store.open("file:///test.kt", "kotlin", 1, "class Box<T>");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null, "expected result");
 		int[] data = get_data(result);
@@ -693,12 +693,12 @@ fn void range_returns_subset_of_tokens() @test {
 
 		// Full tokens
 		Object* full_params = make_params("file:///test.kt");
-		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params)!!;
 		int[] full_data = get_data(full_result);
 
 		// Range: only line 1
 		Object* range_params = make_range_params("file:///test.kt", 1, 0, 1, 9);
-		Object* range_result = semantic_tokens::handle_semantic_tokens_range(&store, range_params);
+		Object* range_result = semantic_tokens::handle_semantic_tokens_range(&store, range_params)!!;
 
 		assert(range_result != null, "expected range result");
 		int[] range_data = get_data(range_result);
@@ -724,7 +724,7 @@ fn void range_empty_range_returns_empty() @test {
 
 		// Range on line 99 (beyond end)
 		Object* params = make_range_params("file:///test.kt", 99, 0, 99, 0);
-		Object* result = semantic_tokens::handle_semantic_tokens_range(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_range(&store, params)!!;
 
 		assert(result != null, "expected result");
 		int[] data = get_data(result);
@@ -743,7 +743,7 @@ fn void full_result_has_result_id() @test {
 		store.open("file:///test.kt", "kotlin", 1, "val x = 1");
 
 		Object* params = make_params("file:///test.kt");
-		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params);
+		Object* result = semantic_tokens::handle_semantic_tokens_full(&store, params)!!;
 
 		assert(result != null);
 		String rid = result.get_string("resultId")!!;
@@ -773,12 +773,12 @@ fn void delta_no_change_returns_empty_edits() @test {
 
 		// Get full result (caches data)
 		Object* full_params = make_params("file:///test.kt");
-		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params)!!;
 		String rid = full_result.get_string("resultId")!!;
 
 		// Request delta with same resultId (no changes)
 		Object* delta_params = make_delta_params("file:///test.kt", rid);
-		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params);
+		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params)!!;
 
 		assert(delta_result != null, "expected delta result");
 		// Should have resultId and edits (empty array)
@@ -802,7 +802,7 @@ fn void delta_with_change_returns_edits() @test {
 
 		// Get full result
 		Object* full_params = make_params("file:///test.kt");
-		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		Object* full_result = semantic_tokens::handle_semantic_tokens_full(&store, full_params)!!;
 		String rid = full_result.get_string("resultId")!!;
 
 		// Change document
@@ -810,7 +810,7 @@ fn void delta_with_change_returns_edits() @test {
 
 		// Request delta
 		Object* delta_params = make_delta_params("file:///test.kt", rid);
-		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params);
+		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params)!!;
 
 		assert(delta_result != null, "expected delta result");
 		String new_rid = delta_result.get_string("resultId")!!;
@@ -841,11 +841,11 @@ fn void delta_wrong_id_returns_full() @test {
 
 		// Get full result (caches)
 		Object* full_params = make_params("file:///test.kt");
-		semantic_tokens::handle_semantic_tokens_full(&store, full_params);
+		semantic_tokens::handle_semantic_tokens_full(&store, full_params)!!;
 
 		// Request delta with wrong ID
 		Object* delta_params = make_delta_params("file:///test.kt", "999999");
-		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params);
+		Object* delta_result = semantic_tokens::handle_semantic_tokens_delta(&store, delta_params)!!;
 
 		assert(delta_result != null, "expected result");
 		// Should be a full result (has "data" key, not "edits")

@@ -30,7 +30,7 @@ fn void code_lens_empty_file() @test {
 		DocumentStore store = make_store_with("file:///test.kt", "");
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		assert(result.get_len() == 0, "expected 0 lenses, got %d", (int)result.get_len());
 	};
@@ -44,7 +44,7 @@ fn void code_lens_top_level_main() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		assert(result.get_len() == 1, "expected 1 lens, got %d", (int)result.get_len());
 
@@ -67,7 +67,7 @@ fn void code_lens_main_not_in_class() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		// Only the class itself is a top-level node; main() inside should not get a Run lens
 		// The class has no @Test methods, so no lenses at all
@@ -83,7 +83,7 @@ fn void code_lens_test_function() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		assert(result.get_len() == 1, "expected 1 lens, got %d", (int)result.get_len());
 
@@ -106,7 +106,7 @@ fn void code_lens_class_with_test_methods() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		// 1 class lens ("Run Tests") + 2 method lenses ("Run Test" each) = 3
 		assert(result.get_len() == 3, "expected 3 lenses, got %d", (int)result.get_len());
@@ -139,7 +139,7 @@ fn void code_lens_class_without_tests() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		assert(result.get_len() == 0, "expected 0 lenses, got %d", (int)result.get_len());
 	};
@@ -153,7 +153,7 @@ fn void code_lens_test_arguments_include_class_name() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		assert(result.get_len() >= 2, "expected at least 2 lenses");
 
@@ -177,7 +177,7 @@ fn void code_lens_main_and_test_combined() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		// 1 Run lens for main + 1 Run Test lens
 		assert(result.get_len() == 2, "expected 2 lenses, got %d", (int)result.get_len());
@@ -190,7 +190,7 @@ fn void code_lens_unknown_document() @test {
 		store.init();
 		defer store.free();
 		Object* params = make_params("file:///unknown.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result == null, "expected null for unknown document");
 	};
 }
@@ -201,7 +201,7 @@ fn void code_lens_dotted_test_annotation() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		assert(result.get_len() == 1, "expected 1 lens, got %d", (int)result.get_len());
 
@@ -228,7 +228,7 @@ internal class TsTest : ConsumerTestBase() {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		// 1 class lens + 2 method lenses = 3
 		assert(result.get_len() == 3, "expected 3 lenses, got %d", (int)result.get_len());
@@ -246,7 +246,7 @@ fn void code_lens_backtick_function_name() @test {
 		DocumentStore store = make_store_with("file:///test.kt", src);
 		defer store.free();
 		Object* params = make_params("file:///test.kt");
-		Object* result = code_lens::handle_code_lens(&store, params);
+		Object* result = code_lens::handle_code_lens(&store, params)!!;
 		assert(result != null, "expected non-null result");
 		// 1 class lens + 1 method lens = 2
 		assert(result.get_len() == 2, "expected 2 lenses, got %d", (int)result.get_len());

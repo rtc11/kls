@@ -17,7 +17,7 @@ struct ScoredSymbol {
  * Returns a JSON array of SymbolInformation objects matching the query.
  * If query is empty, returns all symbols (up to MAX_WORKSPACE_SYMBOL_RESULTS).
  */
-fn Object* handle_workspace_symbol(WorkspaceIndex* workspace, Object* params) {
+fn Object*? handle_workspace_symbol(WorkspaceIndex* workspace, Object* params) {
 	String query = "";
 	if (params != null) {
 		if (try q = params.get_string("query")) {

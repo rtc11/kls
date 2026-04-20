@@ -48,7 +48,7 @@ fn void prepare_unknown_document_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 		assert(result == null, "expected null for unknown document");
 	};
 }
@@ -63,7 +63,7 @@ fn void prepare_on_class_name() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "class Foo {}");
 		Object* params = make_params("file:///test.kt", 0, 6);
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected result for class name");
 		assert(result.get_len() == 1, "expected 1 item");
@@ -87,7 +87,7 @@ fn void prepare_on_interface_name() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "interface Drawable {}");
 		Object* params = make_params("file:///test.kt", 0, 10);
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected result for interface name");
 		Object* item = result.get_at(0);
@@ -109,7 +109,7 @@ fn void prepare_on_keyword_returns_null() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "class Foo {}");
 		Object* params = make_params("file:///test.kt", 0, 0);  // on "class" keyword
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -125,7 +125,7 @@ fn void prepare_on_function_returns_null() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "fun main() {}");
 		Object* params = make_params("file:///test.kt", 0, 4);  // on "main"
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result == null, "expected null for function name");
 	};
@@ -141,7 +141,7 @@ fn void prepare_has_ranges() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "class Foo : Bar {}");
 		Object* params = make_params("file:///test.kt", 0, 6);
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected result");
 		Object* item = result.get_at(0);
@@ -171,7 +171,7 @@ class Derived : Base() {}`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_supertypes_params("Derived", "file:///test.kt");
-		Object* result = type_hierarchy::handle_supertypes(&store, null, params);
+		Object* result = type_hierarchy::handle_supertypes(&store, null, params)!!;
 
 		assert(result != null, "expected supertypes");
 		assert(result.get_len() == 1, "expected 1 supertype, got %d", (int)result.get_len());
@@ -197,7 +197,7 @@ class Baz : Foo, Bar {}`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_supertypes_params("Baz", "file:///test.kt");
-		Object* result = type_hierarchy::handle_supertypes(&store, null, params);
+		Object* result = type_hierarchy::handle_supertypes(&store, null, params)!!;
 
 		assert(result != null, "expected supertypes");
 		assert(result.get_len() == 2, "expected 2 supertypes, got %d", (int)result.get_len());
@@ -215,7 +215,7 @@ fn void supertypes_no_supertypes() @test {
 		store.open("file:///test.kt", "kotlin", 1, "class Standalone {}");
 
 		Object* params = make_supertypes_params("Standalone", "file:///test.kt");
-		Object* result = type_hierarchy::handle_supertypes(&store, null, params);
+		Object* result = type_hierarchy::handle_supertypes(&store, null, params)!!;
 
 		assert(result == null, "expected null for class with no supertypes");
 	};
@@ -236,7 +236,7 @@ class Cat : Animal {}`;
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_subtypes_params("Animal", "file:///test.kt");
-		Object* result = type_hierarchy::handle_subtypes(&store, null, params);
+		Object* result = type_hierarchy::handle_subtypes(&store, null, params)!!;
 
 		assert(result != null, "expected subtypes");
 		assert(result.get_len() == 2, "expected 2 subtypes, got %d", (int)result.get_len());
@@ -254,7 +254,7 @@ fn void subtypes_none() @test {
 		store.open("file:///test.kt", "kotlin", 1, "class Leaf {}");
 
 		Object* params = make_subtypes_params("Leaf", "file:///test.kt");
-		Object* result = type_hierarchy::handle_subtypes(&store, null, params);
+		Object* result = type_hierarchy::handle_subtypes(&store, null, params)!!;
 
 		assert(result == null, "expected null for class with no subtypes");
 	};
@@ -276,7 +276,7 @@ fn void subtypes_cross_file() @test {
 		ws.index_file("file:///impl.kt", "class UserRepo : Repository {}");
 
 		Object* params = make_subtypes_params("Repository", "file:///base.kt");
-		Object* result = type_hierarchy::handle_subtypes(&store, &ws, params);
+		Object* result = type_hierarchy::handle_subtypes(&store, &ws, params)!!;
 
 		assert(result != null, "expected cross-file subtypes");
 		assert(result.get_len() == 1, "expected 1 cross-file subtype, got %d", (int)result.get_len());
@@ -305,7 +305,7 @@ fn void supertypes_cross_file() @test {
 		store.open("file:///impl.kt", "kotlin", 1, "class UserRepo : Repository {}");
 
 		Object* params = make_supertypes_params("UserRepo", "file:///impl.kt");
-		Object* result = type_hierarchy::handle_supertypes(&store, &ws, params);
+		Object* result = type_hierarchy::handle_supertypes(&store, &ws, params)!!;
 
 		assert(result != null, "expected supertypes via cross-file");
 		assert(result.get_len() == 1, "expected 1 supertype, got %d", (int)result.get_len());
@@ -326,7 +326,7 @@ fn void prepare_on_object_name() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "object Singleton {}");
 		Object* params = make_params("file:///test.kt", 0, 7);
-		Object* result = type_hierarchy::handle_prepare(&store, null, params);
+		Object* result = type_hierarchy::handle_prepare(&store, null, params)!!;
 
 		assert(result != null, "expected result for object name");
 		Object* item = result.get_at(0);

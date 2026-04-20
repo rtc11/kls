@@ -234,7 +234,7 @@ fn void DependencyIndex.index_jar(DependencyIndex* self, String jar_path) {
 		log::warn("[kls]   Skipping JAR (open failed): %s", jar_path);
 		return;
 	}
-	defer archive.close()!!;
+	defer (void)archive.close();
 
 	// Intern jar_path: one heap copy shared by all symbols from this JAR
 	String interned_jar_path = jar_path.copy(mem);

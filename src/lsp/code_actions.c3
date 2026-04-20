@@ -24,12 +24,12 @@ faultdef NO_RECEIVER;
  *   - "Insert missing '<delim>'" (quickfix) for Expected ')', '}', '>' errors
  *   - "Import <pkg>.<name>" (quickfix) for unresolved references
  */
-fn Object* handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* context = params.get("context")!!;
-	Object* client_diagnostics = context.get("diagnostics")!!;
+	Object* context = params.get("context")!;
+	Object* client_diagnostics = context.get("diagnostics")!;
 
 	// Check if the client is filtering by kind
 	String[8] only_kinds;
@@ -1727,7 +1727,7 @@ fn void add_import_actions_at_cursor(Object* actions, String uri, Document* doc,
  * Receives an action with "data" field, computes the full "edit", returns completed action.
  * Also handles actions that already have edits (returns as-is).
  */
-fn Object* handle_code_action_resolve(DocumentStore* store, WorkspaceIndex* workspace, Object* action) {
+fn Object*? handle_code_action_resolve(DocumentStore* store, WorkspaceIndex* workspace, Object* action) {
 	// If action already has an edit, return as-is
 	if (try action.get("edit")) {
 		return action;

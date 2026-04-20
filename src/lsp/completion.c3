@@ -54,13 +54,13 @@ const String[] KOTLIN_KEYWORDS = {
  * Returns a CompletionList JSON object with keyword, identifier, and
  * workspace completions. Documentation is omitted; use completionItem/resolve.
  */
-fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
-	Object* td = params.get("textDocument")!!;
-	String uri = td.get_string("uri")!!;
+fn Object*? handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	Object* td = params.get("textDocument")!;
+	String uri = td.get_string("uri")!;
 
-	Object* pos = params.get("position")!!;
-	uint line = (uint)pos.get_int("line")!!;
-	uint character = (uint)pos.get_int("character")!!;
+	Object* pos = params.get("position")!;
+	uint line = (uint)pos.get_int("line")!;
+	uint character = (uint)pos.get_int("character")!;
 
 	Document* doc = store.get(uri) ?? null;
 	if (doc == null) {
@@ -152,7 +152,7 @@ fn Object* handle_completion(DocumentStore* store, WorkspaceIndex* workspace, Ob
  * Populates the documentation field based on the item's data.
  * Returns the enriched completion item.
  */
-fn Object* handle_completion_resolve(WorkspaceIndex* workspace, Object* item) {
+fn Object*? handle_completion_resolve(WorkspaceIndex* workspace, Object* item) {
 	Object* data = item.get("data") ?? null;
 	if (data == null) return item;
 

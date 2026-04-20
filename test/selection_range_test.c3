@@ -66,7 +66,7 @@ fn void selection_range_nested_function() @test {
 		// Cursor on "x" at line 2, col 12
 		int[2][] positions = { { 2, 12 } };
 		Object* params = make_params("file:///test.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result != null, "expected result array");
 
@@ -110,7 +110,7 @@ fn void selection_range_package_decl() @test {
 		// Cursor on "package" at line 0, col 2
 		int[2][] positions = { { 0, 2 } };
 		Object* params = make_params("file:///test.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result != null);
 		Object* sel = result.get_at(0);
@@ -142,7 +142,7 @@ fn void selection_range_multiple_positions() @test {
 		// Three positions: one per line
 		int[2][] positions = { { 0, 4 }, { 1, 4 }, { 2, 4 } };
 		Object* params = make_params("file:///test.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result != null);
 		assert(result.get_len() == 3, "expected 3 results, got %d", (int)result.get_len());
@@ -176,7 +176,7 @@ fn void selection_range_nested_if() @test {
 		// Cursor on "x" at line 2, col 12
 		int[2][] positions = { { 2, 12 } };
 		Object* params = make_params("file:///test.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result != null);
 		Object* sel = result.get_at(0);
@@ -197,7 +197,7 @@ fn void selection_range_unknown_document() @test {
 
 		int[2][] positions = { { 0, 0 } };
 		Object* params = make_params("file:///nonexistent.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -217,7 +217,7 @@ fn void selection_range_parent_contains_child() @test {
 		// Cursor on "x" at line 3, col 16
 		int[2][] positions = { { 3, 16 } };
 		Object* params = make_params("file:///test.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result != null);
 		Object* sel = result.get_at(0);
@@ -273,7 +273,7 @@ fn void selection_range_empty_file() @test {
 
 		int[2][] positions = { { 0, 0 } };
 		Object* params = make_params("file:///test.kt", positions);
-		Object* result = selection_range::handle_selection_range(&store, params);
+		Object* result = selection_range::handle_selection_range(&store, params)!!;
 
 		assert(result != null);
 		Object* sel = result.get_at(0);

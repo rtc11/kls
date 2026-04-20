@@ -25,7 +25,7 @@ const String CMD_RUN_TEST = "kotlin.runTest";
  *
  * Returns null on success. Sends window/logMessage with output.
  */
-fn Object* handle_execute_command(WorkspaceIndex* workspace, Object* params) {
+fn Object*? handle_execute_command(WorkspaceIndex* workspace, Object* params) {
 	String command = params.get_string("command") ?? "";
 	Object* args = params.get("arguments") ?? null;
 

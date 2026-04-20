@@ -70,7 +70,7 @@ fn void null_for_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_inlay_hint_params("file:///unknown.kt", 0, 100);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result == null, "expected null for unknown document");
 	};
 }
@@ -85,7 +85,7 @@ fn void null_for_empty_document() @test {
 		store.open(uri, "kotlin", 1, "");
 
 		Object* params = make_inlay_hint_params(uri, 0, 100);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result == null, "expected null for empty document");
 	};
 }
@@ -107,7 +107,7 @@ fn void param_hint_simple_call() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		// Should have 2 parameter hints: name: and age:
@@ -145,7 +145,7 @@ fn void param_hint_suppressed_when_name_matches() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// The parameter hint should be suppressed because
 		// the argument 'name' matches the parameter 'name'
@@ -175,7 +175,7 @@ fn void param_hint_named_argument_suppressed() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// 'name' is a named argument -> suppressed
 		// 'age' should still get a hint for the second arg (30)
@@ -207,7 +207,7 @@ fn void param_hint_no_declaration() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should have no parameter hints (may have type hints or null)
 		if (result != null) {
@@ -234,7 +234,7 @@ fn void param_hint_multiple_arguments() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		// Collect parameter hints
@@ -261,7 +261,7 @@ fn void param_hint_constructor_call() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		// Should have parameter hints for the constructor call
@@ -293,7 +293,7 @@ fn void param_hint_no_params_function() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// No parameter hints for zero-param call
 		if (result != null) {
@@ -318,7 +318,7 @@ fn void type_hint_integer_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result for type hint");
 
 		// Should have a type hint ": Int"
@@ -343,7 +343,7 @@ fn void type_hint_string_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_string = false;
@@ -367,7 +367,7 @@ fn void type_hint_boolean_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_bool = false;
@@ -391,7 +391,7 @@ fn void type_hint_suppressed_with_explicit_type() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should have NO type hints since the type is explicit
 		if (result != null) {
@@ -416,7 +416,7 @@ fn void type_hint_constructor_call() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_foo = false;
@@ -440,7 +440,7 @@ fn void type_hint_long_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_long = false;
@@ -464,7 +464,7 @@ fn void type_hint_float_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_float = false;
@@ -488,7 +488,7 @@ fn void type_hint_double_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_double = false;
@@ -512,7 +512,7 @@ fn void type_hint_char_literal() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_char = false;
@@ -536,7 +536,7 @@ fn void type_hint_var_property() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found_int = false;
@@ -562,7 +562,7 @@ fn void type_hint_function_return_type() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		// The val n should get a ": String" hint from the function return type
@@ -593,7 +593,7 @@ fn void range_filter_excludes_out_of_range() @test {
 
 		// Only request hints for line 1 (val b = 2)
 		Object* params = make_inlay_hint_params(uri, 1, 1);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		if (result != null) {
 			for (usz i = 0; i < result.get_len(); i++) {
@@ -617,7 +617,7 @@ fn void type_hint_position_after_name() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		// The type hint should be positioned after 'x' (col 4, len 1 -> col 5)
@@ -644,7 +644,7 @@ fn void param_hint_position_at_argument() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		// The parameter hint should be on line 2 where "Alice" starts
@@ -674,7 +674,7 @@ fn void mixed_param_and_type_hints() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		int type_count = 0;
@@ -706,7 +706,7 @@ fn void param_hint_has_padding_right() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		for (usz i = 0; i < result.get_len(); i++) {
@@ -729,7 +729,7 @@ fn void type_hint_has_padding_left() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		for (usz i = 0; i < result.get_len(); i++) {
@@ -754,7 +754,7 @@ fn void return_type_hint_expression_body() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found = false;
@@ -781,7 +781,7 @@ fn void return_type_hint_single_return() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found = false;
@@ -805,7 +805,7 @@ fn void return_type_hint_suppressed_with_explicit_type() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should NOT have a return type hint since type is explicit
 		if (result != null) {
@@ -836,7 +836,7 @@ fn void return_type_hint_unit_suppressed() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should NOT show ": Unit" hint
 		if (result != null) {
@@ -862,7 +862,7 @@ fn void return_type_hint_constructor_call() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found = false;
@@ -891,7 +891,7 @@ fn void lambda_it_hint_implicit_param() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found = false;
@@ -917,7 +917,7 @@ fn void lambda_it_hint_suppressed_with_explicit_param() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should NOT have an 'it' hint since param is explicit
 		if (result != null) {
@@ -943,7 +943,7 @@ fn void lambda_it_hint_suppressed_no_it_usage() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should NOT have an 'it' hint since `it` is not used
 		if (result != null) {
@@ -972,7 +972,7 @@ fn void chain_hint_not_shown_for_short_chain() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should not have chain type hints (only possibly val type hint)
 		if (result != null) {
@@ -1005,7 +1005,7 @@ fn void smart_cast_hint_after_is_check() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 		assert(result != null, "expected non-null result");
 
 		bool found = false;
@@ -1038,7 +1038,7 @@ fn void smart_cast_hint_not_shown_for_negated_is() @test {
 		store.open(uri, "kotlin", 1, content);
 
 		Object* params = make_inlay_hint_params(uri, 0, 10);
-		Object* result = inlay_hints::handle_inlay_hints(&store, null, params);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
 
 		// Should NOT show smart cast hint for !is
 		if (result != null) {
