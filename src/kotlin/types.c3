@@ -2518,12 +2518,14 @@ fn TypeRef resolve_if_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNo
 
 fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	TypeRef result = TYPE_UNKNOWN;
+	bool found_entry = false;
 	// With WHEN_ENTRY nodes, the type of each branch is determined by
 	// the body expression/block inside each WHEN_ENTRY child.
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent != idx) continue;
 
 		if (pr.nodes[j].kind == WHEN_ENTRY) {
+			found_entry = true;
 			// Find the body type of this WHEN_ENTRY.
 			// Children are ordered: condition(s), then body (last child).
 			// We want the body type, so find the last child and use its type.
@@ -2543,9 +2545,22 @@ fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 					result = common_type(result, entry_type);
 				}
 			}
-		} else if (info.has_type[j]) {
-			// Direct children (e.g. subject expression) -- skip for type resolution
-			// or fallback for old-style when without WHEN_ENTRY nodes
+		}
+	}
+
+	// Only fall back to direct children if no WHEN_ENTRY nodes exist
+	// (old-style AST without explicit entries). Skip the subject expression
+	// which is the first non-WHEN_ENTRY child.
+	if (!found_entry) {
+		bool skipped_subject = false;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != idx) continue;
+			if (!info.has_type[j]) continue;
+			// Skip the first typed child (subject expression)
+			if (!skipped_subject) {
+				skipped_subject = true;
+				continue;
+			}
 			if (result.kind == UNKNOWN) {
 				result = info.node_types[j];
 			} else {
@@ -2553,6 +2568,7 @@ fn TypeRef resolve_when_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			}
 		}
 	}
+
 	return result;
 }
 
