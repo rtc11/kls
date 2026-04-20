@@ -456,6 +456,32 @@ fn String jvm_name_to_package(String jvm_name) {
 }
 
 /**
+ * Extract the simple class name of the first parameter from a method descriptor.
+ * Used to detect Kotlin extension function receivers.
+ * "(Ljava/lang/Iterable;)Ljava/util/Set;" -> "Iterable"
+ * "(I)V" -> "" (primitive, not an extension)
+ * Returns empty string if first param is not an object type.
+ */
+fn String descriptor_first_param_class(String desc) {
+	if (desc.len < 3 || desc[0] != '(') return "";
+	if (desc[1] != 'L') return "";  // not an object type
+
+	// Find the semicolon ending the class name
+	usz end = 0;
+	for (usz i = 2; i < desc.len; i++) {
+		if (desc[i] == ';') {
+			end = i;
+			break;
+		}
+	}
+	if (end == 0) return "";
+
+	// Extract JVM name between 'L' and ';', then get simple name
+	String jvm_name = desc[2..end - 1];
+	return jvm_name_to_simple(jvm_name);
+}
+
+/**
  * Extract the simple class name from a JVM internal name.
  * "kotlin/collections/CollectionsKt" -> "CollectionsKt"
  */

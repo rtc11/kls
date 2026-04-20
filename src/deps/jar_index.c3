@@ -388,6 +388,18 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD,
 			null, 0, jar_path_interned: true);
 
+		// For static methods in *Kt facade classes, detect extension functions
+		// and additionally index them under the receiver type name.
+		// Kotlin compiles `fun Iterable<T>.toSet()` as a static method in CollectionsKt
+		// with the receiver as the first parameter.
+		if (is_static && simple_name.len > 2 && simple_name[simple_name.len - 2..] == "Kt") {
+			String receiver_name = classfile::descriptor_first_param_class(m.descriptor);
+			if (receiver_name.len > 0 && receiver_name != simple_name) {
+				add_dep_symbol(idx, m.name, sig.str_view(), pkg, receiver_name, jar_path, DEP_METHOD,
+					null, 0, jar_path_interned: true);
+			}
+		}
+
 		// Register Kotlin property name for getter/setter methods.
 		// Kotlin compiles `val Foo` as `getFoo()` and `var Foo` as `getFoo()`/`setFoo()`.
 		// Register the property name so lookup("Foo") finds the getter.

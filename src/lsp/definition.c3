@@ -721,10 +721,35 @@ fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_n
 	}
 
 	if (best == null) {
+		// Walk supertypes to find extension functions indexed under parent types.
+		// E.g. List.toSet() -> toSet is indexed under Iterable (the receiver type).
+		if (best_class != null) {
+			for (usz s = 0; s < jar_index::MAX_DEP_SUPERTYPES; s++) {
+				if (best_class.supertypes[s].len == 0) break;
+				Object* super_result = find_dep_member_in_class(dep_index, best_class.supertypes[s], member_name);
+				if (super_result != null) return super_result;
+			}
+		}
 		return null;
 	}
 
 	return source_nav::resolve_dep_definition(best);
+}
+
+/**
+ * Look up a member by class_name in the dep index without verifying class existence.
+ * Used for supertype walk where we already know the hierarchy is valid.
+ */
+fn Object* find_dep_member_in_class(DependencyIndex* dep_index, String class_name, String member_name) {
+	DepSymbol*[32] member_matches;
+	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
+
+	for (usz i = 0; i < member_count; i++) {
+		if (member_matches[i].class_name != class_name) continue;
+		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
+		return source_nav::resolve_dep_definition(member_matches[i]);
+	}
+	return null;
 }
 
 // ── Receiver lambda member definition lookup ──────────────────────
