@@ -414,3 +414,42 @@ fn void references_skip_import_path() @test {
 		assert(get_line(result, 2) == 2);
 	};
 }
+
+// ── Scope-aware: same-name vars in different scopes ────────────────
+
+fn void references_scope_aware_different_scopes() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Two functions each with a local "x" — they are different bindings
+		String content =
+`fun foo() {
+    val x = 1
+    println(x)
+}
+
+fun bar() {
+    val x = 2
+    println(x)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "x" in foo() body — line 2, col 12 (the usage "x" in println)
+		Object* params = make_params("file:///test.kt", 2, 12);
+		Object* result = references::handle_references(&store, null, params);
+
+		assert(result != null, "expected references");
+		// Should find only x refs in foo(): val x (line 1) + println(x) (line 2)
+		// NOT the x in bar()
+		assert(result.get_len() == 2,
+			"expected 2 refs (only foo's x), got %d", (int)result.get_len());
+
+		// Both should be in lines 1-2 (foo's scope)
+		for (usz i = 0; i < result.get_len(); i++) {
+			int l = get_line(result, i);
+			assert(l <= 2, "ref should be in foo() (line <= 2), got line %d", l);
+		}
+	};
+}

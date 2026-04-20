@@ -343,3 +343,40 @@ fun bar() {}`;
 			(int)c0.node_end, (int)c1.node_start);
 	};
 }
+
+// ── Error preservation across incremental reparse ──────────────────
+
+fn void incremental_preserves_errors_from_unchanged_regions() @test {
+	@pool() {
+		// Source with syntax error in first function and valid second function
+		String old_src =
+`fun foo( { val x = 1 }
+
+fun bar() { val y = 2 }`;
+		ParseResult* r = do_parse(old_src); defer free_result(r);
+		ChunkMap* map = do_build_chunks(r, old_src); defer mem::free(map);
+
+		// Should have parse error from foo() (missing closing paren)
+		usz errors_before = r.error_count;
+		assert(errors_before > 0, "expected parse errors from foo(), got 0");
+
+		// Edit bar(): change "2" to "3" — doesn't touch foo()
+		String new_src =
+`fun foo( { val x = 1 }
+
+fun bar() { val y = 3 }`;
+		uint edit_start = 39; // position of '2'
+		uint edit_end = 40;   // end of '2'
+		usz new_text_len = 1; // '3'
+
+		bool ok = incremental::try_incremental_reparse(
+			r, map, old_src, new_src, edit_start, edit_end, new_text_len);
+
+		// Whether incremental succeeded or not, if it did, errors from foo() should survive
+		if (ok) {
+			assert(r.error_count >= errors_before,
+				"errors from unchanged foo() should be preserved: had %d, now %d",
+				(int)errors_before, (int)r.error_count);
+		}
+	};
+}

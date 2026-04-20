@@ -388,8 +388,14 @@ fn void capability_options_has_legend() @test {
 		String first_type = types.get_string_at(0)!!;
 		assert(first_type == "keyword", "expected 'keyword', got '%s'", first_type);
 
-		// Modifiers should be empty
-		assert(modifiers.get_len() == 0, "expected 0 modifiers, got %d", (int)modifiers.get_len());
+		// Modifiers should have TOKEN_MODIFIER_COUNT entries
+		assert(modifiers.get_len() == (usz)semantic_tokens::TOKEN_MODIFIER_COUNT,
+			"expected %d modifiers, got %d",
+			(int)semantic_tokens::TOKEN_MODIFIER_COUNT, (int)modifiers.get_len());
+
+		// First modifier should be "declaration"
+		String first_mod = modifiers.get_string_at(0)!!;
+		assert(first_mod == "declaration", "expected 'declaration', got '%s'", first_mod);
 
 		// full should be an object with delta=true
 		Object* full = opts.get("full")!!;

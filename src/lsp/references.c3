@@ -9,6 +9,7 @@ import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::lsp::definition;
 import kls::workspace;
 
 /**
@@ -57,11 +58,24 @@ fn Object* handle_references(DocumentStore* store, WorkspaceIndex* workspace, Ob
 
 	String target_name = tok.text;
 
-	// Get cached AST for declaration filtering
+	// Get cached AST for scope-aware filtering
 	ParseResult* pr = store.get_ast(uri) ?? null;
 
-	// Collect all IDENTIFIER tokens matching target_name,
+	// Resolve cursor's identifier to its declaration (scope-aware)
+	uint decl_offset = uint.max; // sentinel = no resolution
+	if (pr != null) {
+		if (try decl_node = definition::find_definition_in_ast(pr, target_name, tok.offset, false)) {
+			decl_offset = decl_node.name_offset;
+		}
+		// If cursor IS on a declaration, use that declaration's offset
+		if (decl_offset == uint.max && is_declaration_name(pr, tok.offset)) {
+			decl_offset = tok.offset;
+		}
+	}
+
+	// Collect IDENTIFIER tokens matching target_name,
 	// skipping identifiers inside package/import paths.
+	// When AST available, filter to tokens that resolve to same declaration.
 	Object* locations = object::new_obj(tmem);  // JSON array
 
 	Lexer lex = lexer::init(doc.content);
@@ -89,6 +103,26 @@ fn Object* handle_references(DocumentStore* store, WorkspaceIndex* workspace, Ob
 		if (!include_declaration && pr != null) {
 			if (is_declaration_name(pr, t.offset)) {
 				continue;
+			}
+		}
+
+		// Scope-aware filtering: if we resolved the cursor's declaration,
+		// only include tokens that resolve to the same declaration
+		if (pr != null && decl_offset != uint.max) {
+			// Check if this token IS the declaration
+			if (t.offset == decl_offset) {
+				// This is the declaration itself — include if includeDeclaration
+				if (include_declaration) {
+					Object* location = build_location(uri, t);
+					locations.push(location);
+				}
+				continue;
+			}
+			// Check if this token resolves to the same declaration
+			if (try candidate_decl = definition::find_definition_in_ast(pr, target_name, t.offset, false)) {
+				if (candidate_decl.name_offset != decl_offset) continue; // different binding
+			} else {
+				continue; // can't resolve — skip
 			}
 		}
 
@@ -157,22 +191,15 @@ fn Object* build_location(String uri, Token tok) {
  * Checks the document store first for open files, falls back to disk.
  */
 fn void add_cross_file_references(Object* locations, WorkspaceIndex* workspace, DocumentStore* store, String target_name, String current_uri) {
-	// First find which files might contain the name via the workspace index.
-	// Collect unique URIs of files that have a symbol matching the name,
-	// then also scan files that don't have declarations but might have usages.
-	// For efficiency, we only scan files that have the target name in their symbols.
-	// This is a heuristic -- a file might reference a name without declaring it.
-	// For a more complete solution we'd need a full-text index, but scanning
-	// all workspace files would be too expensive. We scan files that:
-	// 1. Have a symbol with the target name (likely contains references)
-	// 2. Any file that imports or uses patterns suggesting the name
-
-	// Collect unique URIs that have at least one symbol with this name
-	String[128] uris_to_scan;
+	// Collect unique URIs to scan from two sources:
+	// 1. Workspace index: files that declare a symbol with the target name
+	// 2. Open documents: files that might use (but not declare) the name
+	String[256] uris_to_scan;
 	usz uri_count = 0;
 
+	// Source 1: workspace index — files with matching symbol declarations
 	if (try indices = workspace.lookup_by_name(target_name)) {
-		for (usz i = 0; i < indices.len() && uri_count < 128; i++) {
+		for (usz i = 0; i < indices.len() && uri_count < 256; i++) {
 			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
 			if (sym.name.len == 0) continue;
 			if (sym.uri == current_uri) continue;
@@ -189,6 +216,25 @@ fn void add_cross_file_references(Object* locations, WorkspaceIndex* workspace, 
 				uris_to_scan[uri_count] = sym.uri;
 				uri_count++;
 			}
+		}
+	}
+
+	// Source 2: all open documents — catches files that USE but don't DECLARE the name
+	foreach (doc_uri : store.docs.tkeys()) {
+		if (doc_uri == current_uri) continue;
+		if (uri_count >= 256) break;
+
+		// Dedup against workspace URIs already added
+		bool already_have = false;
+		for (usz j = 0; j < uri_count; j++) {
+			if (uris_to_scan[j] == doc_uri) {
+				already_have = true;
+				break;
+			}
+		}
+		if (!already_have) {
+			uris_to_scan[uri_count] = doc_uri;
+			uri_count++;
 		}
 	}
 

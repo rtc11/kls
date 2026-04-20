@@ -215,7 +215,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 			// next full parse can benefit from cached lex results.
 			// If patching fails, the cache is rebuilt on next get_ast().
 			if (doc.cached_tokens != null) {
-				bool patch_ok = doc.cached_tokens.patch(new_content, s, e, new_text.len);
+				bool patch_ok = doc.cached_tokens.patch(new_content, old_content, s, e, new_text.len);
 				if (!patch_ok) {
 					mem::free(doc.cached_tokens);
 					doc.cached_tokens = null;
@@ -224,7 +224,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 		} else {
 			// Incremental succeeded -- also patch token cache if available
 			if (doc.cached_tokens != null) {
-				bool patch_ok = doc.cached_tokens.patch(new_content, s, e, new_text.len);
+				bool patch_ok = doc.cached_tokens.patch(new_content, old_content, s, e, new_text.len);
 				if (!patch_ok) {
 					mem::free(doc.cached_tokens);
 					doc.cached_tokens = null;

@@ -55,7 +55,7 @@ fn void build_cache(TokenCache* cache, String source) {
  *
  * Returns true if patching succeeded, false if the cache should be rebuilt.
  */
-fn bool TokenCache.patch(TokenCache* self, String new_source,
+fn bool TokenCache.patch(TokenCache* self, String new_source, String old_source,
 		uint edit_start, uint edit_end, usz new_text_len) {
 	int byte_delta = (int)new_text_len - (int)(edit_end - edit_start);
 
@@ -183,25 +183,32 @@ fn bool TokenCache.patch(TokenCache* self, String new_source,
 
 	self.count = (uint)new_total;
 
-	// Adjust offsets for tokens after the splice region
+	// Compute line delta from old vs new edit region
+	int old_newlines = 0;
+	for (uint j = edit_start; j < edit_end && j < (uint)old_source.len; j++) {
+		if (old_source[j] == '\n') old_newlines++;
+	}
+	int new_newlines = 0;
+	uint new_edit_end = edit_start + (uint)new_text_len;
+	for (uint j = edit_start; j < new_edit_end && j < (uint)new_source.len; j++) {
+		if (new_source[j] == '\n') new_newlines++;
+	}
+	int line_delta = new_newlines - old_newlines;
+
+	// Adjust offsets and lines for tokens after the splice region
 	uint adjust_start = old_replace_start + new_count;
 	for (uint i = adjust_start; i < self.count; i++) {
 		if (self.tokens[i].kind == EOF) {
 			self.tokens[i].offset = (uint)new_source.len;
+			if (line_delta != 0) {
+				self.tokens[i].line = (uint)((int)self.tokens[i].line + line_delta);
+			}
 			break;
 		}
 		self.tokens[i].offset = (uint)((int)self.tokens[i].offset + byte_delta);
-		// Adjust line numbers
-		int old_newlines = 0;
-		int new_newlines = 0;
-		for (uint j = edit_start; j < edit_end && j < (uint)(new_source.len + (uint)(-byte_delta)); j++) {
-			// Count in old source (can't access old source here, so use line delta)
-			// This is approximate -- for precise adjustment we'd need the old source
-			break;
+		if (line_delta != 0) {
+			self.tokens[i].line = (uint)((int)self.tokens[i].line + line_delta);
 		}
-		// We approximate line adjustment -- the full re-parse fallback path
-		// rebuilds everything anyway, so this doesn't need to be perfect
-		self.tokens[i].line = (uint)((int)self.tokens[i].line);
 	}
 
 	return true;

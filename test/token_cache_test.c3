@@ -99,7 +99,7 @@ fn void patch_insert_at_end() @test {
 		defer free_cache(cache);
 		token_cache::build_cache(cache, old_src);
 
-		bool ok = cache.patch(new_src, 5, 5, 4);
+		bool ok = cache.patch(new_src, old_src, 5, 5, 4);
 		assert(ok, "patch should succeed");
 		assert(cache.count >= 5, "expected at least 5 tokens, got %d", (int)cache.count);
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
@@ -117,7 +117,7 @@ fn void patch_insert_at_start() @test {
 		defer free_cache(cache);
 		token_cache::build_cache(cache, old_src);
 
-		bool ok = cache.patch(new_src, 0, 0, 4);
+		bool ok = cache.patch(new_src, old_src, 0, 0, 4);
 		assert(ok, "patch should succeed");
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
 	};
@@ -134,7 +134,7 @@ fn void patch_delete_token() @test {
 		token_cache::build_cache(cache, old_src);
 
 		uint old_count = cache.count;
-		bool ok = cache.patch(new_src, 5, 9, 0);
+		bool ok = cache.patch(new_src, old_src, 5, 9, 0);
 		assert(ok, "patch should succeed");
 		assert(cache.count < old_count, "token count should decrease");
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
@@ -151,7 +151,7 @@ fn void patch_rename_identifier() @test {
 		defer free_cache(cache);
 		token_cache::build_cache(cache, old_src);
 
-		bool ok = cache.patch(new_src, 4, 7, 3);
+		bool ok = cache.patch(new_src, old_src, 4, 7, 3);
 		assert(ok, "patch should succeed");
 
 		bool found_bar = false;
@@ -175,7 +175,7 @@ fn void patch_replace_multiple_tokens() @test {
 		defer free_cache(cache);
 		token_cache::build_cache(cache, old_src);
 
-		bool ok = cache.patch(new_src, 8, 13, 2);
+		bool ok = cache.patch(new_src, old_src, 8, 13, 2);
 		assert(ok, "patch should succeed");
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
 		assert(cache.tokens[cache.count - 1].offset == (uint)new_src.len, "EOF offset should match new source");
@@ -193,7 +193,7 @@ fn void patch_insert_new_tokens() @test {
 		token_cache::build_cache(cache, old_src);
 
 		uint old_count = cache.count;
-		bool ok = cache.patch(new_src, 9, 9, 4);
+		bool ok = cache.patch(new_src, old_src, 9, 9, 4);
 		assert(ok, "patch should succeed");
 		assert(cache.count > old_count, "should have more tokens");
 	};
@@ -207,10 +207,10 @@ fn void patch_sequential() @test {
 		defer free_cache(cache);
 		token_cache::build_cache(cache, "val x = 1");
 
-		bool ok1 = cache.patch("val x = 12", 9, 9, 1);
+		bool ok1 = cache.patch("val x = 12", "val x = 1", 9, 9, 1);
 		assert(ok1, "first patch should succeed");
 
-		bool ok2 = cache.patch("val x = 123", 10, 10, 1);
+		bool ok2 = cache.patch("val x = 123", "val x = 12", 10, 10, 1);
 		assert(ok2, "second patch should succeed");
 
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
@@ -225,7 +225,7 @@ fn void patch_delete_all() @test {
 		defer free_cache(cache);
 		token_cache::build_cache(cache, "val x = 1");
 
-		bool ok = cache.patch("", 0, 9, 0);
+		bool ok = cache.patch("", "val x = 1", 0, 9, 0);
 		if (ok) {
 			assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
 		}
@@ -242,7 +242,7 @@ fn void patch_noop_edit() @test {
 		token_cache::build_cache(cache, src);
 
 		// Empty edit at offset 5 (between tokens)
-		bool ok = cache.patch(src, 5, 5, 0);
+		bool ok = cache.patch(src, src, 5, 5, 0);
 		// No-op may re-lex boundary region — just verify no crash + EOF last
 		if (ok) {
 			assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
@@ -259,7 +259,7 @@ fn void patch_insert_middle() @test {
 		token_cache::build_cache(cache, "val x = 1");
 
 		String new_src = "val myX = 1";
-		bool ok = cache.patch(new_src, 4, 5, 3);
+		bool ok = cache.patch(new_src, "val x = 1", 4, 5, 3);
 		assert(ok, "patch should succeed");
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
 		assert(cache.tokens[cache.count - 1].offset == (uint)new_src.len, "EOF offset = source len");
@@ -272,11 +272,81 @@ fn void patch_multiline() @test {
 	@pool() {
 		TokenCache* cache = new_cache();
 		defer free_cache(cache);
-		token_cache::build_cache(cache, "fun foo() {\n    val x = 1\n}");
+		String old_src = "fun foo() {\n    val x = 1\n}";
+		token_cache::build_cache(cache, old_src);
 
 		String new_src = "fun foo() {\n    val x = 42\n}";
-		bool ok = cache.patch(new_src, 24, 25, 2);
+		bool ok = cache.patch(new_src, old_src, 24, 25, 2);
 		assert(ok, "patch should succeed");
 		assert(cache.tokens[cache.count - 1].kind == EOF, "last should be EOF");
+	};
+}
+
+// ── patch: line numbers shift when inserting newline ───────────────
+
+fn void patch_line_numbers_shift_on_newline_insert() @test {
+	@pool() {
+		TokenCache* cache = new_cache();
+		defer free_cache(cache);
+		// Line 0: "val x = 1\n", Line 1: "val y = 2"
+		String old_src = "val x = 1\nval y = 2";
+		token_cache::build_cache(cache, old_src);
+
+		// Verify y is on line 1 before edit
+		bool found_y = false;
+		for (uint i = 0; i < cache.count; i++) {
+			if (cache.tokens[i].kind == IDENTIFIER && cache.tokens[i].text == "y") {
+				assert(cache.tokens[i].line == 1, "y should be on line 1 before edit, got %d", (int)cache.tokens[i].line);
+				found_y = true;
+				break;
+			}
+		}
+		assert(found_y, "should find identifier y");
+
+		// Insert a blank line after first line: "val x = 1\n\nval y = 2"
+		String new_src = "val x = 1\n\nval y = 2";
+		bool ok = cache.patch(new_src, old_src, 10, 10, 1); // insert '\n' at offset 10
+		assert(ok, "patch should succeed");
+
+		// Now y should be on line 2
+		for (uint i = 0; i < cache.count; i++) {
+			if (cache.tokens[i].kind == IDENTIFIER && cache.tokens[i].text == "y") {
+				assert(cache.tokens[i].line == 2, "y should be on line 2 after insert, got %d", (int)cache.tokens[i].line);
+				break;
+			}
+		}
+	};
+}
+
+// ── patch: line numbers shift when deleting newline ────────────────
+
+fn void patch_line_numbers_shift_on_newline_delete() @test {
+	@pool() {
+		TokenCache* cache = new_cache();
+		defer free_cache(cache);
+		// Line 0: "val x = 1\n", Line 1: "\n", Line 2: "val y = 2"
+		String old_src = "val x = 1\n\nval y = 2";
+		token_cache::build_cache(cache, old_src);
+
+		// Verify y on line 2
+		for (uint i = 0; i < cache.count; i++) {
+			if (cache.tokens[i].kind == IDENTIFIER && cache.tokens[i].text == "y") {
+				assert(cache.tokens[i].line == 2, "y should be on line 2, got %d", (int)cache.tokens[i].line);
+				break;
+			}
+		}
+
+		// Delete the blank line: remove '\n' at offset 10
+		String new_src = "val x = 1\nval y = 2";
+		bool ok = cache.patch(new_src, old_src, 10, 11, 0);
+		assert(ok, "patch should succeed");
+
+		// Now y should be on line 1
+		for (uint i = 0; i < cache.count; i++) {
+			if (cache.tokens[i].kind == IDENTIFIER && cache.tokens[i].text == "y") {
+				assert(cache.tokens[i].line == 1, "y should be on line 1 after delete, got %d", (int)cache.tokens[i].line);
+				break;
+			}
+		}
 	};
 }

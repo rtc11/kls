@@ -7,6 +7,7 @@ import kls::lsp::references;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::lsp::definition;
 
 // DocumentHighlightKind (LSP 3.17)
 const int TEXT  = 1;
@@ -50,19 +51,58 @@ fn Object* handle_document_highlight(DocumentStore* store, Object* params) {
 
 	String target_name = tok.text;
 
-	// Get cached AST for declaration classification
+	// Get cached AST for scope-aware filtering and declaration classification
 	ParseResult* pr = store.get_ast(uri) ?? null;
 
-	// Collect all IDENTIFIER tokens matching target_name
+	// Resolve cursor's identifier to its declaration (scope-aware)
+	uint decl_offset = uint.max; // sentinel = no resolution
+	if (pr != null) {
+		if (try decl_node = definition::find_definition_in_ast(pr, target_name, tok.offset, false)) {
+			decl_offset = decl_node.name_offset;
+		}
+		// If cursor IS on a declaration, use that declaration's offset
+		if (decl_offset == uint.max && references::is_declaration_name(pr, tok.offset)) {
+			decl_offset = tok.offset;
+		}
+	}
+
+	// Collect IDENTIFIER tokens matching target_name, scope-filtered
 	Object* highlights = object::new_obj(tmem); // JSON array
 
 	Lexer lex = lexer::init(doc.content);
+	bool in_package_or_import = false;
 	while (true) {
 		Token t = lex.next();
 		if (t.kind == EOF) break;
 
+		// Skip package/import paths
+		if (t.kind == KW_PACKAGE || t.kind == KW_IMPORT) {
+			in_package_or_import = true;
+			continue;
+		}
+		if (in_package_or_import) {
+			if (t.kind == IDENTIFIER || t.kind == DOT || t.kind == MULT) continue;
+			in_package_or_import = false;
+		}
+
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
+
+		// Scope-aware filtering when AST available
+		if (pr != null && decl_offset != uint.max) {
+			if (t.offset == decl_offset) {
+				// Declaration itself
+				Object* highlight = build_highlight(t, WRITE);
+				highlights.push(highlight);
+				continue;
+			}
+			// Check if this token resolves to same declaration
+			if (try candidate_decl = definition::find_definition_in_ast(pr, target_name, t.offset, false)) {
+				if (candidate_decl.name_offset != decl_offset) continue;
+			} else {
+				continue;
+			}
+		}
 
 		// Classify: declaration names are Write, everything else is Read
 		int kind = READ;

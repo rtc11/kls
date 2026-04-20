@@ -61,7 +61,22 @@ const String[TOKEN_TYPE_COUNT] TOKEN_TYPE_NAMES = {
 };
 
 // No modifiers for now.
-const usz TOKEN_MODIFIER_COUNT = 0;
+const usz TOKEN_MODIFIER_COUNT = 5;
+
+// Semantic token modifier legend (bitmask indices)
+const int TM_DECLARATION = 0;  // 1 << 0
+const int TM_READONLY    = 1;  // 1 << 1
+const int TM_STATIC      = 2;  // 1 << 2
+const int TM_DEPRECATED  = 3;  // 1 << 3
+const int TM_ABSTRACT    = 4;  // 1 << 4
+
+const String[TOKEN_MODIFIER_COUNT] TOKEN_MODIFIER_NAMES = {
+	"declaration",
+	"readonly",
+	"static",
+	"deprecated",
+	"abstract",
+};
 
 /**
  * Entry mapping a source offset to a semantic token type,
@@ -70,6 +85,7 @@ const usz TOKEN_MODIFIER_COUNT = 0;
 struct NameEntry {
 	uint offset;
 	int token_type;
+	int modifiers;  // bitmask of TM_* values
 }
 
 /**
@@ -103,6 +119,7 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 
 		table[count].offset = n.name_offset;
 		table[count].token_type = tt;
+		table[count].modifiers = compute_modifiers(n);
 		count++;
 	}
 
@@ -123,6 +140,7 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 
 		table[count].offset = n.name_offset;
 		table[count].token_type = tt;
+		table[count].modifiers = 0; // usage sites get no declaration modifiers
 		count++;
 	}
 
@@ -186,6 +204,55 @@ fn int lookup_name(NameEntry[] table, usz count, uint offset) {
 		}
 	}
 	return -1;
+}
+
+/**
+ * Look up a name entry by offset. Returns index into table, or -1 if not found.
+ */
+fn int lookup_name_index(NameEntry[] table, usz count, uint offset) {
+	for (usz i = 0; i < count; i++) {
+		if (table[i].offset == offset) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+/**
+ * Compute semantic token modifier bitmask from an AST node's properties.
+ */
+fn int compute_modifiers(AstNode* n) {
+	int mods = 0;
+
+	// All declaration names get the "declaration" modifier
+	if (ast::is_declaration(n.kind)) {
+		mods |= (1 << TM_DECLARATION);
+	}
+
+	// val (not var) properties and const are readonly
+	if (n.kind == PROPERTY_DECL && (n.mod_flags & ast::MOD_VAR) == 0) {
+		mods |= (1 << TM_READONLY);
+	}
+	if (n.mod_flags & ast::MOD_CONST != 0) {
+		mods |= (1 << TM_READONLY);
+	}
+
+	// Companion object members are static-like
+	if (n.kind == COMPANION_OBJECT_DECL || (n.mod_flags & ast::MOD_COMPANION) != 0) {
+		mods |= (1 << TM_STATIC);
+	}
+
+	// @Deprecated annotation
+	if (n.annotation_text.len > 0 && n.has_annotation("Deprecated")) {
+		mods |= (1 << TM_DEPRECATED);
+	}
+
+	// Abstract modifier
+	if (n.mod_flags & ast::MOD_ABSTRACT != 0) {
+		mods |= (1 << TM_ABSTRACT);
+	}
+
+	return mods;
 }
 
 /**
@@ -473,10 +540,12 @@ fn Object* encode_semantic_tokens(String content, ParseResult* pr, uint start_li
 		int token_type = map_token_type(tok.kind);
 
 		// For identifiers, check if this is a declaration name or type param use
+		int token_modifiers = 0;
 		if (tok.kind == IDENTIFIER && name_count > 0) {
-			int ast_type = lookup_name(name_table[..], name_count, tok.offset);
-			if (ast_type >= 0) {
-				token_type = ast_type;
+			int name_idx = lookup_name_index(name_table[..], name_count, tok.offset);
+			if (name_idx >= 0) {
+				token_type = name_table[name_idx].token_type;
+				token_modifiers = name_table[name_idx].modifiers;
 			} else if (tp_count > 0 && is_type_param_use(tp_scopes[..], tp_count, tok.text, tok.offset)) {
 				token_type = TT_TYPE_PARAMETER;
 			}
@@ -502,7 +571,7 @@ fn Object* encode_semantic_tokens(String content, ParseResult* pr, uint start_li
 		data.push(object::new_int((int)delta_start, tmem));
 		data.push(object::new_int((int)tok.len, tmem));
 		data.push(object::new_int(token_type, tmem));
-		data.push(object::new_int(0, tmem)); // tokenModifiers: none
+		data.push(object::new_int(token_modifiers, tmem));
 
 		prev_line = tok.line;
 		prev_col = tok.col;
@@ -694,8 +763,11 @@ fn Object* build_semantic_tokens_options() {
 	}
 	legend.set("tokenTypes", types);
 
-	// tokenModifiers array (empty for now)
+	// tokenModifiers array
 	Object* modifiers = object::new_obj(tmem);
+	for (usz i = 0; i < TOKEN_MODIFIER_COUNT; i++) {
+		modifiers.push(object::new_string(TOKEN_MODIFIER_NAMES[i], tmem));
+	}
 	legend.set("tokenModifiers", modifiers);
 
 	Object* opts = object::new_obj(tmem);

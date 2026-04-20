@@ -426,10 +426,18 @@ fn String format_tagged_value(JdwpConnection* conn, char tag, char[] data, usz o
 				ushort ch = transport::get_ushort_be(data, offset);
 				out.appendf("'%c'", (char)ch);
 			}
-		case 'D':  // double (8 bytes) — display as hex for now
-			out.appendf("<double>");
+		case 'D':  // double (8 bytes)
+			if (offset + 8 <= data.len) {
+				long bits = transport::get_long_be(data, offset);
+				double val = *((double*)&bits);
+				out.appendf("%g", val);
+			}
 		case 'F':  // float (4 bytes)
-			out.appendf("<float>");
+			if (offset + 4 <= data.len) {
+				int bits = transport::get_int_be(data, offset);
+				float val = *((float*)&bits);
+				out.appendf("%g", val);
+			}
 		case 'I':  // int
 			if (offset + 4 <= data.len) {
 				int val = transport::get_int_be(data, offset);

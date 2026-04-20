@@ -324,8 +324,35 @@ fn bool try_incremental_reparse(ParseResult* result, ChunkMap* map,
 	int new_newlines = count_newlines(new_source, edit_start, edit_start + (uint)new_text_len);
 	int line_delta = new_newlines - old_newlines;
 
-	// Compute column delta (only relevant when line_delta == 0)
-	int col_delta = byte_delta; // simplified: same as byte delta on same line
+	// Compute column delta (only relevant when line_delta == 0 and edit is on a single line)
+	int col_delta = 0;
+	if (line_delta == 0) {
+		// Same-line edit: col_delta = difference in character count (not bytes)
+		// Count characters in old edit region
+		int old_chars = 0;
+		uint oi = edit_start;
+		while (oi < edit_end && oi < (uint)old_source.len) {
+			char c = old_source[oi];
+			if (c & 0x80 == 0) { oi += 1; }
+			else if (c & 0xE0 == 0xC0) { oi += 2; }
+			else if (c & 0xF0 == 0xE0) { oi += 3; }
+			else { oi += 4; }
+			old_chars++;
+		}
+		// Count characters in new edit region
+		int new_chars = 0;
+		uint ni = edit_start;
+		uint new_edit_end = edit_start + (uint)new_text_len;
+		while (ni < new_edit_end && ni < (uint)new_source.len) {
+			char c = new_source[ni];
+			if (c & 0x80 == 0) { ni += 1; }
+			else if (c & 0xE0 == 0xC0) { ni += 2; }
+			else if (c & 0xF0 == 0xE0) { ni += 3; }
+			else { ni += 4; }
+			new_chars++;
+		}
+		col_delta = new_chars - old_chars;
+	}
 	uint edit_end_line = reparse_line_end_old; // line where edit ends in old source
 
 	// ── Re-parse the affected region ───────────────────────────────
@@ -369,8 +396,35 @@ fn bool try_incremental_reparse(ParseResult* result, ChunkMap* map,
 		return false;
 	}
 
-	// Free old error messages from the main result that came from the old chunk
-	// (We can't easily attribute errors to chunks, so we clear all and re-add)
+	// Preserve errors from unchanged regions before clearing
+	ParseError[ast::MAX_ERRORS] preserved_errors;
+	usz preserved_count = 0;
+	for (usz i = 0; i < result.error_count && preserved_count < ast::MAX_ERRORS; i++) {
+		ParseError* err = &result.errors[i];
+		if (err.offset < reparse_byte_start) {
+			// Error before reparse region — keep as-is
+			preserved_errors[preserved_count] = *err;
+			// Copy message to avoid double-free (original will be freed)
+			if (err.message.len > 0) {
+				preserved_errors[preserved_count].message = err.message.copy(mem);
+			}
+			preserved_count++;
+		} else if (err.offset >= reparse_byte_end_old) {
+			// Error after reparse region — adjust offsets
+			preserved_errors[preserved_count] = *err;
+			if (err.message.len > 0) {
+				preserved_errors[preserved_count].message = err.message.copy(mem);
+			}
+			preserved_errors[preserved_count].offset = (uint)((int)err.offset + byte_delta);
+			if (line_delta != 0) {
+				preserved_errors[preserved_count].line = (uint)((int)err.line + line_delta);
+			}
+			preserved_count++;
+		}
+		// Errors inside reparse region are discarded (replaced by re-parse)
+	}
+
+	// Free old error messages from the main result
 	result.free_errors();
 
 	// Step 1: Move nodes after the old chunk to make room (or close gap)
@@ -469,12 +523,20 @@ fn bool try_incremental_reparse(ParseResult* result, ChunkMap* map,
 		result.error_count++;
 	}
 
-	// Step 9: Re-run a quick error pass on the rest of the file to recollect
-	// errors from unchanged regions. We skip this for now -- errors from
-	// unchanged regions were cleared. The diagnostics module will re-run
-	// the lexer anyway, and parser errors will come from the next full
-	// diagnostics pass. For now, the incremental result has errors only
-	// from the re-parsed chunk.
+	// Step 9: Restore preserved errors from unchanged regions
+	usz preserved_added = 0;
+	for (usz i = 0; i < preserved_count; i++) {
+		if (result.error_count < ast::MAX_ERRORS) {
+			result.errors[result.error_count] = preserved_errors[i];
+			result.error_count++;
+			preserved_added++;
+		} else {
+			// No room — free the heap-copied message
+			if (preserved_errors[i].message.len > 0) {
+				mem::free(preserved_errors[i].message.ptr);
+			}
+		}
+	}
 
 	// Step 10: Update the chunk map
 	update_chunk_map_after_edit(result, map, new_source, analysis,

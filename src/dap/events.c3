@@ -23,10 +23,29 @@ struct JdwpEvent {
 	String class_signature;
 }
 
+// Pending events from a composite with multiple events.
+// First event returned immediately; rest stashed here for subsequent read_event calls.
+const usz MAX_PENDING_EVENTS = 16;
+JdwpEvent[MAX_PENDING_EVENTS] pending_events;
+usz pending_event_count = 0;
+usz pending_event_next = 0;
+
 // Try to read and parse a JDWP event (called when poll says socket readable)
 // Checks buffered events first (stashed by read_reply during synchronous commands)
 // Returns null if no event available or on error
 fn JdwpEvent? read_event(JdwpConnection* conn) {
+	// Check pending events from a previous composite first
+	if (pending_event_next < pending_event_count) {
+		JdwpEvent ev = pending_events[pending_event_next];
+		pending_event_next++;
+		if (pending_event_next >= pending_event_count) {
+			// All consumed — reset
+			pending_event_count = 0;
+			pending_event_next = 0;
+		}
+		return ev;
+	}
+
 	char[11] header;
 	char[] data;
 	bool from_buffer = false;
@@ -80,15 +99,21 @@ fn JdwpEvent? read_event(JdwpConnection* conn) {
 
 	if (event_count < 1) return transport::JDWP_PROTOCOL_ERROR~;
 
-	// Parse first event (handle one at a time for now)
+	// Parse all events from composite
 	usz pos = 5;
-	if (pos >= data.len) return transport::JDWP_PROTOCOL_ERROR~;
+	JdwpEvent first_event;
+	bool have_first = false;
+	pending_event_count = 0;
+	pending_event_next = 0;
 
-	char event_kind = data[pos]; pos++;
+	for (int ev_idx = 0; ev_idx < event_count; ev_idx++) {
+		if (pos >= data.len) break;
 
-	JdwpEvent event;
-	event.suspend_policy = suspend_policy;
-	event.event_kind = event_kind;
+		char event_kind = data[pos]; pos++;
+
+		JdwpEvent event;
+		event.suspend_policy = suspend_policy;
+		event.event_kind = event_kind;
 
 	switch (event_kind) {
 		case protocol::EK_VM_START:
@@ -139,10 +164,23 @@ fn JdwpEvent? read_event(JdwpConnection* conn) {
 
 		default:
 			log::debug("[dap] Unhandled event kind: %d", (int)event_kind);
-			return transport::JDWP_PROTOCOL_ERROR~;
+			continue;  // skip unknown events, try next in composite
+		}
+
+		// Stash parsed event: first one returned, rest buffered
+		if (!have_first) {
+			first_event = event;
+			have_first = true;
+		} else if (pending_event_count < MAX_PENDING_EVENTS) {
+			pending_events[pending_event_count] = event;
+			pending_event_count++;
+		} else {
+			log::debug("[dap] Dropping composite event %d (pending buffer full)", ev_idx);
+		}
 	}
 
-	return event;
+	if (!have_first) return transport::JDWP_PROTOCOL_ERROR~;
+	return first_event;
 }
 
 // Convert JDWP event to DAP event body + event name
