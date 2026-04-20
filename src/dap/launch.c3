@@ -108,6 +108,9 @@ fn LaunchResult? launch_gradle_test(LaunchConfig* config) {
 	Path old_cwd;
 	if (try cwd = path::tcwd()) {
 		old_cwd = cwd;
+	} else {
+		log::err("[dap] Failed to get current directory");
+		return LAUNCH_FAILED~;
 	}
 	path::chdir(config.workspace_path)!!;
 
@@ -115,12 +118,12 @@ fn LaunchResult? launch_gradle_test(LaunchConfig* config) {
 	if (try p = process::spawn(argv[:argc], SpawnOptions.ASYNC_OUTPUT | SpawnOptions.INHERIT_ENV)) {
 		proc = p;
 	} else {
-		path::chdir(old_cwd)!!;
+		(void)path::chdir(old_cwd);
 		log::err("[dap] Failed to spawn gradle");
 		return LAUNCH_FAILED~;
 	}
 
-	path::chdir(old_cwd)!!;
+	(void)path::chdir(old_cwd);
 
 	// Read stderr to find JDWP port — gradle is slow, allow up to 60s
 	int port = 0;
@@ -157,11 +160,17 @@ fn LaunchResult? launch_gradle_test(LaunchConfig* config) {
 	log::info("[dap] JDWP agent listening on port %d", port);
 
 	// Connect to JDWP
-	JdwpConnection conn = transport::connect("127.0.0.1", port)!;
-	LaunchResult result;
-	result.conn = conn;
-	result.proc = proc;
-	return result;
+	if (try conn = transport::connect("127.0.0.1", port)) {
+		LaunchResult result;
+		result.conn = conn;
+		result.proc = proc;
+		return result;
+	}
+
+	// JDWP connect failed — kill orphan process
+	log::err("[dap] Failed to connect to JDWP on port %d, destroying process", port);
+	(void)proc.destroy();
+	return LAUNCH_FAILED~;
 }
 
 // Launch JVM with JDWP agent, return connection + process
@@ -207,6 +216,9 @@ fn LaunchResult? launch_and_connect(LaunchConfig* config, Classpath* cp) {
 	if (config.workspace_path.len > 0) {
 		if (try cwd = path::tcwd()) {
 			old_cwd = cwd;
+		} else {
+			log::err("[dap] Failed to get current directory");
+			return LAUNCH_FAILED~;
 		}
 		path::chdir(config.workspace_path)!!;
 	}
@@ -215,11 +227,11 @@ fn LaunchResult? launch_and_connect(LaunchConfig* config, Classpath* cp) {
 	if (try p = process::spawn(argv[:argc], SpawnOptions.ASYNC_OUTPUT | SpawnOptions.INHERIT_ENV)) {
 		proc = p;
 	} else {
-		if (config.workspace_path.len > 0) path::chdir(old_cwd)!!;
+		if (config.workspace_path.len > 0) (void)path::chdir(old_cwd);
 		return LAUNCH_FAILED~;
 	}
 
-	if (config.workspace_path.len > 0) path::chdir(old_cwd)!!;
+	if (config.workspace_path.len > 0) (void)path::chdir(old_cwd);
 
 	// Read stderr to find "Listening for transport dt_socket at address: <port>"
 	int port = 0;
@@ -246,11 +258,16 @@ fn LaunchResult? launch_and_connect(LaunchConfig* config, Classpath* cp) {
 
 	log::info("[dap] JDWP agent listening on port %d", port);
 
-	JdwpConnection conn = transport::connect("127.0.0.1", port)!;
-	LaunchResult result;
-	result.conn = conn;
-	result.proc = proc;
-	return result;
+	if (try conn = transport::connect("127.0.0.1", port)) {
+		LaunchResult result;
+		result.conn = conn;
+		result.proc = proc;
+		return result;
+	}
+
+	log::err("[dap] Failed to connect to JDWP on port %d, destroying process", port);
+	(void)proc.destroy();
+	return LAUNCH_FAILED~;
 }
 
 // Parse JDWP port from JVM stderr output

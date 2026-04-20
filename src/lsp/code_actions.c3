@@ -173,9 +173,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 fn Object* try_remove_unused_import(String uri, Document* doc, Object* diag) {
 	if (doc == null) return null;
 
-	Object* range = diag.get("range")!!;
-	int start_line = range.get("start")!!.get_int("line")!!;
-	int end_line = range.get("end")!!.get_int("line")!!;
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	Object* end = range.get("end") ?? null;
+	if (start == null || end == null) return null;
+	int start_line;
+	int end_line;
+	if (try sl = start.get_int("line")) { start_line = sl; } else { return null; }
+	if (try el = end.get_int("line")) { end_line = el; } else { return null; }
 
 	// Build a range that covers the full line(s) of the import, including newline
 	Object* delete_range = build_line_delete_range(start_line, end_line);
@@ -220,9 +226,15 @@ fn Object* build_organize_imports_action(String uri, Object*[] diags) {
 	Object* edits = object::new_obj(tmem);
 
 	for (usz i = 0; i < diags.len; i++) {
-		Object* range = diags[i].get("range")!!;
-		int start_line = range.get("start")!!.get_int("line")!!;
-		int end_line = range.get("end")!!.get_int("line")!!;
+		Object* range = diags[i].get("range") ?? null;
+		if (range == null) continue;
+		Object* start = range.get("start") ?? null;
+		Object* end = range.get("end") ?? null;
+		if (start == null || end == null) continue;
+		int start_line;
+		int end_line;
+		if (try sl = start.get_int("line")) { start_line = sl; } else { continue; }
+		if (try el = end.get_int("line")) { end_line = el; } else { continue; }
 
 		Object* delete_range = build_line_delete_range(start_line, end_line);
 
@@ -271,7 +283,8 @@ fn Object* try_fix_operator(String uri, Object* diag, String message) {
 		return null;
 	}
 
-	Object* range = diag.get("range")!!;
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
 
 	Object* edit = object::new_obj(tmem);
 	edit.set("range", range);
@@ -313,18 +326,23 @@ fn Object* try_insert_delimiter(String uri, Object* diag, String message) {
 	// Only offer insertion for closing delimiters
 	if (delimiter != ")" && delimiter != "}" && delimiter != ">") return null;
 
-	Object* range = diag.get("range")!!;
-	Object* start = range.get("start")!!;
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int start_line;
+	int start_char;
+	if (try sl = start.get_int("line")) { start_line = sl; } else { return null; }
+	if (try sc = start.get_int("character")) { start_char = sc; } else { return null; }
 
 	// Build an insert range (zero-width at the start of the diagnostic)
 	Object* insert_start = object::new_obj(tmem);
-	insert_start.set("line", start.get_int("line")!!);
-	insert_start.set("character", start.get_int("character")!!);
+	insert_start.set("line", start_line);
+	insert_start.set("character", start_char);
 
 	Object* insert_end = object::new_obj(tmem);
-	insert_end.set("line", start.get_int("line")!!);
-	insert_end.set("character", start.get_int("character")!!);
-
+	insert_end.set("line", start_line);
+	insert_end.set("character", start_char);
 	Object* insert_range = object::new_obj(tmem);
 	insert_range.set("start", insert_start);
 	insert_range.set("end", insert_end);

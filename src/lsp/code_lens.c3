@@ -30,8 +30,9 @@ fn Object*? handle_code_lens(DocumentStore* store, Object* params) {
 	// Walk FILE node's direct children
 	AstNode* file = &pr.nodes[0];
 	for (uint i = 0; i < file.child_count; i++) {
-		AstNode* node = ast::get_child(pr, file, i)!!;
-		emit_lenses(pr, node, uri, result);
+		if (try node = ast::get_child(pr, file, i)) {
+			emit_lenses(pr, node, uri, result);
+		}
 	}
 
 	return result;
@@ -72,8 +73,9 @@ fn void emit_lenses(ParseResult* pr, AstNode* node, String uri, Object* result) 
 			}
 			// Recurse into class children
 			for (uint i = 0; i < node.child_count; i++) {
-				AstNode* child = ast::get_child(pr, node, i)!!;
-				emit_lenses(pr, child, uri, result);
+				if (try child = ast::get_child(pr, node, i)) {
+					emit_lenses(pr, child, uri, result);
+				}
 			}
 
 		default:

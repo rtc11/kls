@@ -449,8 +449,11 @@ fn Object* build_item_from_dep_symbol(DepSymbol* sym) {
 		return build_unresolved_item(sym.name);
 	}
 
-	String uri = loc.get_string("uri")!!;
-	Object* range = loc.get("range")!!;
+	String uri = loc.get_string("uri") ?? "";
+	Object* range = loc.get("range") ?? null;
+	if (uri.len == 0 || range == null) {
+		return build_unresolved_item(sym.name);
+	}
 
 	Object* item = object::new_obj(tmem);
 	item.set("name", sym.name);

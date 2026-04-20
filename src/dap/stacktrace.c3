@@ -275,7 +275,7 @@ fn String resolve_source_path(String workspace_path, String class_name, String s
 		// List subdirs under prefix (e.g., apps/utsjekk, apps/abetal)
 		// Try each subdir + src_dir combo
 		if (try dir = file::open(prefix_path.str_view(), "r")) {
-			dir.close()!!;
+			(void)dir.close();
 			// Directory exists — try well-known sub-module patterns
 			// We don't have readdir, so try the package-based approach:
 			// The class name package might contain the module name

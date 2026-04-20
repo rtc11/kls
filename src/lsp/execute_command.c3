@@ -278,7 +278,7 @@ fn void run_command(String workdir, String[] argv) {
 	if (try p = process::spawn(argv, SpawnOptions.ASYNC_OUTPUT | SpawnOptions.INHERIT_ENV)) {
 		proc = p;
 	} else {
-		path::chdir(old_cwd)!!;
+		(void)path::chdir(old_cwd);
 		show_message(1, "Failed to start process");
 		progress::end("kls-exec", "Failed");
 		return;

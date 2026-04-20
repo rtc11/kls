@@ -54,13 +54,16 @@ fn void DependencyIndex.init(DependencyIndex* self) {
 	self.symbols.init(mem);
 	self.name_index.init(mem);
 	self.super_index.init(mem);
-	self.index_mutex.init()!!;
+	if (catch excuse = self.index_mutex.init()) {
+		log::err("[kls] Failed to init dep index mutex: %s", excuse);
+		return;
+	}
 	self.initialized = true;
 }
 
 fn void DependencyIndex.free(DependencyIndex* self) {
 	// Track interned (shared) jar_path pointers to free once
-	void*[256] freed_jar_paths;
+	void*[1024] freed_jar_paths;
 	usz freed_count = 0;
 
 	for (usz i = 0; i < self.symbols.len(); i++) {
@@ -82,7 +85,7 @@ fn void DependencyIndex.free(DependencyIndex* self) {
 				}
 				if (!already_freed) {
 					mem::free(sym.jar_path.ptr);
-					if (freed_count < 256) {
+					if (freed_count < 1024) {
 						freed_jar_paths[freed_count] = sym.jar_path.ptr;
 						freed_count++;
 					}
@@ -196,8 +199,14 @@ fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp,
 	}
 
 	// Launch worker threads (thread 0 runs on main thread)
+	usz launched = 0;
 	for (usz t = 1; t < thread_count; t++) {
-		threads[t].create(&jar_worker_fn, &args[t])!!;
+		if (catch excuse = threads[t].create(&jar_worker_fn, &args[t])) {
+			log::err("[kls] Failed to create worker thread %d: %s, running on main thread", (int)t, excuse);
+			jar_worker_body(&args[t]);
+		} else {
+			launched++;
+		}
 	}
 
 	// Main thread handles partition 0 (already has temp allocator)
@@ -211,7 +220,7 @@ fn void DependencyIndex.index_classpath(DependencyIndex* self, Classpath* cp,
 
 	// Join worker threads
 	for (usz t = 1; t < thread_count; t++) {
-		threads[t].join()!!;
+		(void)threads[t].join();
 		if (progress_token.len > 0) {
 			int pct = pct_start + (int)((t + 1) * (usz)(pct_end - pct_start) / thread_count);
 			progress::report(progress_token, "Indexing dependencies...", pct);

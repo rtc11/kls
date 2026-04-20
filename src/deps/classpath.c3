@@ -317,7 +317,7 @@ fn void resolve_gradle(Classpath* cp, String workspace_path) {
 		}
 
 		// Restore working directory
-		path::chdir(old_cwd)!!;
+		(void)path::chdir(old_cwd);
 
 		// Parse output: lines starting with "KLS_JAR:" contain JAR paths
 		parse_gradle_output(cp, output);
@@ -767,7 +767,7 @@ fn void resolve_maven(Classpath* cp, String workspace_path) {
 		}
 
 		// Restore working directory
-		path::chdir(old_cwd)!!;
+		(void)path::chdir(old_cwd);
 
 		// Parse output: colon-separated JAR paths
 		parse_maven_output(cp, output);

@@ -14,7 +14,10 @@ faultdef
 	JDWP_CONNECTION_FAILED,
 	JDWP_READ_ERROR,
 	JDWP_WRITE_ERROR,
-	JDWP_PROTOCOL_ERROR;
+	JDWP_PROTOCOL_ERROR,
+	JDWP_PACKET_TOO_LARGE;
+
+const int MAX_JDWP_PACKET_SIZE = 16 * 1024 * 1024; // 16 MB
 
 // JDWP command packet (outgoing)
 struct JdwpCommand {
@@ -63,7 +66,7 @@ fn JdwpConnection? connect(String host, int port) {
 	}
 	usz written = sock.write(hs_buf[:14]) ?? 0;
 	if (written != 14) {
-		sock.close()!!;
+		(void)sock.close();
 		return JDWP_HANDSHAKE_FAILED~;
 	}
 
@@ -73,7 +76,7 @@ fn JdwpConnection? connect(String host, int port) {
 
 	String response = (String)response_buf[:14];
 	if (response != JDWP_HANDSHAKE) {
-		sock.close()!!;
+		(void)sock.close();
 		return JDWP_HANDSHAKE_FAILED~;
 	}
 
@@ -116,59 +119,70 @@ fn int? JdwpConnection.send_command(JdwpConnection* self, char command_set, char
 
 // Read a JDWP reply packet
 fn JdwpReply? JdwpConnection.read_reply(JdwpConnection* self) {
-	char[11] header;
-	read_exact(&self.socket, header[:11])!;
+	while (true) {
+		char[11] header;
+		read_exact(&self.socket, header[:11])!;
 
-	int length = get_int_be(header[..], 0);
-	int id = get_int_be(header[..], 4);
-	char flags = header[8];
+		int length = get_int_be(header[..], 0);
+		int id = get_int_be(header[..], 4);
+		char flags = header[8];
 
-	if ((flags & REPLY_FLAG) == 0) {
-		// This is a command packet (event), not a reply — buffer it
-		int data_len = length - (int)HEADER_SIZE;
-		char[] evt_data;
+		if ((flags & REPLY_FLAG) == 0) {
+			// This is a command packet (event), not a reply — buffer it
+			int data_len = length - (int)HEADER_SIZE;
+			if (data_len > MAX_JDWP_PACKET_SIZE) {
+				log::err("[jdwp] Event packet too large: %d bytes", data_len);
+				return JDWP_PACKET_TOO_LARGE~;
+			}
+			char[] evt_data;
+			if (data_len > 0) {
+				evt_data = mem::alloc_array(char, (usz)data_len);
+				read_exact(&self.socket, evt_data)!;
+			}
+			if (self.event_buf_count < MAX_BUFFERED_EVENTS) {
+				BufferedPacket* bp = &self.event_buf[self.event_buf_count];
+				bp.header = header;
+				bp.data = evt_data;
+				bp.valid = true;
+				self.event_buf_count++;
+				log::debug("[jdwp] Buffered event packet id=%d (buf count=%d)", id, (int)self.event_buf_count);
+			} else {
+				log::err("[jdwp] Event buffer full, dropping event id=%d", id);
+				if (data_len > 0) mem::free(evt_data.ptr);
+			}
+			// Loop to retry reading for actual reply
+			continue;
+		}
+
+		ushort error_code = get_ushort_be(header[..], 9);
+		int data_len = length - (int)REPLY_HEADER_SIZE;
+
+		if (data_len > MAX_JDWP_PACKET_SIZE) {
+			log::err("[jdwp] Reply packet too large: %d bytes", data_len);
+			return JDWP_PACKET_TOO_LARGE~;
+		}
+
+		char[] data;
 		if (data_len > 0) {
-			evt_data = mem::alloc_array(char, (usz)data_len);
-			read_exact(&self.socket, evt_data)!;
+			data = mem::talloc_array(char, (usz)data_len);
+			read_exact(&self.socket, data)!;
 		}
-		if (self.event_buf_count < MAX_BUFFERED_EVENTS) {
-			BufferedPacket* bp = &self.event_buf[self.event_buf_count];
-			bp.header = header;
-			bp.data = evt_data;
-			bp.valid = true;
-			self.event_buf_count++;
-			log::debug("[jdwp] Buffered event packet id=%d (buf count=%d)", id, (int)self.event_buf_count);
-		} else {
-			log::err("[jdwp] Event buffer full, dropping event id=%d", id);
-			if (data_len > 0) mem::free(evt_data.ptr);
-		}
-		// Retry reading for actual reply
-		return self.read_reply();
+
+		log::debug("[jdwp] Reply id=%d error=%d data_len=%d", id, (int)error_code, data_len);
+
+		JdwpReply result = {
+			.id = id,
+			.error_code = error_code,
+			.data = data,
+		};
+		return result;
 	}
-
-	ushort error_code = get_ushort_be(header[..], 9);
-	int data_len = length - (int)REPLY_HEADER_SIZE;
-
-	char[] data;
-	if (data_len > 0) {
-		data = mem::talloc_array(char, (usz)data_len);
-		read_exact(&self.socket, data)!;
-	}
-
-	log::debug("[jdwp] Reply id=%d error=%d data_len=%d", id, (int)error_code, data_len);
-
-	JdwpReply result = {
-		.id = id,
-		.error_code = error_code,
-		.data = data,
-	};
-	return result;
 }
 
 // Close JDWP connection
 fn void JdwpConnection.close(JdwpConnection* self) {
 	if (self.connected) {
-		self.socket.close()!!;
+		(void)self.socket.close();
 		self.connected = false;
 		// Free buffered events
 		for (usz i = 0; i < self.event_buf_count; i++) {

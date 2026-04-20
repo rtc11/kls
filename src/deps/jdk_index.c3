@@ -206,10 +206,10 @@ fn String strip_jmod_header(String jmod_path) {
 	}
 
 	if (catch excuse = f.write(data[JMOD_HEADER_SIZE..])) {
-		f.close()!!;
+		(void)f.close();
 		return "";
 	}
-	f.close()!!;
+	(void)f.close();
 
 	return tmp_path.copy(mem);
 }

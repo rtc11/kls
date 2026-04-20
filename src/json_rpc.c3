@@ -18,7 +18,10 @@ faultdef
 	UNEXPECTED_EOF,
 	INVALID_HEADER,
 	CONTENT_LENGTH_MISSING,
+	MESSAGE_TOO_LARGE,
 	READ_ERROR;
+
+const int MAX_MESSAGE_SIZE = 50 * 1024 * 1024; // 50 MB
 
 // Monotonic counter for server-originated request IDs
 int server_request_id = 0;
@@ -54,6 +57,11 @@ fn String? read_message() {
 
 	if (content_length < 0) {
 		return CONTENT_LENGTH_MISSING~;
+	}
+
+	if (content_length > MAX_MESSAGE_SIZE) {
+		log::err("Content-Length %d exceeds max %d", content_length, MAX_MESSAGE_SIZE);
+		return MESSAGE_TOO_LARGE~;
 	}
 
 	// Read exactly content_length bytes

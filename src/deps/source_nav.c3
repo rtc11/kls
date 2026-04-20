@@ -466,7 +466,9 @@ fn void ensure_parent_dirs(String file_path) {
 			String partial = dir_path[..i - 1];
 			if (try pp = path::temp(partial)) {
 				if (!path::is_dir(pp)) {
-					path::mkdir(pp, false)!!;
+					if (catch excuse = path::mkdir(pp, false)) {
+						return;
+					}
 				}
 			}
 		}
@@ -474,7 +476,9 @@ fn void ensure_parent_dirs(String file_path) {
 	// Create the final directory
 	if (try dp = path::temp(dir_path)) {
 		if (!path::is_dir(dp)) {
-			path::mkdir(dp, false)!!;
+			if (catch excuse = path::mkdir(dp, false)) {
+				return;
+			}
 		}
 	}
 }
