@@ -265,3 +265,63 @@ fn void cross_file_range_covers_name() @test {
 		assert(end_col == 15, "expected end col 15, got %d", end_col);
 	};
 }
+
+// ── Cross-file: property defined in another file ───────────────────
+
+fn void cross_file_property_definition() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A defines a top-level val
+		String file_a = "val globalConfig = mapOf(\"key\" to \"value\")";
+		ws.index_file("file:///config.kt", file_a);
+
+		// File B references globalConfig
+		String file_b = "fun main() { println(globalConfig) }";
+		store.open("file:///main.kt", "kotlin", 1, file_b);
+
+		// Cursor on "globalConfig" at col 21
+		Object* params = make_params("file:///main.kt", 0, 21);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected cross-file Location for property");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///config.kt", "expected config.kt, got '%s'", uri);
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int col = start.get_int("character")!!;
+		// "val globalConfig" -> name starts at col 4
+		assert(col == 4, "expected col 4, got %d", col);
+	};
+}
+
+// ── Cross-file: symbol exists nowhere (empty workspace) ────────────
+
+fn void cross_file_definition_not_found_empty_workspace() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Empty workspace — no files indexed
+		String file = "fun main() { missingSymbol() }";
+		store.open("file:///main.kt", "kotlin", 1, file);
+
+		// Cursor on "missingSymbol"
+		Object* params = make_params("file:///main.kt", 0, 14);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result == null, "expected null for symbol not found anywhere");
+	};
+}

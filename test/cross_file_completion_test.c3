@@ -777,3 +777,75 @@ fn void import_completion_filters_by_prefix() @test {
 		assert(!found_account, "Account should not match 'Us' prefix");
 	};
 }
+
+// ── Cross-file completion: empty workspace ─────────────────────────
+
+fn void cross_file_completion_empty_workspace() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Empty workspace — no files indexed
+		String content = "fun main() { hel }";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 16);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result even with empty workspace");
+		Object* items = result.get("items")!!;
+		// Should still have keyword completions but no workspace symbols
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			assert(label != "helperFunction", "should not find workspace symbols in empty workspace");
+		}
+	};
+}
+
+// ── Cross-file completion: symbols from multiple files ─────────────
+
+fn void cross_file_completion_multiple_files() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Three different files with symbols starting with "proc"
+		ws.index_file("file:///a.kt", "fun dataUtils() {}");
+		ws.index_file("file:///b.kt", "class DataProcessor {}");
+		ws.index_file("file:///c.kt", "val dataPath = \"\"");
+
+		// Current file typing "data"
+		String content = "fun main() { data }";
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 0, 17);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_data_utils = false;
+		bool found_data_processor = false;
+		bool found_data_path = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "dataUtils") found_data_utils = true;
+			if (label == "DataProcessor") found_data_processor = true;
+			if (label == "dataPath") found_data_path = true;
+		}
+		assert(found_data_utils, "expected 'dataUtils' from file a.kt");
+		assert(found_data_processor || found_data_path, "expected symbols from multiple workspace files");
+	};
+}

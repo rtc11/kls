@@ -222,3 +222,80 @@ fn void cross_file_multiple_files() @test {
 		assert(total == 3, "expected 3 references from 3 files, got %d", (int)total);
 	};
 }
+
+// ── Cross-file: property references across files ───────────────────
+
+fn void cross_file_property_references() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A defines a val property
+		String file_a = "val sharedConfig = 42\nfun setup() { println(sharedConfig) }";
+		ws.index_file("file:///config.kt", file_a);
+		store.open("file:///config.kt", "kotlin", 1, file_a);
+
+		// File B references sharedConfig
+		String file_b = "fun main() { println(sharedConfig) }";
+		store.open("file:///main.kt", "kotlin", 1, file_b);
+
+		// Cursor on "sharedConfig" in file B at col 21
+		Object* params = make_params("file:///main.kt", 0, 21);
+		Object* result = references::handle_references(&store, &ws, params)!!;
+
+		assert(result != null, "expected references array");
+		// main.kt: 1 ref, config.kt: 2 refs (decl + usage) = 3
+		usz total = result.get_len();
+		assert(total == 3, "expected 3 references, got %d", (int)total);
+
+		bool found_config = false;
+		bool found_main = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_uri(result, i) == "file:///config.kt") found_config = true;
+			if (get_uri(result, i) == "file:///main.kt") found_main = true;
+		}
+		assert(found_config, "expected references in config.kt");
+		assert(found_main, "expected references in main.kt");
+	};
+}
+
+// ── Cross-file: exclude declaration ────────────────────────────────
+
+fn void cross_file_exclude_declaration() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A defines "worker" and calls it
+		String file_a = "fun worker() {}\nfun init() { worker() }";
+		ws.index_file("file:///a.kt", file_a);
+		store.open("file:///a.kt", "kotlin", 1, file_a);
+
+		// File B calls "worker"
+		String file_b = "fun main() { worker() }";
+		store.open("file:///b.kt", "kotlin", 1, file_b);
+
+		// With include_declaration=true
+		Object* params_incl = make_params("file:///b.kt", 0, 14, true);
+		Object* result_incl = references::handle_references(&store, &ws, params_incl)!!;
+		usz total_incl = result_incl.get_len();
+
+		// With include_declaration=false
+		Object* params_excl = make_params("file:///b.kt", 0, 14, false);
+		Object* result_excl = references::handle_references(&store, &ws, params_excl)!!;
+		usz total_excl = result_excl.get_len();
+
+		// Excluding declaration should yield fewer or equal results
+		assert(total_excl <= total_incl, "exclude_declaration should not add refs: excl=%d incl=%d", (int)total_excl, (int)total_incl);
+	};
+}

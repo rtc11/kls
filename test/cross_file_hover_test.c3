@@ -250,3 +250,61 @@ fn void cross_file_hover_shows_package() @test {
 		assert(value.contains("com.example.app"), "expected package name in hover, got: '%s'", value);
 	};
 }
+
+// ── Cross-file hover: object declaration from workspace ────────────
+
+fn void cross_file_hover_object() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String file_a = "object AppConfig {\n    val debug = false\n}";
+		ws.index_file("file:///config.kt", file_a);
+		store.open("file:///config.kt", "kotlin", 1, file_a);
+
+		String file_b = "fun main() { println(AppConfig.debug) }";
+		store.open("file:///main.kt", "kotlin", 1, file_b);
+
+		// Cursor on "AppConfig" at col 21
+		Object* params = make_params("file:///main.kt", 0, 21);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
+
+		assert(result != null, "expected hover result for object");
+		String value = get_hover_value(result);
+		assert(value.contains("AppConfig"), "expected 'AppConfig' in hover, got: '%s'", value);
+	};
+}
+
+// ── Cross-file hover: unknown symbol with empty workspace ──────────
+
+fn void cross_file_hover_unknown_empty_workspace() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Empty workspace — no files indexed
+		String file = "fun main() { somethingUnknown() }";
+		store.open("file:///main.kt", "kotlin", 1, file);
+
+		// Cursor on "somethingUnknown" at col 14
+		Object* params = make_params("file:///main.kt", 0, 14);
+		Object* result = hover::handle_hover(&store, &ws, params)!!;
+
+		// Should still return something (basic identifier hover) or null
+		// Either way, no crash
+		if (result != null) {
+			String value = get_hover_value(result);
+			assert(value.contains("somethingUnknown"), "expected identifier in hover");
+		}
+	};
+}
