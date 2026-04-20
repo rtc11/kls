@@ -103,8 +103,8 @@ fn DapCapabilities default_capabilities() {
 	return {
 		.supports_configuration_done_request = true,
 		.supports_function_breakpoints = true,
-		.supports_conditional_breakpoints = false,
-		.supports_evaluate_for_hovers = false,
+		.supports_conditional_breakpoints = true,
+		.supports_evaluate_for_hovers = true,
 		.supports_exception_info_request = false,
 		.supports_set_variable = false,
 		.supports_terminate_request = true,

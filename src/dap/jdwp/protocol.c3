@@ -38,6 +38,7 @@ const char VM_CAPABILITIES     = 12;
 const char VM_CLASS_PATHS      = 13;
 const char VM_DISPOSE_OBJECTS  = 14;
 const char VM_CAPABILITIES_NEW = 17;
+const char VM_CREATE_STRING    = 11;
 
 // ── ReferenceType commands ─────────────────────────────────────────
 
@@ -71,10 +72,17 @@ const char OR_REFERENCE_TYPE   = 1;
 const char OR_GET_VALUES       = 2;
 const char OR_SET_VALUES       = 3;
 const char OR_INVOKE_METHOD    = 6;
+const char OR_DISABLE_GC       = 7;
+const char OR_ENABLE_GC        = 8;
 
 // ── StringReference commands ───────────────────────────────────────
 
 const char SR_VALUE            = 1;
+
+// ── ArrayReference commands ────────────────────────────────────────
+
+const char AR_LENGTH           = 1;
+const char AR_GET_VALUES       = 2;
 
 // ── ThreadReference commands ───────────────────────────────────────
 
@@ -455,5 +463,78 @@ fn JdwpReply? get_string_value(JdwpConnection* conn, long string_id) {
 	char[8] data;
 	transport::put_long_be(data[..], 0, string_id);
 	int id = conn.send_command(CS_STRING_REFERENCE, SR_VALUE, data[:8])!;
+	return conn.read_reply();
+}
+
+// Create a string object in the VM (for passing as method argument)
+// Returns: stringObject (objectID, 8 bytes)
+fn JdwpReply? create_string(JdwpConnection* conn, String value) {
+	char[] data = mem::talloc_array(char, 4 + value.len);
+	transport::put_int_be(data[..], 0, (int)value.len);
+	for (usz i = 0; i < value.len; i++) {
+		data[4 + i] = value[i];
+	}
+	int id = conn.send_command(CS_VIRTUAL_MACHINE, VM_CREATE_STRING, data)!;
+	return conn.read_reply();
+}
+
+// Invoke instance method on object
+// Returns: reply with value(tagged) + exception(tagged-objectID)
+fn JdwpReply? invoke_object_method(JdwpConnection* conn, long object_id, long thread_id, long class_id, long method_id, char[] arg_tags, long[] arg_values, int options) {
+	int arg_count = (int)arg_tags.len;
+	// objectID(8) + threadID(8) + classID(8) + methodID(8) + argCount(4) + args[tag(1)+value(8)] + options(4)
+	usz total = 8 + 8 + 8 + 8 + 4 + (usz)arg_count * 9 + 4;
+	char[] data = mem::talloc_array(char, total);
+	usz pos = 0;
+	transport::put_long_be(data[..], pos, object_id); pos += 8;
+	transport::put_long_be(data[..], pos, thread_id); pos += 8;
+	transport::put_long_be(data[..], pos, class_id); pos += 8;
+	transport::put_long_be(data[..], pos, method_id); pos += 8;
+	transport::put_int_be(data[..], pos, arg_count); pos += 4;
+	for (int i = 0; i < arg_count; i++) {
+		data[pos] = arg_tags[i]; pos++;
+		transport::put_long_be(data[..], pos, arg_values[i]); pos += 8;
+	}
+	transport::put_int_be(data[..], pos, options); pos += 4;
+	int id = conn.send_command(CS_OBJECT_REFERENCE, OR_INVOKE_METHOD, data[:pos])!;
+	return conn.read_reply();
+}
+
+// Invoke static method on class
+fn JdwpReply? invoke_static_method(JdwpConnection* conn, long class_id, long thread_id, long method_id, char[] arg_tags, long[] arg_values, int options) {
+	int arg_count = (int)arg_tags.len;
+	// classID(8) + threadID(8) + methodID(8) + argCount(4) + args[tag(1)+value(8)] + options(4)
+	usz total = 8 + 8 + 8 + 4 + (usz)arg_count * 9 + 4;
+	char[] data = mem::talloc_array(char, total);
+	usz pos = 0;
+	transport::put_long_be(data[..], pos, class_id); pos += 8;
+	transport::put_long_be(data[..], pos, thread_id); pos += 8;
+	transport::put_long_be(data[..], pos, method_id); pos += 8;
+	transport::put_int_be(data[..], pos, arg_count); pos += 4;
+	for (int i = 0; i < arg_count; i++) {
+		data[pos] = arg_tags[i]; pos++;
+		transport::put_long_be(data[..], pos, arg_values[i]); pos += 8;
+	}
+	transport::put_int_be(data[..], pos, options); pos += 4;
+	int id = conn.send_command(CS_CLASS_TYPE, CT_INVOKE_METHOD, data[:pos])!;
+	return conn.read_reply();
+}
+
+// Get array length
+fn JdwpReply? get_array_length(JdwpConnection* conn, long array_id) {
+	char[8] data;
+	transport::put_long_be(data[..], 0, array_id);
+	int id = conn.send_command(CS_ARRAY_REFERENCE, AR_LENGTH, data[:8])!;
+	return conn.read_reply();
+}
+
+// Get array values: firstIndex + length
+// Returns: arrayregion(tag(1) + length(4) + values[])
+fn JdwpReply? get_array_values(JdwpConnection* conn, long array_id, int first_index, int length) {
+	char[16] data;
+	transport::put_long_be(data[..], 0, array_id);
+	transport::put_int_be(data[..], 8, first_index);
+	transport::put_int_be(data[..], 12, length);
+	int id = conn.send_command(CS_ARRAY_REFERENCE, AR_GET_VALUES, data[:16])!;
 	return conn.read_reply();
 }

@@ -23,12 +23,24 @@ struct ActiveBreakpoint {
 	String class_sig_plain; // heap-copied "Lcom/example/Foo;" (for pending resolution)
 	int line;
 	int hit_count;        // hit count condition (0 = no count)
+	String condition;     // conditional expression (empty = unconditional)
 	bool verified;
 }
 
 fn void BreakpointManager.init(BreakpointManager* self) {
 	self.count = 0;
 	self.next_id = 1;
+}
+
+// Look up breakpoint condition by JDWP event request ID.
+// Returns empty string if not found or no condition.
+fn String BreakpointManager.get_condition(BreakpointManager* self, int jdwp_request_id) {
+	for (usz i = 0; i < self.count; i++) {
+		if (self.breakpoints[i].jdwp_request_id == jdwp_request_id) {
+			return self.breakpoints[i].condition;
+		}
+	}
+	return "";
 }
 
 // Handle setBreakpoints request
@@ -81,6 +93,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 		Object* bp_req = bp_list.get_at(i);
 		int line = (int)(bp_req.get_int("line") ?? 0);
 		String hit_cond = bp_req.get_string("hitCondition") ?? "";
+		String condition = bp_req.get_string("condition") ?? "";
 		int hit_count = 0;
 		if (hit_cond.len > 0) {
 			hit_count = (int)(hit_cond.to_int() ?? 0);
@@ -132,6 +145,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 				bp.class_sig_plain = class_sig_plain.copy(mem);
 				bp.line = line;
 				bp.hit_count = hit_count;
+				bp.condition = condition.len > 0 ? condition.copy(mem) : "";
 				bp.verified = false;
 				self.breakpoints[self.count] = bp;
 				self.count++;
@@ -177,6 +191,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 					bp.source_path = source_path.copy(mem);
 					bp.line = line;
 					bp.hit_count = hit_count;
+					bp.condition = condition.len > 0 ? condition.copy(mem) : "";
 					bp.verified = jdwp_req_id != 0;
 					self.breakpoints[self.count] = bp;
 					self.count++;

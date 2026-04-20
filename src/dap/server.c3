@@ -161,6 +161,22 @@ fn void DapServer.handle_jdwp_event(DapServer* self) {
 				log::err("[dap] Failed to resume VM after class prepare: %s", excuse);
 			}
 		} else if (event_name.len > 0) {
+			// Conditional breakpoint: evaluate condition, auto-resume if false
+			if (event.event_kind == protocol::EK_BREAKPOINT) {
+				String condition = self.bp_mgr.get_condition(event.request_id);
+				if (condition.len > 0) {
+					bool should_stop = evaluate::evaluate_condition(&self.conn, &self.id_mgr, event.thread_id, condition);
+					if (!should_stop) {
+						log::info("[dap] Conditional breakpoint (req=%d): condition false, resuming", event.request_id);
+						if (catch excuse = protocol::resume_vm(&self.conn)) {
+							log::err("[dap] Failed to resume after condition eval: %s", excuse);
+						}
+						return;  // Don't send stopped event
+					}
+					log::info("[dap] Conditional breakpoint (req=%d): condition true, stopping", event.request_id);
+				}
+			}
+
 			self.send_event(event_name, body);
 
 			// On VM death, mark disconnected
