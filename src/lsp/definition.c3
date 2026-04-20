@@ -431,7 +431,7 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					// Try to find the receiver's declaration type
 					String recv_name = pr.nodes[j].name;
 					for (uint k = 0; k < pr.node_count; k++) {
-						if (ast::is_declaration(pr.nodes[k].kind) &&
+						if ((ast::is_declaration(pr.nodes[k].kind) || pr.nodes[k].kind == PARAM) &&
 							pr.nodes[k].name == recv_name) {
 							if (ti.has_type[k]) {
 								receiver_type = ti.node_types[k];
@@ -618,7 +618,8 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 				}
 			}
 		}
-		return NOT_DOT_MEMBER~;
+		// member_cache had an entry but member not found — fall through to
+		// parse-based lookup (handles duplicate class names across files)
 	}
 
 	// Fall back to parsing (cache miss)
@@ -1433,7 +1434,7 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 			// Look up the variable declaration type
 			String var_name = pr.nodes[j].name;
 			for (uint k = 0; k < pr.node_count; k++) {
-				if (ast::is_declaration(pr.nodes[k].kind) && pr.nodes[k].name == var_name) {
+				if ((ast::is_declaration(pr.nodes[k].kind) || pr.nodes[k].kind == PARAM) && pr.nodes[k].name == var_name) {
 					if (ti.has_type[k]) {
 						recv_type = ti.node_types[k];
 					} else if (pr.nodes[k].type_text.len > 0) {
