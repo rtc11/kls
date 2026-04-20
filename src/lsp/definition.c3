@@ -441,6 +441,22 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 							break;
 						}
 					}
+				} else if (pr.nodes[j].kind == DOT_EXPR) {
+					// Chained access: a.b.c — inner DOT_EXPR is the receiver.
+					// Try type info first, then resolve via inner DOT_EXPR's member name
+					// by looking up the inner receiver type and its member's return type.
+					if (ti.has_type[j]) {
+						receiver_type = ti.node_types[j];
+					} else {
+						// Try to resolve inner chain: get the inner DOT_EXPR's member name
+						// and receiver, look up that member's type in workspace/deps.
+						receiver_type = resolve_dot_expr_type(pr, ti, workspace, j);
+					}
+				} else if (pr.nodes[j].kind == CALL_EXPR) {
+					// Receiver is a call: factory().member — check type info
+					if (ti.has_type[j]) {
+						receiver_type = ti.node_types[j];
+					}
 				}
 				break;
 			}
@@ -461,6 +477,16 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 				if (recv_name.len > 0) {
 					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr);
 					if (dep_result != null) return dep_result;
+				}
+			}
+
+			// Fallback: search extension functions by member name across all
+			// receiver types in member_cache. This handles chained calls where
+			// we can't resolve the receiver type but the extension function name
+			// is unique enough (filtered by import visibility).
+			if (workspace != null) {
+				if (try result = find_extension_by_name(workspace, tok.text, current_uri, pr)) {
+					return result;
 				}
 			}
 			return NOT_DOT_MEMBER~;
@@ -1379,9 +1405,100 @@ fn String find_enclosing_class_name(ParseResult* pr, uint cursor_offset) {
 		if (n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) continue;
 		if (n.name.len == 0) continue;
 		if (cursor_offset >= n.start_offset && cursor_offset < n.end_offset) {
-			// Deeper (later in array) = more specific
 			result = n.name;
 		}
 	}
 	return result;
+}
+
+// ── Dot-member type resolution helpers ────────────────────────────
+
+/**
+ * Resolve the type of a DOT_EXPR node by examining its structure.
+ * For `a.b`, finds type of `a` then looks up member `b`'s return type.
+ * Used when type inference didn't resolve the DOT_EXPR.
+ */
+fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* workspace, uint dot_idx) {
+	AstNode* dot = &pr.nodes[dot_idx];
+	String member_name = dot.name;
+	if (member_name.len == 0) return types::TYPE_UNKNOWN;
+
+	// Find the receiver (first child of the DOT_EXPR)
+	TypeRef recv_type = types::TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != dot_idx) continue;
+		if (ti.has_type[j]) {
+			recv_type = ti.node_types[j];
+		} else if (pr.nodes[j].kind == NAME_EXPR) {
+			// Look up the variable declaration type
+			String var_name = pr.nodes[j].name;
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (ast::is_declaration(pr.nodes[k].kind) && pr.nodes[k].name == var_name) {
+					if (ti.has_type[k]) {
+						recv_type = ti.node_types[k];
+					} else if (pr.nodes[k].type_text.len > 0) {
+						recv_type = types::parse_type_text(pr.nodes[k].type_text);
+					}
+					break;
+				}
+			}
+		}
+		break;
+	}
+
+	if (recv_type.kind == UNKNOWN || recv_type.name.len == 0) return types::TYPE_UNKNOWN;
+
+	// Now look up member_name's type in recv_type's class
+	if (workspace != null) {
+		if (try members = workspace.lookup_members(recv_type.name)) {
+			for (usz i = 0; i < members.len(); i++) {
+				MemberDecl* m = &(*members)[i];
+				if (m.name != member_name) continue;
+				if (m.type_text.len > 0) {
+					return types::parse_type_text(m.type_text);
+				}
+				// For constructor-like members (class name = type)
+				if (m.node_kind == CLASS_DECL || m.node_kind == OBJECT_DECL) {
+					return { .kind = SIMPLE, .name = m.name };
+				}
+				break;
+			}
+		}
+	}
+
+	return types::TYPE_UNKNOWN;
+}
+
+// ── Extension function fallback ───────────────────────────────────
+
+faultdef NO_EXTENSION_FOUND;
+
+/**
+ * Search all member_cache entries for an extension function matching
+ * the given name. Used as fallback when receiver type is unresolvable.
+ * Filters by import visibility to avoid false positives.
+ */
+fn Object*? find_extension_by_name(WorkspaceIndex* workspace, String member_name, String current_uri, ParseResult* pr) {
+	ImportMap imports = workspace::build_import_map(pr);
+
+	// Search workspace name_index for top-level extension functions with this name
+	if (try indices = workspace.lookup_by_name(member_name)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.uri == current_uri) continue;
+			if (sym.kind != symbols::SymbolKind.FUNCTION && sym.kind != symbols::SymbolKind.PROPERTY) continue;
+			if (sym.receiver.len == 0) continue; // only extension functions
+
+			// Check import visibility
+			String visible = workspace::is_symbol_visible(sym, &imports, member_name);
+			if (visible.len == 0) continue;
+
+			// Check module visibility
+			if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
+
+			return build_location_from_workspace_symbol(sym);
+		}
+	}
+
+	return NO_EXTENSION_FOUND~;
 }
