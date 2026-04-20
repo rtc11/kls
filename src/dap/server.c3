@@ -36,6 +36,7 @@ struct DapServer {
 	Classpath classpath;     // resolved project classpath
 	BreakpointManager bp_mgr; // breakpoint tracking
 	ExceptionBpManager exc_mgr; // exception breakpoint tracking
+	FuncBpManager func_bp_mgr; // function breakpoint tracking
 	String workspace_path;   // project root (heap-copied)
 }
 
@@ -48,6 +49,7 @@ fn void DapServer.init(DapServer* self) {
 	self.id_mgr.init();
 	self.bp_mgr.init();
 	self.exc_mgr.init();
+	self.func_bp_mgr.init();
 }
 
 fn void DapServer.run(DapServer* self) {
@@ -328,6 +330,14 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 				Object* body = object::new_obj(tmem);
 				body.set("breakpoints", object::new_obj(tmem));
 				self.send_response(request_seq, command, body);
+			}
+
+		case "setFunctionBreakpoints":
+			if (self.is_connected && args != null) {
+				Object* body = breakpoints::handle_set_function_breakpoints(&self.func_bp_mgr, &self.conn, args);
+				self.send_response(request_seq, command, body);
+			} else {
+				self.send_response(request_seq, command, breakpoints::build_empty_response());
 			}
 
 		case "continue":

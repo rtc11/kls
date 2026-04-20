@@ -199,6 +199,13 @@ fn JdwpReply? get_all_threads(JdwpConnection* conn) {
 	return conn.read_reply();
 }
 
+// Get all loaded classes in the VM
+// Returns: count(4) + entries[typeTag(1) + typeID(8) + signature(4+utf8) + status(4)]
+fn JdwpReply? get_all_classes(JdwpConnection* conn) {
+	int id = conn.send_command(CS_VIRTUAL_MACHINE, VM_ALL_CLASSES, {})!;
+	return conn.read_reply();
+}
+
 // Get thread name
 fn JdwpReply? get_thread_name(JdwpConnection* conn, long thread_id) {
 	char[8] data;
@@ -254,6 +261,28 @@ fn JdwpReply? set_breakpoint(JdwpConnection* conn, char type_tag, long class_id,
 	data[pos] = EK_BREAKPOINT; pos++;
 	data[pos] = SP_ALL; pos++;
 	transport::put_int_be(data[..], pos, 1); pos += 4;  // 1 modifier
+	data[pos] = MOD_LOCATION_ONLY; pos++;
+	data[pos] = type_tag; pos++;
+	transport::put_long_be(data[..], pos, class_id); pos += 8;
+	transport::put_long_be(data[..], pos, method_id); pos += 8;
+	transport::put_long_be(data[..], pos, offset); pos += 8;
+
+	int id = conn.send_command(CS_EVENT_REQUEST, ER_SET, data[:pos])!;
+	return conn.read_reply();
+}
+
+// Set breakpoint with hit count (Count modifier + LocationOnly modifier)
+fn JdwpReply? set_breakpoint_with_count(JdwpConnection* conn, char type_tag, long class_id, long method_id, long offset, int hit_count) {
+	// EventRequest.Set: eventKind=BREAKPOINT, suspendPolicy=ALL, modifiers=[Count, LocationOnly]
+	char[] data = mem::talloc_array(char, 1 + 1 + 4 + 1 + 4 + 1 + 1 + 8 + 8 + 8);
+	usz pos = 0;
+	data[pos] = EK_BREAKPOINT; pos++;
+	data[pos] = SP_ALL; pos++;
+	transport::put_int_be(data[..], pos, 2); pos += 4;  // 2 modifiers
+	// Modifier 1: Count — breakpoint fires after hit_count hits
+	data[pos] = MOD_COUNT; pos++;
+	transport::put_int_be(data[..], pos, hit_count); pos += 4;
+	// Modifier 2: LocationOnly
 	data[pos] = MOD_LOCATION_ONLY; pos++;
 	data[pos] = type_tag; pos++;
 	transport::put_long_be(data[..], pos, class_id); pos += 8;

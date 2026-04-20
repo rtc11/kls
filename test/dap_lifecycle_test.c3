@@ -19,7 +19,7 @@ fn void initialize_returns_capabilities() @test {
 		assert(terminate == true, "expected supportsTerminateRequest = true");
 
 		bool fn_bp = body.get_bool("supportsFunctionBreakpoints") ?? false;
-		assert(fn_bp == false, "expected supportsFunctionBreakpoints = false");
+		assert(fn_bp == true, "expected supportsFunctionBreakpoints = true");
 
 		bool cond_bp = body.get_bool("supportsConditionalBreakpoints") ?? false;
 		assert(cond_bp == false, "expected supportsConditionalBreakpoints = false");
@@ -62,7 +62,7 @@ fn void default_capabilities_values() @test {
 	DapCapabilities caps = types::default_capabilities();
 	assert(caps.supports_configuration_done_request == true);
 	assert(caps.supports_terminate_request == true);
-	assert(caps.supports_function_breakpoints == false);
+	assert(caps.supports_function_breakpoints == true);
 	assert(caps.supports_conditional_breakpoints == false);
 	assert(caps.supports_evaluate_for_hovers == false);
 	assert(caps.supports_exception_info_request == false);
@@ -108,7 +108,7 @@ fn void initialize_capabilities_complete() @test {
 		assert(terminate == true, "expected supportsTerminateRequest = true");
 
 		bool fn_bp = body.get_bool("supportsFunctionBreakpoints") ?? false;
-		assert(fn_bp == false, "expected supportsFunctionBreakpoints = false");
+		assert(fn_bp == true, "expected supportsFunctionBreakpoints = true");
 
 		bool cond_bp = body.get_bool("supportsConditionalBreakpoints") ?? false;
 		assert(cond_bp == false, "expected supportsConditionalBreakpoints = false");
@@ -137,7 +137,7 @@ fn void initialize_default_capabilities_struct() @test {
 	assert(caps.supports_terminate_request == true, "expected supports_terminate_request = true");
 
 	// False capabilities (step back not supported, etc.)
-	assert(caps.supports_function_breakpoints == false, "expected supports_function_breakpoints = false");
+	assert(caps.supports_function_breakpoints == true, "expected supports_function_breakpoints = false");
 	assert(caps.supports_conditional_breakpoints == false, "expected supports_conditional_breakpoints = false");
 	assert(caps.supports_evaluate_for_hovers == false, "expected supports_evaluate_for_hovers = false");
 	assert(caps.supports_exception_info_request == false, "expected supports_exception_info_request = false");

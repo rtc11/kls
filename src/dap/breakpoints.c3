@@ -22,6 +22,7 @@ struct ActiveBreakpoint {
 	String class_sig_kt;  // heap-copied "Lcom/example/FooKt;" (for pending resolution)
 	String class_sig_plain; // heap-copied "Lcom/example/Foo;" (for pending resolution)
 	int line;
+	int hit_count;        // hit count condition (0 = no count)
 	bool verified;
 }
 
@@ -79,6 +80,11 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 	for (sz i = 0; i < bp_list.get_len(); i++) {
 		Object* bp_req = bp_list.get_at(i);
 		int line = (int)(bp_req.get_int("line") ?? 0);
+		String hit_cond = bp_req.get_string("hitCondition") ?? "";
+		int hit_count = 0;
+		if (hit_cond.len > 0) {
+			hit_count = (int)(hit_cond.to_int() ?? 0);
+		}
 
 		Object* bp_result = object::new_obj(tmem);
 		int dap_id = self.next_id;
@@ -125,6 +131,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 				bp.class_sig_kt = class_sig_kt.copy(mem);
 				bp.class_sig_plain = class_sig_plain.copy(mem);
 				bp.line = line;
+				bp.hit_count = hit_count;
 				bp.verified = false;
 				self.breakpoints[self.count] = bp;
 				self.count++;
@@ -136,13 +143,23 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 			bool found = find_line_location(conn, class_id, line, &method_id, &offset);
 
 			if (found) {
-				// Set JDWP breakpoint
+				// Set JDWP breakpoint (with or without hit count)
 				int jdwp_req_id = 0;
-				if (try reply = protocol::set_breakpoint(conn, type_tag, class_id, method_id, offset)) {
-					if (reply.error_code == 0 && reply.data.len >= 4) {
-						jdwp_req_id = transport::get_int_be(reply.data, 0);
-					} else {
-						log::err("[dap] JDWP set_breakpoint error=%d for line %d", (int)reply.error_code, line);
+				if (hit_count > 0) {
+					if (try reply = protocol::set_breakpoint_with_count(conn, type_tag, class_id, method_id, offset, hit_count)) {
+						if (reply.error_code == 0 && reply.data.len >= 4) {
+							jdwp_req_id = transport::get_int_be(reply.data, 0);
+						} else {
+							log::err("[dap] JDWP set_breakpoint_with_count error=%d for line %d", (int)reply.error_code, line);
+						}
+					}
+				} else {
+					if (try reply = protocol::set_breakpoint(conn, type_tag, class_id, method_id, offset)) {
+						if (reply.error_code == 0 && reply.data.len >= 4) {
+							jdwp_req_id = transport::get_int_be(reply.data, 0);
+						} else {
+							log::err("[dap] JDWP set_breakpoint error=%d for line %d", (int)reply.error_code, line);
+						}
 					}
 				}
 
@@ -159,6 +176,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 					bp.jdwp_request_id = jdwp_req_id;
 					bp.source_path = source_path.copy(mem);
 					bp.line = line;
+					bp.hit_count = hit_count;
 					bp.verified = jdwp_req_id != 0;
 					self.breakpoints[self.count] = bp;
 					self.count++;
@@ -323,9 +341,17 @@ fn void resolve_pending_breakpoints(BreakpointManager* self, JdwpConnection* con
 
 		if (found) {
 			int jdwp_req_id = 0;
-			if (try reply = protocol::set_breakpoint(conn, type_tag, class_id, method_id, offset)) {
-				if (reply.error_code == 0 && reply.data.len >= 4) {
-					jdwp_req_id = transport::get_int_be(reply.data, 0);
+			if (self.breakpoints[i].hit_count > 0) {
+				if (try reply = protocol::set_breakpoint_with_count(conn, type_tag, class_id, method_id, offset, self.breakpoints[i].hit_count)) {
+					if (reply.error_code == 0 && reply.data.len >= 4) {
+						jdwp_req_id = transport::get_int_be(reply.data, 0);
+					}
+				}
+			} else {
+				if (try reply = protocol::set_breakpoint(conn, type_tag, class_id, method_id, offset)) {
+					if (reply.error_code == 0 && reply.data.len >= 4) {
+						jdwp_req_id = transport::get_int_be(reply.data, 0);
+					}
 				}
 			}
 
@@ -495,4 +521,260 @@ fn Object* build_empty_response() {
 	Object* body = object::new_obj(tmem);
 	body.set("breakpoints", object::new_obj(tmem));
 	return body;
+}
+
+// ── Function Breakpoints ───────────────────────────────────────────
+
+const int MAX_FUNC_BREAKPOINTS = 64;
+
+struct FuncBpManager {
+	FuncBreakpoint[MAX_FUNC_BREAKPOINTS] entries;
+	usz count;
+	int next_id;
+}
+
+struct FuncBreakpoint {
+	int dap_id;
+	int jdwp_request_id;
+	String name;  // function name (heap-copied)
+}
+
+fn void FuncBpManager.init(FuncBpManager* self) {
+	self.count = 0;
+	self.next_id = 1;
+}
+
+// Handle setFunctionBreakpoints request
+// Sets breakpoints at the first line of methods matching the given names.
+// Searches all loaded classes for matching method names.
+fn Object* handle_set_function_breakpoints(FuncBpManager* self, JdwpConnection* conn, Object* args) {
+	// Clear existing function breakpoints
+	for (usz i = 0; i < self.count; i++) {
+		if (self.entries[i].jdwp_request_id != 0) {
+			if (catch excuse = protocol::clear_event_request(conn, protocol::EK_BREAKPOINT, self.entries[i].jdwp_request_id)) {
+				log::err("[dap] Failed to clear function bp: %s", excuse);
+			}
+		}
+	}
+	self.count = 0;
+
+	Object* bp_list = args.get("breakpoints") ?? null;
+	Object* result_bps = object::new_obj(tmem);
+
+	if (bp_list == null || !bp_list.is_array()) {
+		Object* body = object::new_obj(tmem);
+		body.set("breakpoints", result_bps);
+		return body;
+	}
+
+	// Get all loaded classes once
+	JdwpReply classes_reply;
+	bool have_classes = false;
+	if (try r = protocol::get_all_classes(conn)) {
+		if (r.error_code == 0) {
+			classes_reply = r;
+			have_classes = true;
+		}
+	}
+
+	for (sz i = 0; i < bp_list.get_len(); i++) {
+		Object* bp_req = bp_list.get_at(i);
+		String name = bp_req.get_string("name") ?? "";
+
+		Object* bp_result = object::new_obj(tmem);
+		int dap_id = self.next_id;
+		self.next_id++;
+		bp_result.set("id", dap_id);
+
+		if (name.len == 0 || !have_classes) {
+			bp_result.set("verified", false);
+			bp_result.set("message", "Function not found");
+			result_bps.push(bp_result);
+			continue;
+		}
+
+		// Parse "ClassName.methodName" or just "methodName"
+		String class_hint = "";
+		String method_name = name;
+		for (usz j = name.len; j > 0; j--) {
+			if (name[j - 1] == '.') {
+				class_hint = name[:j - 1];
+				method_name = name[j..];
+				break;
+			}
+		}
+
+		// Search loaded classes for matching method
+		int jdwp_req_id = 0;
+		bool found = find_and_set_method_breakpoint(conn, &classes_reply, class_hint, method_name, &jdwp_req_id);
+
+		bp_result.set("verified", found && jdwp_req_id != 0);
+		if (!found) {
+			bp_result.set("message", "Function not found");
+		} else if (jdwp_req_id == 0) {
+			bp_result.set("message", "Failed to set breakpoint");
+		}
+
+		if (self.count < MAX_FUNC_BREAKPOINTS) {
+			FuncBreakpoint entry;
+			entry.dap_id = dap_id;
+			entry.jdwp_request_id = jdwp_req_id;
+			entry.name = name.copy(mem);
+			self.entries[self.count] = entry;
+			self.count++;
+		}
+
+		result_bps.push(bp_result);
+	}
+
+	Object* body = object::new_obj(tmem);
+	body.set("breakpoints", result_bps);
+	return body;
+}
+
+// Search all loaded classes for a method and set breakpoint at its first line
+fn bool find_and_set_method_breakpoint(JdwpConnection* conn, JdwpReply* classes_reply, String class_hint, String method_name, int* out_req_id) {
+	if (classes_reply.data.len < 4) return false;
+
+	int class_count = transport::get_int_be(classes_reply.data, 0);
+	usz pos = 4;
+
+	for (int ci = 0; ci < class_count; ci++) {
+		if (pos + 1 + 8 + 4 > classes_reply.data.len) break;
+		char type_tag = classes_reply.data[pos]; pos++;
+		long type_id = transport::get_long_be(classes_reply.data, pos); pos += 8;
+
+		// Signature (length-prefixed UTF-8)
+		int sig_len = transport::get_int_be(classes_reply.data, pos); pos += 4;
+		String sig = "";
+		if (sig_len > 0 && pos + (usz)sig_len <= classes_reply.data.len) {
+			sig = (String)classes_reply.data[pos:(usz)sig_len];
+		}
+		pos += (usz)sig_len;
+
+		// Status (4 bytes)
+		if (pos + 4 > classes_reply.data.len) break;
+		pos += 4;
+
+		// Skip non-class types and system classes
+		if (type_tag != 1 && type_tag != 2) continue; // only CLASS and INTERFACE
+		if (sig.len < 3) continue;
+
+		// If class_hint given, check if signature matches
+		if (class_hint.len > 0) {
+			// Convert "com.example.Foo" to "com/example/Foo"
+			// Check if sig contains the class hint
+			if (!sig_matches_class_hint(sig, class_hint)) continue;
+		}
+
+		// Search methods of this class for matching name
+		if (try_set_breakpoint_on_method(conn, type_tag, type_id, method_name, out_req_id)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+// Check if a JVM signature like "Lcom/example/Foo;" matches a class hint like "com.example.Foo" or "Foo"
+fn bool sig_matches_class_hint(String sig, String hint) {
+	if (sig.len < 3) return false;
+	// Strip L...;
+	String inner = sig[1:sig.len - 2];
+
+	// Simple name match: hint is just "Foo", check if class name ends with it
+	if (hint.len <= inner.len) {
+		// Convert hint dots to slashes for comparison
+		bool has_dots = false;
+		foreach (c : hint) {
+			if (c == '.') { has_dots = true; break; }
+		}
+
+		if (!has_dots) {
+			// Simple name: check if inner ends with /hint or equals hint
+			if (inner == hint) return true;
+			if (inner.len > hint.len && inner[inner.len - hint.len - 1] == '/') {
+				return inner[inner.len - hint.len..] == hint;
+			}
+			return false;
+		}
+
+		// Dotted name: convert to slashed and compare
+		DString slashed;
+		slashed.tinit();
+		foreach (c : hint) {
+			if (c == '.') {
+				slashed.append_char('/');
+			} else {
+				slashed.append_char(c);
+			}
+		}
+		String s = slashed.str_view();
+		if (inner == s) return true;
+		// Also check suffix match
+		if (inner.len > s.len && inner[inner.len - s.len - 1] == '/') {
+			return inner[inner.len - s.len..] == s;
+		}
+	}
+	return false;
+}
+
+// Try to find a method by name in a class and set a breakpoint at its first line
+fn bool try_set_breakpoint_on_method(JdwpConnection* conn, char type_tag, long class_id, String method_name, int* out_req_id) {
+	JdwpReply methods_reply;
+	if (try r = protocol::get_methods(conn, class_id)) {
+		methods_reply = r;
+	} else {
+		return false;
+	}
+	if (methods_reply.error_code != 0 || methods_reply.data.len < 4) return false;
+
+	int method_count = transport::get_int_be(methods_reply.data, 0);
+	usz pos = 4;
+
+	for (int m = 0; m < method_count; m++) {
+		if (pos + 8 > methods_reply.data.len) break;
+		long method_id = transport::get_long_be(methods_reply.data, pos); pos += 8;
+
+		// Name
+		if (pos + 4 > methods_reply.data.len) break;
+		int name_len = transport::get_int_be(methods_reply.data, pos); pos += 4;
+		String mname = "";
+		if (name_len > 0 && pos + (usz)name_len <= methods_reply.data.len) {
+			mname = (String)methods_reply.data[pos:(usz)name_len];
+		}
+		pos += (usz)name_len;
+
+		// Signature
+		if (pos + 4 > methods_reply.data.len) break;
+		int sig_len = transport::get_int_be(methods_reply.data, pos); pos += 4;
+		pos += (usz)sig_len;
+
+		// modBits
+		if (pos + 4 > methods_reply.data.len) break;
+		pos += 4;
+
+		if (mname != method_name) continue;
+
+		// Found matching method — get first line from line table
+		long first_offset = 0;
+		if (try lt = protocol::get_line_table(conn, class_id, method_id)) {
+			if (lt.error_code == 0 && lt.data.len >= 20) {
+				int lt_count = transport::get_int_be(lt.data, 16);
+				if (lt_count > 0 && lt.data.len >= 32) {
+					first_offset = transport::get_long_be(lt.data, 20);
+				}
+			}
+		}
+
+		// Set breakpoint at method entry (first bytecode offset)
+		if (try reply = protocol::set_breakpoint(conn, type_tag, class_id, method_id, first_offset)) {
+			if (reply.error_code == 0 && reply.data.len >= 4) {
+				*out_req_id = transport::get_int_be(reply.data, 0);
+				return true;
+			}
+		}
+	}
+
+	return false;
 }

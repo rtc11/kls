@@ -102,7 +102,7 @@ struct DapCapabilities {
 fn DapCapabilities default_capabilities() {
 	return {
 		.supports_configuration_done_request = true,
-		.supports_function_breakpoints = false,
+		.supports_function_breakpoints = true,
 		.supports_conditional_breakpoints = false,
 		.supports_evaluate_for_hovers = false,
 		.supports_exception_info_request = false,
