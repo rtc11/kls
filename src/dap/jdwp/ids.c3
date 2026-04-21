@@ -47,6 +47,7 @@ struct VarRef {
 	long object_id;   // for expanding object fields (0 = use scope)
 	long class_id;    // for variable table lookup
 	long method_id;   // for variable table lookup
+	long location;    // bytecode index for variable scope filtering
 }
 
 fn void IdManager.init(IdManager* self) {

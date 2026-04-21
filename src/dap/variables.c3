@@ -29,6 +29,7 @@ fn Object* handle_scopes(IdManager* id_mgr, Object* args) {
 	locals_ref.object_id = 0;
 	locals_ref.class_id = frame_ref.class_id;
 	locals_ref.method_id = frame_ref.method_id;
+	locals_ref.location = frame_ref.location;
 	int locals_var_ref = id_mgr.register_var_ref(locals_ref);
 
 	Object* locals_scope = object::new_obj(tmem);
@@ -76,21 +77,36 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 	// Get variable table for the method
 	if (ref.class_id == 0 || ref.method_id == 0) return;
 
+	bool use_generic = false;
 	JdwpReply vt_reply;
 	if (try r = protocol::get_variable_table(conn, ref.class_id, ref.method_id)) {
 		vt_reply = r;
 	} else {
 		return;
 	}
-	if (vt_reply.error_code != 0 || vt_reply.data.len < 8) return;
+	// Fallback to VariableTableWithGeneric if plain VariableTable fails (error 101 = ABSENT_INFORMATION)
+	if (vt_reply.error_code != 0 || vt_reply.data.len < 8) {
+		log::debug("[dap] VariableTable error_code=%d data_len=%d, trying VariableTableWithGeneric",
+			(int)vt_reply.error_code, (int)vt_reply.data.len);
+		if (try r = protocol::get_variable_table_with_generic(conn, ref.class_id, ref.method_id)) {
+			vt_reply = r;
+			use_generic = true;
+		} else {
+			return;
+		}
+		if (vt_reply.error_code != 0 || vt_reply.data.len < 8) {
+			log::debug("[dap] VariableTableWithGeneric also failed: error_code=%d", (int)vt_reply.error_code);
+			return;
+		}
+	}
 
 	// Variable table: argCnt(4) + slots(4) + entries[codeIndex(8) + name(4+N) + signature(4+N) + length(4) + slot(4)]
 	int arg_count = transport::get_int_be(vt_reply.data, 0);
 	int slot_count = transport::get_int_be(vt_reply.data, 4);
 	usz pos = 8;
 
-	// Collect visible variables (check if current location is within their scope)
-	// We don't have exact code index in VarRef, so include all variables
+	// Collect visible variables — filter by code index scope
+	long current_pc = ref.location;
 	const int MAX_LOCALS = 64;
 	int[MAX_LOCALS] slots;
 	char[MAX_LOCALS] tags;
@@ -120,6 +136,13 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 		}
 		pos += (usz)sig_len;
 
+		// VariableTableWithGeneric has an extra genericSignature string per entry — skip it
+		if (use_generic) {
+			if (pos + 4 > vt_reply.data.len) break;
+			int gen_sig_len = transport::get_int_be(vt_reply.data, pos); pos += 4;
+			pos += (usz)gen_sig_len;
+		}
+
 		// Length + slot
 		if (pos + 8 > vt_reply.data.len) break;
 		int length = transport::get_int_be(vt_reply.data, pos); pos += 4;
@@ -127,6 +150,9 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 
 		// Skip "this" (slot 0 for instance methods) — already handled above
 		if (name == "this") continue;
+
+		// Filter by scope: variable is alive when codeIndex <= currentPC < codeIndex + length
+		if (current_pc < code_index || current_pc >= code_index + (long)length) continue;
 
 		// Map JVM signature to JDWP tag
 		char tag = sig_to_tag(sig);
@@ -138,47 +164,99 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 		local_count++;
 	}
 
+	log::debug("[dap] Variable table: arg_count=%d slot_count=%d local_count=%d use_generic=%s pc=%d",
+		arg_count, slot_count, local_count, use_generic ? "true" : "false", (int)current_pc);
+
 	if (local_count == 0) return;
 
-	// Get frame values for all slots at once
+	// Try batch GetValues first; fall back to individual requests on error (e.g. INVALID_SLOT)
+	bool batch_ok = false;
 	if (try reply = protocol::get_frame_values(conn, ref.thread_id, ref.frame_id, slots[:local_count], tags[:local_count])) {
-		if (reply.error_code != 0 || reply.data.len < 4) return;
+		if (reply.error_code == 0 && reply.data.len >= 4) {
+			batch_ok = true;
+			int val_count = transport::get_int_be(reply.data, 0);
+			usz vpos = 4;
 
-		int val_count = transport::get_int_be(reply.data, 0);
-		usz vpos = 4;
+			for (int i = 0; i < val_count && i < local_count; i++) {
+				if (vpos >= reply.data.len) break;
+				char val_tag = reply.data[vpos]; vpos++;
 
-		for (int i = 0; i < val_count && i < local_count; i++) {
-			if (vpos >= reply.data.len) break;
-			char val_tag = reply.data[vpos]; vpos++;
+				int val_size = tag_value_size(val_tag);
+				if (vpos + (usz)val_size > reply.data.len) break;
 
-			int val_size = tag_value_size(val_tag);
-			if (vpos + (usz)val_size > reply.data.len) break;
+				String val_str = format_tagged_value(conn, val_tag, reply.data, vpos);
 
-			String val_str = format_tagged_value(conn, val_tag, reply.data, vpos);
-
-			int child_ref = 0;
-			if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
-				long obj_id = transport::get_long_be(reply.data, vpos);
-				if (obj_id != 0) {
-					VarRef child_vr;
-					child_vr.thread_id = ref.thread_id;
-					child_vr.frame_id = ref.frame_id;
-					child_vr.scope = ScopeKind.THIS_OBJECT;
-					child_vr.object_id = obj_id;
-					child_vr.class_id = 0;
-					child_vr.method_id = 0;
-					child_ref = id_mgr.register_var_ref(child_vr);
+				int child_ref = 0;
+				if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
+					long obj_id = transport::get_long_be(reply.data, vpos);
+					if (obj_id != 0) {
+						VarRef child_vr;
+						child_vr.thread_id = ref.thread_id;
+						child_vr.frame_id = ref.frame_id;
+						child_vr.scope = ScopeKind.THIS_OBJECT;
+						child_vr.object_id = obj_id;
+						child_vr.class_id = 0;
+						child_vr.method_id = 0;
+						child_ref = id_mgr.register_var_ref(child_vr);
+					}
 				}
+
+				Object* var_obj = object::new_obj(tmem);
+				var_obj.set("name", names[i]);
+				var_obj.set("value", val_str);
+				var_obj.set("type", sig_to_type_name(sigs[i]));
+				var_obj.set("variablesReference", child_ref);
+				vars_arr.push(var_obj);
+
+				vpos += (usz)val_size;
 			}
+		} else {
+			log::debug("[dap] Batch GetValues failed: error_code=%d, falling back to individual requests",
+				(int)reply.error_code);
+		}
+	}
 
-			Object* var_obj = object::new_obj(tmem);
-			var_obj.set("name", names[i]);
-			var_obj.set("value", val_str);
-			var_obj.set("type", sig_to_type_name(sigs[i]));
-			var_obj.set("variablesReference", child_ref);
-			vars_arr.push(var_obj);
+	// Fallback: request each slot individually
+	if (!batch_ok) {
+		for (int i = 0; i < local_count; i++) {
+			int[1] single_slot = { slots[i] };
+			char[1] single_tag = { tags[i] };
+			if (try reply = protocol::get_frame_values(conn, ref.thread_id, ref.frame_id, single_slot[..], single_tag[..])) {
+				if (reply.error_code != 0 || reply.data.len < 5) continue;
 
-			vpos += (usz)val_size;
+				int val_count = transport::get_int_be(reply.data, 0);
+				if (val_count == 0) continue;
+				usz vpos = 4;
+				if (vpos >= reply.data.len) continue;
+				char val_tag = reply.data[vpos]; vpos++;
+
+				int val_size = tag_value_size(val_tag);
+				if (vpos + (usz)val_size > reply.data.len) continue;
+
+				String val_str = format_tagged_value(conn, val_tag, reply.data, vpos);
+
+				int child_ref = 0;
+				if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
+					long obj_id = transport::get_long_be(reply.data, vpos);
+					if (obj_id != 0) {
+						VarRef child_vr;
+						child_vr.thread_id = ref.thread_id;
+						child_vr.frame_id = ref.frame_id;
+						child_vr.scope = ScopeKind.THIS_OBJECT;
+						child_vr.object_id = obj_id;
+						child_vr.class_id = 0;
+						child_vr.method_id = 0;
+						child_ref = id_mgr.register_var_ref(child_vr);
+					}
+				}
+
+				Object* var_obj = object::new_obj(tmem);
+				var_obj.set("name", names[i]);
+				var_obj.set("value", val_str);
+				var_obj.set("type", sig_to_type_name(sigs[i]));
+				var_obj.set("variablesReference", child_ref);
+				vars_arr.push(var_obj);
+			}
 		}
 	}
 }

@@ -379,6 +379,16 @@ fn JdwpReply? get_variable_table(JdwpConnection* conn, long ref_type_id, long me
 	return conn.read_reply();
 }
 
+// Get method variable table with generic signatures (fallback for VariableTable)
+// Same as VariableTable but each entry has an extra genericSignature string
+fn JdwpReply? get_variable_table_with_generic(JdwpConnection* conn, long ref_type_id, long method_id) {
+	char[16] data;
+	transport::put_long_be(data[..], 0, ref_type_id);
+	transport::put_long_be(data[..], 8, method_id);
+	int id = conn.send_command(CS_METHOD, M_VARIABLE_TABLE_WITH_GENERIC, data[:16])!;
+	return conn.read_reply();
+}
+
 // Get stack frame values
 fn JdwpReply? get_frame_values(JdwpConnection* conn, long thread_id, long frame_id, int[] slots, char[] tags) {
 	usz count = (usz)slots.len;
