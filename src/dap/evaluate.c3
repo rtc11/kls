@@ -28,6 +28,7 @@ fn EvalValue eval_object(long id) { return { .tag = 'L', .raw = id }; }
 fn EvalValue eval_string_obj(long id) { return { .tag = 's', .raw = id }; }
 fn EvalValue eval_array_obj(long id) { return { .tag = '[', .raw = id }; }
 fn EvalValue eval_error(String msg) { return { .is_error = true, .error_msg = msg }; }
+fn EvalValue eval_class_ref(long type_id) { return { .tag = 'T', .raw = type_id }; }
 
 fn bool EvalValue.is_truthy(EvalValue* self) {
 	if (self.is_error) return false;
@@ -547,7 +548,10 @@ fn EvalValue ExprParser.parse_primary(ExprParser* self) {
 			if (tok.text == "this") {
 				return resolve_this(self.ctx);
 			}
-			return resolve_local(self.ctx, tok.text);
+			EvalValue local_val = resolve_local(self.ctx, tok.text);
+			if (!local_val.is_error) return local_val;
+			// Not a local — try resolving as class/object reference
+			return resolve_static_class(self.ctx, tok.text);
 
 		case LPAREN:
 			self.advance();
@@ -672,6 +676,158 @@ fn EvalValue resolve_local(EvalContext* ctx, String name) {
 	return eval_error("<read error>");
 }
 
+// Try to resolve a name as a class/object reference.
+// 1. Get current class signature to extract package prefix
+// 2. Try L{package}/{name}; then L{name};
+// 3. If class has INSTANCE static field (Kotlin object), return it as object
+// 4. Otherwise return as class ref (tag 'T')
+fn EvalValue resolve_static_class(EvalContext* ctx, String name) {
+	ctx.resolve_frame();
+	if (ctx.class_id == 0) return eval_error("<no frame>");
+
+	// Get current class signature to extract package
+	String pkg = "";
+	if (try reply = protocol::get_reference_type_signature(ctx.conn, ctx.class_id)) {
+		if (reply.error_code == 0 && reply.data.len >= 4) {
+			int sig_len = transport::get_int_be(reply.data, 0);
+			if (sig_len > 0 && 4 + (usz)sig_len <= reply.data.len) {
+				String sig = (String)reply.data[4:(usz)sig_len];
+				// sig like "Lurskog/oppdrag/OppdragTest;" — extract "urskog/oppdrag"
+				if (sig.len > 1 && sig[0] == 'L') {
+					String inner = sig[1..sig.len - 2];  // strip L and ;
+					// Find last '/' for package
+					usz last_slash = 0;
+					bool found_slash = false;
+					for (usz i = 0; i < inner.len; i++) {
+						if (inner[i] == '/') { last_slash = i; found_slash = true; }
+					}
+					if (found_slash) {
+						pkg = inner[:last_slash];
+					}
+				}
+			}
+		}
+	}
+
+	// Try with package prefix first, then without
+	long type_id = try_resolve_class(ctx.conn, pkg, name);
+	if (type_id == 0) return eval_error("<not found>");
+
+	// Check for Kotlin object INSTANCE field
+	EvalValue instance = try_read_static_field(ctx, type_id, "INSTANCE");
+	if (!instance.is_error && instance.raw != 0) {
+		return instance;  // Return the singleton object
+	}
+
+	return eval_class_ref(type_id);
+}
+
+fn long try_resolve_class(JdwpConnection* conn, String pkg, String name) {
+	// Try L{pkg}/{name};
+	if (pkg.len > 0) {
+		DString sig;
+		sig.tinit();
+		sig.appendf("L%s/%s;", pkg, name);
+		long id = lookup_class_by_sig(conn, sig.str_view());
+		if (id != 0) return id;
+	}
+
+	// Try L{name}; (default package)
+	DString sig;
+	sig.tinit();
+	sig.appendf("L%s;", name);
+	long id = lookup_class_by_sig(conn, sig.str_view());
+	if (id != 0) return id;
+
+	// Try common Kotlin patterns: name might be in a subpackage
+	// Also try with $Companion suffix for companion objects
+	if (pkg.len > 0) {
+		DString sig2;
+		sig2.tinit();
+		sig2.appendf("L%s/%s$Companion;", pkg, name);
+		long id2 = lookup_class_by_sig(conn, sig2.str_view());
+		if (id2 != 0) {
+			// Return the Companion's INSTANCE
+			return id2;
+		}
+	}
+
+	return 0;
+}
+
+fn long lookup_class_by_sig(JdwpConnection* conn, String signature) {
+	if (try reply = protocol::get_classes_by_signature(conn, signature)) {
+		if (reply.error_code == 0 && reply.data.len >= 4) {
+			int count = transport::get_int_be(reply.data, 0);
+			if (count > 0 && reply.data.len >= 13) {
+				// typeTag(1) + typeID(8) + status(4)
+				long type_id = transport::get_long_be(reply.data, 5);
+				return type_id;
+			}
+		}
+	}
+	return 0;
+}
+
+fn EvalValue try_read_static_field(EvalContext* ctx, long type_id, String field_name) {
+	// Get fields of the class
+	char[8] type_data;
+	transport::put_long_be(type_data[..], 0, type_id);
+	if (try fid = ctx.conn.send_command(protocol::CS_REFERENCE_TYPE, protocol::RT_FIELDS, type_data[:8])) {
+		if (try freply = ctx.conn.read_reply()) {
+			if (freply.error_code != 0 || freply.data.len < 4) return eval_error("<no fields>");
+
+			int field_count = transport::get_int_be(freply.data, 0);
+			usz fpos = 4;
+
+			for (int fi = 0; fi < field_count; fi++) {
+				if (fpos + 8 > freply.data.len) break;
+				long fid_val = transport::get_long_be(freply.data, fpos); fpos += 8;
+
+				if (fpos + 4 > freply.data.len) break;
+				int name_len = transport::get_int_be(freply.data, fpos); fpos += 4;
+				String fname = "";
+				if (name_len > 0 && fpos + (usz)name_len <= freply.data.len) {
+					fname = (String)freply.data[fpos:(usz)name_len];
+				}
+				fpos += (usz)name_len;
+
+				// Skip signature + modBits
+				if (fpos + 4 > freply.data.len) break;
+				int sig_len = transport::get_int_be(freply.data, fpos); fpos += 4;
+				fpos += (usz)sig_len;
+				if (fpos + 4 > freply.data.len) break;
+				int mod_bits = transport::get_int_be(freply.data, fpos);
+				fpos += 4;
+
+				if (fname == field_name && (mod_bits & 0x0008) != 0) {  // ACC_STATIC
+					// Read static field value via ReferenceType.GetValues
+					return read_static_field_value(ctx, type_id, fid_val);
+				}
+			}
+		}
+	}
+	return eval_error("<field not found>");
+}
+
+fn EvalValue read_static_field_value(EvalContext* ctx, long type_id, long field_id) {
+	char[20] data;
+	transport::put_long_be(data[..], 0, type_id);
+	transport::put_int_be(data[..], 8, 1);  // field count
+	transport::put_long_be(data[..], 12, field_id);
+
+	if (try id = ctx.conn.send_command(protocol::CS_REFERENCE_TYPE, protocol::RT_GET_VALUES, data[:20])) {
+		if (try reply = ctx.conn.read_reply()) {
+			if (reply.error_code == 0 && reply.data.len >= 5) {
+				usz vpos = 4;  // skip count
+				char tag = reply.data[vpos]; vpos++;
+				return extract_eval_value(tag, reply.data, vpos);
+			}
+		}
+	}
+	return eval_error("<read error>");
+}
+
 fn EvalValue extract_eval_value(char tag, char[] data, usz offset) {
 	switch (tag) {
 		case 'I':
@@ -710,6 +866,38 @@ fn EvalValue extract_eval_value(char tag, char[] data, usz offset) {
 
 fn EvalValue read_field_from_value(EvalContext* ctx, EvalValue* obj, String field_name) {
 	if (obj.is_error) return *obj;
+
+	// Class reference — read static field
+	if (obj.tag == 'T') {
+		long type_id = obj.raw;
+		EvalValue result = try_read_static_field(ctx, type_id, field_name);
+		if (!result.is_error) return result;
+		// Try companion object: ClassName$Companion.INSTANCE.field
+		// Get signature of this class, append $Companion
+		if (try reply = protocol::get_reference_type_signature(ctx.conn, type_id)) {
+			if (reply.error_code == 0 && reply.data.len >= 4) {
+				int sig_len = transport::get_int_be(reply.data, 0);
+				if (sig_len > 0 && 4 + (usz)sig_len <= reply.data.len) {
+					String sig = (String)reply.data[4:(usz)sig_len];
+					// sig = "Lcom/example/Foo;" → "Lcom/example/Foo$Companion;"
+					if (sig.len > 1 && sig[sig.len - 1] == ';') {
+						DString comp_sig;
+						comp_sig.tinit();
+						comp_sig.appendf("%s$Companion;", sig[:sig.len - 1]);
+						long comp_id = lookup_class_by_sig(ctx.conn, comp_sig.str_view());
+						if (comp_id != 0) {
+							EvalValue instance = try_read_static_field(ctx, comp_id, "INSTANCE");
+							if (!instance.is_error && instance.raw != 0) {
+								return read_field_from_value(ctx, &instance, field_name);
+							}
+						}
+					}
+				}
+			}
+		}
+		return eval_error("<static field not found>");
+	}
+
 	if (obj.tag != 'L' && obj.tag != 's' && obj.tag != '[') return eval_error("<not an object>");
 	if (obj.raw == 0) return eval_error("<null pointer>");
 
@@ -868,6 +1056,8 @@ fn String eval_value_to_string(EvalContext* ctx, EvalValue* val) {
 			return val.raw == 0 ? "null" : "Object";
 		case '[':
 			return val.raw == 0 ? "null" : "Array";
+		case 'T':
+			return "<class>";
 		default:
 			return "?";
 	}
@@ -877,6 +1067,12 @@ fn String eval_value_to_string(EvalContext* ctx, EvalValue* val) {
 
 fn EvalValue invoke_method_on_value(EvalContext* ctx, EvalValue* obj, String method_name, EvalValue[] args) {
 	if (obj.is_error) return *obj;
+
+	// Class reference — invoke static method
+	if (obj.tag == 'T') {
+		return invoke_static_method_on_class(ctx, obj.raw, method_name, args);
+	}
+
 	if (obj.tag != 'L' && obj.tag != 's' && obj.tag != '[') return eval_error("<not an object>");
 	if (obj.raw == 0) return eval_error("<null pointer>");
 
@@ -963,6 +1159,70 @@ fn EvalValue invoke_method_on_value(EvalContext* ctx, EvalValue* obj, String met
 		}
 	}
 	return eval_error("<invoke failed>");
+}
+
+fn EvalValue invoke_static_method_on_class(EvalContext* ctx, long type_id, String method_name, EvalValue[] args) {
+	ctx.resolve_frame();
+
+	// Find method by name
+	long target_method_id = 0;
+	if (try reply = protocol::get_methods(ctx.conn, type_id)) {
+		if (reply.error_code == 0 && reply.data.len >= 4) {
+			int method_count = transport::get_int_be(reply.data, 0);
+			usz mpos = 4;
+			for (int mi = 0; mi < method_count; mi++) {
+				if (mpos + 8 > reply.data.len) break;
+				long mid = transport::get_long_be(reply.data, mpos); mpos += 8;
+
+				if (mpos + 4 > reply.data.len) break;
+				int mname_len = transport::get_int_be(reply.data, mpos); mpos += 4;
+				String mname = "";
+				if (mname_len > 0 && mpos + (usz)mname_len <= reply.data.len) {
+					mname = (String)reply.data[mpos:(usz)mname_len];
+				}
+				mpos += (usz)mname_len;
+
+				if (mpos + 4 > reply.data.len) break;
+				int sig_len = transport::get_int_be(reply.data, mpos); mpos += 4;
+				mpos += (usz)sig_len;
+				if (mpos + 4 > reply.data.len) break;
+				mpos += 4;
+
+				if (mname == method_name) {
+					target_method_id = mid;
+					break;
+				}
+			}
+		}
+	}
+	if (target_method_id == 0) return eval_error("<method not found>");
+
+	char[8] arg_tags;
+	long[8] arg_values;
+	int arg_count = (int)args.len;
+	if (arg_count > 8) arg_count = 8;
+	for (int i = 0; i < arg_count; i++) {
+		arg_tags[i] = args[i].tag;
+		arg_values[i] = args[i].raw;
+	}
+
+	if (try reply = protocol::invoke_static_method(ctx.conn, type_id, ctx.thread_id, target_method_id, arg_tags[:arg_count], arg_values[:arg_count], 0x01)) {
+		if (reply.error_code != 0) return eval_error("<invoke error>");
+		if (reply.data.len >= 1) {
+			char ret_tag = reply.data[0];
+			int ret_size = variables::tag_value_size(ret_tag);
+			if (1 + (usz)ret_size <= reply.data.len) {
+				EvalValue result = extract_eval_value(ret_tag, reply.data, 1);
+				usz exc_pos = 1 + (usz)ret_size;
+				if (exc_pos + 9 <= reply.data.len) {
+					long exc_id = transport::get_long_be(reply.data, exc_pos + 1);
+					if (exc_id != 0) return eval_error("<exception thrown>");
+				}
+				return result;
+			}
+		}
+	}
+	return eval_error("<static invoke failed>");
 }
 
 // ── Format EvalValue for DAP display ────────────────────────────────
