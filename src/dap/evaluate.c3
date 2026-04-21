@@ -723,34 +723,42 @@ fn EvalValue resolve_static_class(EvalContext* ctx, String name) {
 }
 
 fn long try_resolve_class(JdwpConnection* conn, String pkg, String name) {
-	// Try L{pkg}/{name};
-	if (pkg.len > 0) {
+	// Try progressively shorter package prefixes:
+	// e.g. urskog/oppdrag → try Lurskog/oppdrag/Name; then Lurskog/Name; then LName;
+	String current_pkg = pkg;
+	while (current_pkg.len > 0) {
 		DString sig;
 		sig.tinit();
-		sig.appendf("L%s/%s;", pkg, name);
+		sig.appendf("L%s/%s;", current_pkg, name);
 		long id = lookup_class_by_sig(conn, sig.str_view());
 		if (id != 0) return id;
+
+		// Also try $Companion
+		DString comp_sig;
+		comp_sig.tinit();
+		comp_sig.appendf("L%s/%s$Companion;", current_pkg, name);
+		long comp_id = lookup_class_by_sig(conn, comp_sig.str_view());
+		if (comp_id != 0) return comp_id;
+
+		// Strip last package segment
+		bool found = false;
+		usz last_slash = 0;
+		for (usz i = 0; i < current_pkg.len; i++) {
+			if (current_pkg[i] == '/') { last_slash = i; found = true; }
+		}
+		if (found) {
+			current_pkg = current_pkg[:last_slash];
+		} else {
+			break;  // No more segments to strip
+		}
 	}
 
-	// Try L{name}; (default package)
+	// Try default package (no package prefix)
 	DString sig;
 	sig.tinit();
 	sig.appendf("L%s;", name);
 	long id = lookup_class_by_sig(conn, sig.str_view());
 	if (id != 0) return id;
-
-	// Try common Kotlin patterns: name might be in a subpackage
-	// Also try with $Companion suffix for companion objects
-	if (pkg.len > 0) {
-		DString sig2;
-		sig2.tinit();
-		sig2.appendf("L%s/%s$Companion;", pkg, name);
-		long id2 = lookup_class_by_sig(conn, sig2.str_view());
-		if (id2 != 0) {
-			// Return the Companion's INSTANCE
-			return id2;
-		}
-	}
 
 	return 0;
 }
