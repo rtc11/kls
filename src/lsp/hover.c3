@@ -16,6 +16,7 @@ import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::javadoc;
 import kls::lsp::definition;
+import kls::lsp::inlay_hints;
 
 faultdef NO_TOKEN, NO_DESCRIPTION;
 
@@ -111,6 +112,32 @@ fn Object*? handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object
  */
 fn String? describe_identifier_from_ast(ParseResult* pr, TypeInfo* ti, String source, Token tok, WorkspaceIndex* workspace = null) {
 	if (pr.node_count == 0) return NO_DESCRIPTION~;
+
+	// First: check if the token sits exactly on a PARAM declaration site.
+	// PARAMs are not in is_declaration() so the loop below skips them, but
+	// hovering on a lambda/function param name should still show "name: Type".
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != PARAM && n.kind != TYPE_PARAM) continue;
+		if (n.name != tok.text) continue;
+		if (n.name_line != tok.line || n.name_col != tok.col) continue;
+
+		// For lambda PARAMs without explicit type or TypeInfo, ask inlay-hints
+		// helper to resolve the type from the enclosing call's function-type
+		// param (with class-generic substitution).
+		if (n.kind == PARAM && n.type_text.len == 0 &&
+			(ti == null || !ti.has_type[i]) && workspace != null) {
+			String inferred = inlay_hints::resolve_lambda_param_type(pr, ti, workspace, "", i);
+			if (inferred.len > 0) {
+				DString ds;
+				ds.tinit();
+				ds.appendf("```kotlin\n%s: %s\n```", n.name, inferred);
+				return ds.str_view();
+			}
+		}
+
+		return build_signature(n, pr, source, ti, i);
+	}
 
 	// Search all declarations for one matching this identifier name
 	String target = tok.text;
@@ -584,6 +611,17 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 
 		case ENUM_ENTRY:
 			ds.appendf("%s", node.name);
+
+		case PARAM:
+			ds.appendf("%s", node.name);
+			if (node.type_text.len > 0) {
+				ds.appendf(": %s", node.type_text);
+			} else if (type_info != null && type_info.has_type[node_idx]) {
+				String inferred = types::format_type(&type_info.node_types[node_idx]);
+				if (inferred.len > 0 && inferred != node.name) {
+					ds.appendf(": %s", inferred);
+				}
+			}
 
 		default:
 			ds.appendf("%s", node.name);

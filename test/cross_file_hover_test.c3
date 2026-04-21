@@ -308,3 +308,51 @@ fn void cross_file_hover_unknown_empty_workspace() @test {
 		}
 	};
 }
+
+// Hover on lambda PARAM should resolve via class generic substitution
+fn void cross_file_hover_lambda_param_class_generic_substitution() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String lib =
+			`package lib` "\n"
+			`class Stream<K, V> {` "\n"
+			`    fun includeHeader(key: String, getter: (V) -> String): Stream<K, V> = this` "\n"
+			`}`;
+		ws.index_file("file:///lib/Stream.kt", lib);
+		store.open("file:///lib/Stream.kt", "kotlin", 1, lib);
+
+		String app =
+			`package app` "\n"
+			`import lib.Stream` "\n"
+			`class StatusReply` "\n"
+			`fun build(s: Stream<String, StatusReply>) {` "\n"
+			`    s.includeHeader("k") { reply -> reply.toString() }` "\n"
+			`}`;
+		store.open("file:///app/Main.kt", "kotlin", 1, app);
+
+		// Locate "reply" in the lambda on line 3 (0-indexed). Find its column.
+		usz idx = app.index_of("{ reply ->")!!;
+		// column of 'r' in "reply" = idx + 2 within line; need line-relative col.
+		// Compute line-relative column:
+		usz line_start = 0;
+		int line = 0;
+		for (usz i = 0; i < idx; i++) {
+			if (app[i] == '\n') { line++; line_start = i + 1; }
+		}
+		int col = (int)(idx + 2 - line_start);
+
+		Object* params = make_params("file:///app/Main.kt", line, col);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		assert(result != null, "expected hover result for lambda param");
+		String value = get_hover_value(result);
+		assert(value.contains("reply: StatusReply"),
+			"expected 'reply: StatusReply' in hover, got: '%s'", value);
+	};
+}

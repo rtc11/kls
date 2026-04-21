@@ -5,6 +5,7 @@ import kls::document;
 import kls::lsp::inlay_hints;
 import kls::kotlin::ast;
 import kls::kotlin::parser;
+import kls::workspace;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -1144,5 +1145,52 @@ fn void lambda_param_type_hint_strips_param_name_in_signature() @test {
 			}
 		}
 		assert(found, "expected ': StatusReply' hint, name 'reply:' should be stripped from sig");
+	};
+}
+
+// Cross-file class generic substitution: receiver type arg V → StatusReply
+fn void lambda_param_type_hint_cross_file_class_generic_substitution() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Library: generic class with method taking lambda over its V param
+		String lib =
+			`package lib` "\n"
+			`class Stream<K, V> {` "\n"
+			`    fun includeHeader(key: String, getter: (V) -> String): Stream<K, V> = this` "\n"
+			`}`;
+		ws.index_file("file:///lib/Stream.kt", lib);
+		store.open("file:///lib/Stream.kt", "kotlin", 1, lib);
+
+		// User file: instantiate Stream<String, StatusReply> and call .includeHeader { reply -> ... }
+		String app =
+			`package app` "\n"
+			`import lib.Stream` "\n"
+			`class StatusReply` "\n"
+			`fun build(s: Stream<String, StatusReply>) {` "\n"
+			`    s.includeHeader("k") { reply -> reply.toString() }` "\n"
+			`}`;
+		store.open("file:///app/Main.kt", "kotlin", 1, app);
+
+		Object* params = make_inlay_hint_params("file:///app/Main.kt", 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, &ws, params) ?? null;
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label == ": StatusReply") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected ': StatusReply' hint via class generic V→StatusReply substitution");
 	};
 }

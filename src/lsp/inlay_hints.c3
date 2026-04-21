@@ -2,9 +2,9 @@ module kls::lsp::inlay_hints;
 
 import std::io;
 import std::collections::object;
+import std::collections::list;
 import kls::document;
 import kls::lsp::definition;
-import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
@@ -1153,6 +1153,18 @@ fn void collect_lambda_param_type_hints(Object* hints, ParseResult* pr, TypeInfo
 			current_uri, call_idx, method_name);
 		if (func_type.len == 0) continue;
 
+		// Substitute class generic type parameters in the function type using
+		// the receiver's actual type arguments. e.g. "(V) -> String" with
+		// receiver MappedStream<String, StatusReply> → "(StatusReply) -> String".
+		if (workspace != null && ti != null) {
+			TypeRef recv = find_call_receiver_type_trailing(pr, ti, call_idx, method_name);
+			if (recv.kind == GENERIC && recv.type_arg_count > 0 && recv.name.len > 0) {
+				if (try tparams = workspace.lookup_class_type_params(recv.name)) {
+					func_type = substitute_class_generics(func_type, tparams, &recv);
+				}
+			}
+		}
+
 		// Parse function type "(A, B, C) -> R" → param types
 		String[8] arg_types;
 		uint arg_count = parse_function_type_params(func_type, &arg_types);
@@ -1180,6 +1192,74 @@ fn void collect_lambda_param_type_hints(Object* hints, ParseResult* pr, TypeInfo
 			hints.push(hint);
 		}
 	}
+}
+
+/**
+ * Resolve the inferred type-text for a single lambda PARAM node.
+ *
+ * Used by hover (and reuses the same resolution as collect_lambda_param_type_hints).
+ * Returns an empty string when the type can't be resolved (e.g. callee not in
+ * AST/workspace, or PARAM is not actually a lambda param).
+ */
+fn String resolve_lambda_param_type(ParseResult* pr, TypeInfo* ti,
+	WorkspaceIndex* workspace, String current_uri, uint param_idx) {
+	if (param_idx >= pr.node_count) return "";
+	AstNode* param = &pr.nodes[param_idx];
+	if (param.kind != PARAM) return "";
+
+	// Param's parent should be a LAMBDA_EXPR
+	uint lambda_idx = param.parent;
+	if (lambda_idx >= pr.node_count) return "";
+	if (pr.nodes[lambda_idx].kind != LAMBDA_EXPR) return "";
+
+	// Determine this param's index among lambda's PARAM children
+	uint param_pos = 0;
+	bool found = false;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != lambda_idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (j == param_idx) { found = true; break; }
+		param_pos++;
+	}
+	if (!found) return "";
+
+	// Walk up to enclosing CALL_EXPR
+	uint call_idx = ast::NO_PARENT;
+	uint cur = lambda_idx;
+	while (cur < pr.node_count) {
+		uint parent = pr.nodes[cur].parent;
+		if (parent == ast::NO_PARENT || parent >= pr.node_count) break;
+		if (pr.nodes[parent].kind == CALL_EXPR) {
+			call_idx = parent;
+			break;
+		}
+		cur = parent;
+	}
+	if (call_idx == ast::NO_PARENT) return "";
+
+	String method_name = pr.nodes[call_idx].name;
+	if (method_name.len == 0) return "";
+
+	String func_type = resolve_lambda_callee_param_type(pr, ti, workspace,
+		current_uri, call_idx, method_name);
+	if (func_type.len == 0) return "";
+
+	// Substitute class generics
+	if (workspace != null && ti != null) {
+		TypeRef recv = find_call_receiver_type_trailing(pr, ti, call_idx, method_name);
+		if (recv.kind == GENERIC && recv.type_arg_count > 0 && recv.name.len > 0) {
+			if (try tparams = workspace.lookup_class_type_params(recv.name)) {
+				func_type = substitute_class_generics(func_type, tparams, &recv);
+			}
+		}
+	}
+
+	String[8] arg_types;
+	uint arg_count = parse_function_type_params(func_type, &arg_types);
+	if (arg_count == 0) return "";
+	if (param_pos >= arg_count) return "";
+
+	return arg_types[param_pos];
 }
 
 /**
@@ -1368,6 +1448,86 @@ fn uint parse_function_type_params(String sig, String[8]* out) {
 		count++;
 	}
 	return count;
+}
+
+/**
+ * Substitute class type-parameter names in a type-text string with the
+ * actual type arguments from a receiver TypeRef.
+ *
+ * Example: type_text="(V) -> String", tparams=["K","V"],
+ *   recv.type_arg_names=["String","StatusReply"]  →  "(StatusReply) -> String"
+ *
+ * Substitution is whole-token (identifier boundary) so "Value" is NOT
+ * replaced when looking for "V". Allocated via tmem.
+ */
+/**
+ * Like types::find_call_receiver_type but also handles the trailing-lambda
+ * AST shape where the outer CALL_EXPR has structure:
+ *
+ *   CALL_EXPR "name"            ← outer, with trailing lambda
+ *     CALL_EXPR "name"          ← inner, with args + DOT_EXPR receiver
+ *       DOT_EXPR
+ *         NAME_EXPR (receiver)
+ *     LAMBDA_EXPR
+ *
+ * Falls through to the normal lookup first; if that yields UNKNOWN, recurses
+ * into a same-named inner CALL_EXPR child to find the receiver.
+ */
+fn TypeRef find_call_receiver_type_trailing(ParseResult* pr, TypeInfo* ti, uint call_idx, String method_name) {
+	TypeRef recv = types::find_call_receiver_type(pr, ti, call_idx);
+	if (recv.kind != UNKNOWN) return recv;
+	for (uint c = 0; c < pr.node_count; c++) {
+		if (pr.nodes[c].parent != call_idx) continue;
+		if (pr.nodes[c].kind != CALL_EXPR) continue;
+		if (pr.nodes[c].name != method_name) continue;
+		recv = types::find_call_receiver_type(pr, ti, c);
+		if (recv.kind != UNKNOWN) return recv;
+	}
+	return recv;
+}
+
+fn String substitute_class_generics(String type_text, List{String}* tparams, TypeRef* recv) {
+	if (type_text.len == 0 || tparams.len() == 0) return type_text;
+
+	DString out;
+	out.tinit();
+
+	usz i = 0;
+	while (i < type_text.len) {
+		char c = type_text[i];
+		// Identifier start
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+			usz start = i;
+			while (i < type_text.len) {
+				char cc = type_text[i];
+				if ((cc >= 'a' && cc <= 'z') || (cc >= 'A' && cc <= 'Z') ||
+					(cc >= '0' && cc <= '9') || cc == '_') {
+					i++;
+				} else {
+					break;
+				}
+			}
+			String word = type_text[start..i - 1];
+			// Check if word matches any tparam → replace with corresponding arg
+			bool replaced = false;
+			for (usz t = 0; t < tparams.len() && t < recv.type_arg_count; t++) {
+				if ((*tparams)[t] == word) {
+					out.appendf("%s", recv.type_arg_names[t]);
+					if (recv.type_arg_nullable[t]) out.appendf("?");
+					replaced = true;
+					break;
+				}
+			}
+			if (!replaced) {
+				out.appendf("%s", word);
+			}
+		} else {
+			out.append_char(c);
+			i++;
+		}
+	}
+
+	return out.str_view();
 }
 
 /**

@@ -45,6 +45,8 @@ struct MemberDecl {
 	usz param_count;       // number of parameters (for functions)
 	String[MAX_PARAMS] param_names;   // heap-copied parameter names
 	String[MAX_PARAMS] param_types;   // heap-copied parameter type texts
+	usz type_param_count;             // number of generic type parameters (for classes/funs)
+	String[8] type_param_names;       // heap-copied type-parameter names (e.g. ["K", "V"])
 }
 
 // ── Workspace file entry ───────────────────────────────────────────
@@ -67,6 +69,7 @@ struct WorkspaceIndex {
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
+	HashMap{String, List{String}} class_type_params; // class name -> generic type parameter names (e.g. MappedStream -> [K, V])
 	List{String} ext_cache_keys;                     // heap-allocated keys for extension entries
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
@@ -80,6 +83,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.name_index.init(mem);
 	self.super_index.init(mem);
 	self.member_cache.init(mem);
+	self.class_type_params.init(mem);
 	self.ext_cache_keys.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
@@ -167,6 +171,18 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 	};
 	self.member_cache.free();
 
+	// Free class_type_params lists and their heap strings
+	@pool() {
+		foreach (&list : self.class_type_params.tvalues()) {
+			for (usz i = 0; i < list.len(); i++) {
+				String s = (*list)[i];
+				if (s.len > 0) mem::free(s.ptr);
+			}
+			list.free();
+		}
+	};
+	self.class_type_params.free();
+
 	// Free heap-allocated extension cache keys
 	for (usz i = 0; i < self.ext_cache_keys.len(); i++) {
 		String k = self.ext_cache_keys[i];
@@ -193,6 +209,9 @@ fn void free_member_decl(MemberDecl* m) {
 	for (usz i = 0; i < m.param_count; i++) {
 		if (m.param_names[i].len > 0) mem::free(m.param_names[i].ptr);
 		if (m.param_types[i].len > 0) mem::free(m.param_types[i].ptr);
+	}
+	for (usz i = 0; i < m.type_param_count; i++) {
+		if (m.type_param_names[i].len > 0) mem::free(m.type_param_names[i].ptr);
 	}
 }
 
@@ -239,6 +258,24 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 			AstNode* n = &pr.nodes[i];
 			if ((n.kind != CLASS_DECL && n.kind != INTERFACE_DECL && n.kind != OBJECT_DECL) ||
 				n.name != class_name) continue;
+
+			// Extract class-level type parameters into class_type_params map.
+			// Used by inlay hints + hover to substitute generics like (V)->String → (StatusReply)->String.
+			if (!self.class_type_params.has_key(class_name)) {
+				List{String} tparams;
+				tparams.init(mem);
+				for (uint tp = 0; tp < pr.node_count; tp++) {
+					if (pr.nodes[tp].parent != i) continue;
+					if (pr.nodes[tp].kind != TYPE_PARAM) continue;
+					if (pr.nodes[tp].name.len == 0) continue;
+					tparams.push(pr.nodes[tp].name.copy(mem));
+				}
+				if (tparams.len() > 0) {
+					self.class_type_params.set(class_name, tparams);
+				} else {
+					tparams.free();
+				}
+			}
 
 			// Found the class — create member list
 			List{MemberDecl} members;
@@ -361,6 +398,15 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 							.name_len = child.name_len,
 							.param_count = 0,
 						};
+						// Collect class type parameters (e.g. <K, V>)
+						uint c_idx = ast::node_index(pr, child);
+						for (uint tp = 0; tp < pr.node_count && m.type_param_count < 8; tp++) {
+							if (pr.nodes[tp].parent != c_idx) continue;
+							if (pr.nodes[tp].kind != TYPE_PARAM) continue;
+							if (pr.nodes[tp].name.len == 0) continue;
+							m.type_param_names[m.type_param_count] = pr.nodes[tp].name.copy(mem);
+							m.type_param_count++;
+						}
 						valid = true;
 					case PARAM:
 						// Data class constructor params with val/var are properties
@@ -475,6 +521,15 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
  */
 fn List{MemberDecl}*? WorkspaceIndex.lookup_members(WorkspaceIndex* self, String class_name) {
 	return self.member_cache.get_ref(class_name);
+}
+
+/**
+ * Look up the generic type parameter names for a class by name.
+ * Returns a pointer to the list of type parameter names (e.g. ["K", "V"]),
+ * or fault if the class has no generics or isn't indexed.
+ */
+fn List{String}*? WorkspaceIndex.lookup_class_type_params(WorkspaceIndex* self, String class_name) {
+	return self.class_type_params.get_ref(class_name);
 }
 
 /**
@@ -726,6 +781,15 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 					list_ref.free();
 					self.member_cache.remove(sym.name);
 				}
+			}
+			// Drop class type-parameter cache so reindex picks up fresh names.
+			if (try tp_list = self.class_type_params.get_ref(sym.name)) {
+				for (usz t = 0; t < tp_list.len(); t++) {
+					String s = (*tp_list)[t];
+					if (s.len > 0) mem::free(s.ptr);
+				}
+				tp_list.free();
+				self.class_type_params.remove(sym.name);
 			}
 		}
 		// Remove extension function entries by matching URI
