@@ -1471,10 +1471,114 @@ fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, Stri
 			}
 		}
 
+		// Early-return null check smart cast:
+		// In a block (or lambda body) where a preceding statement is
+		// `if (name == null) return/throw ...`, `name` is non-null afterwards.
+		if (parent.kind == BLOCK || parent.kind == LAMBDA_EXPR) {
+			TypeRef early_return = check_early_return_null_guard(pr, info, parent_idx, current, name);
+			if (early_return.kind != UNKNOWN) return early_return;
+		}
+
 		current = parent_idx;
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * Check for early-return null guard pattern in a block:
+ *   if (name == null) return ...
+ *   // name is now non-null
+ *
+ * `block_idx` is the enclosing BLOCK node.
+ * `child_in_block_idx` is the direct child of the block that contains
+ * (or is) the name reference.
+ * Returns the non-nullable type of `name` if a matching guard precedes
+ * `child_in_block_idx`; otherwise TYPE_UNKNOWN.
+ */
+fn TypeRef check_early_return_null_guard(ParseResult* pr, TypeInfo* info, uint block_idx, uint child_in_block_idx, String name) {
+	uint ref_offset = pr.nodes[child_in_block_idx].start_offset;
+
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != block_idx) continue;
+		if (j == child_in_block_idx) continue;
+		// Only consider statements that come before the reference
+		if (pr.nodes[j].start_offset >= ref_offset) continue;
+		if (pr.nodes[j].kind != IF_EXPR) continue;
+
+		// IF_EXPR children: [0]=condition, [1]=then-branch, optional [2]=else-branch
+		uint cond_idx = ast::NO_PARENT;
+		uint then_idx = ast::NO_PARENT;
+		uint else_idx = ast::NO_PARENT;
+		uint child_pos = 0;
+		for (uint k = 0; k < pr.node_count; k++) {
+			if (pr.nodes[k].parent != j) continue;
+			if (child_pos == 0) {
+				cond_idx = k;
+			} else if (child_pos == 1) {
+				then_idx = k;
+			} else if (child_pos == 2) {
+				else_idx = k;
+			}
+			child_pos++;
+		}
+
+		if (cond_idx == ast::NO_PARENT || then_idx == ast::NO_PARENT) continue;
+		// Must have no else branch (or it would also need to exit) -- keep simple: no else
+		if (else_idx != ast::NO_PARENT) continue;
+
+		// Condition must be `name == null`
+		AstNode* cond = &pr.nodes[cond_idx];
+		if (cond.kind != BINARY_EXPR || cond.extra_text != "==") continue;
+		if (check_null_comparison(pr, info, cond_idx, name).kind == UNKNOWN) continue;
+
+		// Then-branch must definitely exit (return / throw, possibly inside a block)
+		if (!branch_definitely_exits(pr, then_idx)) continue;
+
+		// Found valid early-return guard: return non-nullable type
+		uint scope_idx = find_innermost_scope(pr, child_in_block_idx);
+		uint cur_scope = scope_idx;
+		while (true) {
+			for (uint k = 0; k < pr.node_count; k++) {
+				AstNode* candidate = &pr.nodes[k];
+				if (candidate.parent != cur_scope) continue;
+				if (!is_typed_declaration(candidate.kind)) continue;
+				if (candidate.name != name) continue;
+				if (info.has_type[k]) {
+					TypeRef result = info.node_types[k];
+					result.nullable = false;
+					return result;
+				}
+				return TYPE_UNKNOWN;
+			}
+			AstNode* sc = &pr.nodes[cur_scope];
+			if (cur_scope == 0 || sc.parent == ast::NO_PARENT) break;
+			cur_scope = sc.parent;
+		}
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Returns true if `branch_idx` is (or contains as its sole/first effective
+ * statement) a RETURN_EXPR or THROW_EXPR -- i.e., control definitely leaves
+ * the enclosing function.
+ */
+fn bool branch_definitely_exits(ParseResult* pr, uint branch_idx) {
+	AstNode* node = &pr.nodes[branch_idx];
+	if (node.kind == RETURN_EXPR || node.kind == THROW_EXPR) return true;
+
+	// Block: any statement that is RETURN_EXPR or THROW_EXPR makes the block exit.
+	if (node.kind == BLOCK) {
+		for (uint k = 0; k < pr.node_count; k++) {
+			if (pr.nodes[k].parent != branch_idx) continue;
+			if (pr.nodes[k].kind == RETURN_EXPR || pr.nodes[k].kind == THROW_EXPR) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /**

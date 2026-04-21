@@ -1625,6 +1625,93 @@ fn void smart_cast_null_check_equals_else() @test {
 	};
 }
 
+fn void smart_cast_null_check_early_return() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				if (x == null) return
+				val y = x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "early-return null guard should give String, got '%s'", t);
+			assert(!ti.node_types[idx].nullable, "early-return null guard should make non-nullable");
+		}
+	};
+}
+
+fn void smart_cast_null_check_early_return_block() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				if (x == null) {
+					return
+				}
+				val y = x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "early-return block null guard should give String, got '%s'", t);
+			assert(!ti.node_types[idx].nullable, "early-return block null guard should make non-nullable");
+		}
+	};
+}
+
+fn void smart_cast_null_check_early_throw() @test {
+	@pool() {
+		String src =
+			`fun test(x: String?) {
+				if (x == null) throw Exception("nope")
+				val y = x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "early-throw null guard should give String, got '%s'", t);
+			assert(!ti.node_types[idx].nullable, "early-throw null guard should make non-nullable");
+		}
+	};
+}
+
+fn void smart_cast_null_check_early_return_in_lambda_with_label() @test {
+	@pool() {
+		// Mirrors real-world pattern: labeled return inside outer lambda,
+		// then x used inside a nested lambda further down.
+		String src =
+			`fun test(s: String?) {
+				runBlocking {
+					val hashKey: String? = s
+					if (hashKey == null) {
+						return@runBlocking
+					}
+					transaction {
+						val y = hashKey
+					}
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "labeled-return null guard should give String inside nested lambda, got '%s'", t);
+			assert(!ti.node_types[idx].nullable, "labeled-return null guard should make non-nullable inside nested lambda");
+		}
+	};
+}
+
 fn void smart_cast_null_check_conjunction() @test {
 	@pool() {
 		String src =

@@ -1579,3 +1579,18 @@ fn void no_false_type_mismatch_for_unresolvable_dot_call_arg() @test {
 			"should NOT flag type mismatch when arg is unresolvable dot-call");
 	};
 }
+
+fn void no_false_diagnostic_for_call_in_lambda_with_nested_arrow_lambda() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun fetch() {
+				val response = http.get("url") {
+					basicAuth(config.user, config.pass)
+					proxyAuth?.let { it -> header("X-Proxy-Authorization", it()) }
+				}
+			}`
+		);
+		assert(!has_diagnostic_containing(result, "Expected ')'"),
+			"multi-arg call in lambda with nested arrow lambda should not produce false diagnostic");
+	};
+}
