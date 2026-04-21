@@ -83,6 +83,12 @@ fn Object* handle_stack_trace(JdwpConnection* conn, IdManager* id_mgr, Object* a
 		frame.set("line", line > 0 ? line : 1);
 		frame.set("column", 1);
 
+		// Presentation hint: mark JDK/library frames as "subtle"
+		String hint = classify_frame_hint(class_name);
+		if (hint.len > 0) {
+			frame.set("presentationHint", hint);
+		}
+
 		if (source_file.len > 0) {
 			Object* source = object::new_obj(tmem);
 			source.set("name", source_file);
@@ -305,5 +311,21 @@ fn String resolve_source_path(String workspace_path, String class_name, String s
 		}
 	}
 
+	return "";
+}
+
+// Classify stack frame presentation hint based on class name
+fn String classify_frame_hint(String class_name) {
+	String[] library_prefixes = {
+		"java.", "javax.", "jdk.", "sun.", "com.sun.",
+		"kotlin.", "kotlinx.",
+		"org.junit.", "org.gradle.",
+		"java.lang.invoke.", "java.lang.reflect.",
+	};
+	foreach (prefix : library_prefixes) {
+		if (class_name.len >= prefix.len && class_name[:prefix.len] == prefix) {
+			return "subtle";
+		}
+	}
 	return "";
 }

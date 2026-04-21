@@ -17,6 +17,7 @@ fn Object* handle_initialize(Object* args) {
 	body.set("supportsSetVariable", caps.supports_set_variable);
 	body.set("supportsTerminateRequest", caps.supports_terminate_request);
 	body.set("supportsSingleThreadExecutionRequests", caps.supports_single_thread_execution_requests);
+	body.set("supportsLogPoints", caps.supports_log_points);
 
 	return body;
 }

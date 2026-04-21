@@ -97,6 +97,7 @@ struct DapCapabilities {
 	bool supports_set_variable;
 	bool supports_terminate_request;
 	bool supports_single_thread_execution_requests;
+	bool supports_log_points;
 }
 
 fn DapCapabilities default_capabilities() {
@@ -109,5 +110,6 @@ fn DapCapabilities default_capabilities() {
 		.supports_set_variable = false,
 		.supports_terminate_request = true,
 		.supports_single_thread_execution_requests = false,
+		.supports_log_points = true,
 	};
 }

@@ -24,6 +24,7 @@ struct ActiveBreakpoint {
 	int line;
 	int hit_count;        // hit count condition (0 = no count)
 	String condition;     // conditional expression (empty = unconditional)
+	String log_message;   // logpoint message (empty = normal breakpoint), {expr} interpolated
 	bool verified;
 }
 
@@ -38,6 +39,16 @@ fn String BreakpointManager.get_condition(BreakpointManager* self, int jdwp_requ
 	for (usz i = 0; i < self.count; i++) {
 		if (self.breakpoints[i].jdwp_request_id == jdwp_request_id) {
 			return self.breakpoints[i].condition;
+		}
+	}
+	return "";
+}
+
+// Look up logpoint message by JDWP event request ID.
+fn String BreakpointManager.get_log_message(BreakpointManager* self, int jdwp_request_id) {
+	for (usz i = 0; i < self.count; i++) {
+		if (self.breakpoints[i].jdwp_request_id == jdwp_request_id) {
+			return self.breakpoints[i].log_message;
 		}
 	}
 	return "";
@@ -94,6 +105,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 		int line = (int)(bp_req.get_int("line") ?? 0);
 		String hit_cond = bp_req.get_string("hitCondition") ?? "";
 		String condition = bp_req.get_string("condition") ?? "";
+		String log_message = bp_req.get_string("logMessage") ?? "";
 		int hit_count = 0;
 		if (hit_cond.len > 0) {
 			hit_count = (int)(hit_cond.to_int() ?? 0);
@@ -146,6 +158,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 				bp.line = line;
 				bp.hit_count = hit_count;
 				bp.condition = condition.len > 0 ? condition.copy(mem) : "";
+				bp.log_message = log_message.len > 0 ? log_message.copy(mem) : "";
 				bp.verified = false;
 				self.breakpoints[self.count] = bp;
 				self.count++;
@@ -192,6 +205,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 					bp.line = line;
 					bp.hit_count = hit_count;
 					bp.condition = condition.len > 0 ? condition.copy(mem) : "";
+					bp.log_message = log_message.len > 0 ? log_message.copy(mem) : "";
 					bp.verified = jdwp_req_id != 0;
 					self.breakpoints[self.count] = bp;
 					self.count++;

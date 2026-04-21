@@ -175,6 +175,24 @@ fn void DapServer.handle_jdwp_event(DapServer* self) {
 					}
 					log::info("[dap] Conditional breakpoint (req=%d): condition true, stopping", event.request_id);
 				}
+
+				// Logpoint: evaluate {expr} patterns, send output, resume
+				String log_msg = self.bp_mgr.get_log_message(event.request_id);
+				if (log_msg.len > 0) {
+					String output = interpolate_log_message(&self.conn, &self.id_mgr, event.thread_id, log_msg);
+					Object* out_body = object::new_obj(tmem);
+					out_body.set("category", "console");
+					DString out_line;
+					out_line.tinit();
+					out_line.appendf("%s\n", output);
+					out_body.set("output", out_line.str_view());
+					self.send_event("output", out_body);
+					// Resume — logpoint doesn't stop
+					if (catch excuse = protocol::resume_vm(&self.conn)) {
+						log::err("[dap] Failed to resume after logpoint: %s", excuse);
+					}
+					return;
+				}
 			}
 
 			self.send_event(event_name, body);
@@ -559,4 +577,42 @@ fn void DapServer.send_event(DapServer* self, String event, Object* body) {
 	if (catch excuse = json_rpc::write_message(msg)) {
 		log::err("[dap] Failed to write event: %s", excuse);
 	}
+}
+
+// Interpolate {expr} patterns in logpoint message
+// Scans for { ... } and evaluates each expression via evaluate module
+fn String interpolate_log_message(JdwpConnection* conn, IdManager* id_mgr, long thread_id, String msg) {
+	DString result;
+	result.tinit();
+
+	usz i = 0;
+	while (i < msg.len) {
+		if (msg[i] == '{') {
+			// Find closing brace
+			usz end = i + 1;
+			int depth = 1;
+			while (end < msg.len && depth > 0) {
+				if (msg[end] == '{') depth++;
+				if (msg[end] == '}') depth--;
+				end++;
+			}
+			if (depth == 0) {
+				// Extract expression between { and }
+				String expr = msg[i + 1:end - i - 2];
+				if (expr.len > 0) {
+					// Evaluate using evaluate module with thread context
+					String val = evaluate::evaluate_to_string(conn, id_mgr, thread_id, expr);
+					result.appendf("%s", val);
+				}
+				i = end;
+			} else {
+				result.append_char(msg[i]);
+				i++;
+			}
+		} else {
+			result.append_char(msg[i]);
+			i++;
+		}
+	}
+	return result.str_view();
 }

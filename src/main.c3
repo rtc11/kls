@@ -14,7 +14,7 @@ fn void main(String[] args) {
 
 	if (dap_mode) {
 		log::info("[kls] Debug Adapter starting...");
-		DapServer ds;
+		DapServer* ds = mem::new(DapServer);
 		ds.init();
 		ds.run();
 	} else {

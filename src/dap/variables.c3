@@ -21,6 +21,23 @@ fn Object* handle_scopes(IdManager* id_mgr, Object* args) {
 		return body;
 	}
 
+	// Create "Arguments" scope
+	VarRef args_ref;
+	args_ref.thread_id = frame_ref.thread_id;
+	args_ref.frame_id = frame_ref.frame_id;
+	args_ref.scope = ScopeKind.ARGUMENTS;
+	args_ref.object_id = 0;
+	args_ref.class_id = frame_ref.class_id;
+	args_ref.method_id = frame_ref.method_id;
+	args_ref.location = frame_ref.location;
+	int args_var_ref = id_mgr.register_var_ref(args_ref);
+
+	Object* args_scope = object::new_obj(tmem);
+	args_scope.set("name", "Arguments");
+	args_scope.set("variablesReference", args_var_ref);
+	args_scope.set("expensive", false);
+	scopes_arr.push(args_scope);
+
 	// Create "Locals" scope
 	VarRef locals_ref;
 	locals_ref.thread_id = frame_ref.thread_id;
@@ -37,6 +54,23 @@ fn Object* handle_scopes(IdManager* id_mgr, Object* args) {
 	locals_scope.set("variablesReference", locals_var_ref);
 	locals_scope.set("expensive", false);
 	scopes_arr.push(locals_scope);
+
+	// Create "Static Fields" scope
+	VarRef static_ref;
+	static_ref.thread_id = frame_ref.thread_id;
+	static_ref.frame_id = frame_ref.frame_id;
+	static_ref.scope = ScopeKind.STATIC_FIELDS;
+	static_ref.object_id = 0;
+	static_ref.class_id = frame_ref.class_id;
+	static_ref.method_id = 0;
+	static_ref.location = 0;
+	int static_var_ref = id_mgr.register_var_ref(static_ref);
+
+	Object* static_scope = object::new_obj(tmem);
+	static_scope.set("name", "Static Fields");
+	static_scope.set("variablesReference", static_var_ref);
+	static_scope.set("expensive", false);
+	scopes_arr.push(static_scope);
 
 	body.set("scopes", scopes_arr);
 	return body;
@@ -58,22 +92,81 @@ fn Object* handle_variables(JdwpConnection* conn, IdManager* id_mgr, Object* arg
 	}
 
 	if (ref.object_id != 0) {
-		// Expand object fields
-		get_object_fields(conn, id_mgr, ref.thread_id, ref.object_id, vars_arr);
+		// Check if this is an array by looking up reference type signature
+		bool is_array = false;
+		if (try rt_reply = protocol::get_reference_type_signature(conn, ref.object_id)) {
+			if (rt_reply.error_code == 0 && rt_reply.data.len >= 5) {
+				int sig_len = transport::get_int_be(rt_reply.data, 0);
+				if (sig_len > 0) {
+					char first = rt_reply.data[4];
+					if (first == '[') is_array = true;
+				}
+			}
+		}
+		// For arrays: check via ObjectReference.ReferenceType first
+		if (!is_array) {
+			char[8] rt_data;
+			transport::put_long_be(rt_data[..], 0, ref.object_id);
+			if (try rt_id = conn.send_command(protocol::CS_OBJECT_REFERENCE, protocol::OR_REFERENCE_TYPE, rt_data[:8])) {
+				if (try rt_reply = conn.read_reply()) {
+					if (rt_reply.error_code == 0 && rt_reply.data.len >= 9) {
+						char type_tag = rt_reply.data[0];
+						if (type_tag == 3) is_array = true;  // JDWP typeTag 3 = ARRAY
+						long type_id = transport::get_long_be(rt_reply.data, 1);
+						if (!is_array) {
+							// Check type signature
+							if (try sig_reply = protocol::get_reference_type_signature(conn, type_id)) {
+								if (sig_reply.error_code == 0 && sig_reply.data.len >= 5) {
+									int sl = transport::get_int_be(sig_reply.data, 0);
+									if (sl > 0 && sig_reply.data[4] == '[') is_array = true;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if (is_array) {
+			get_array_elements(conn, id_mgr, ref.thread_id, ref.object_id, vars_arr);
+		} else {
+			// Expand object fields
+			get_object_fields(conn, id_mgr, ref.thread_id, ref.object_id, vars_arr);
+		}
 	} else {
-		// Get locals from frame
-		get_frame_locals(conn, id_mgr, &ref, vars_arr);
+		// Scope-based variable fetch
+		switch (ref.scope) {
+			case ARGUMENTS:
+				get_frame_args(conn, id_mgr, &ref, vars_arr);
+			case LOCALS:
+				get_frame_locals(conn, id_mgr, &ref, vars_arr);
+			case STATIC_FIELDS:
+				get_static_fields(conn, id_mgr, &ref, vars_arr);
+			default:
+				get_frame_locals(conn, id_mgr, &ref, vars_arr);
+		}
 	}
 
 	body.set("variables", vars_arr);
 	return body;
 }
 
-// Get local variables from a stack frame
-fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, Object* vars_arr) {
-	// First get "this" if available
+// Get function arguments from a stack frame
+fn void get_frame_args(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, Object* vars_arr) {
+	// "this" goes in arguments scope
 	get_this_object(conn, id_mgr, ref, vars_arr);
+	get_frame_vars_filtered(conn, id_mgr, ref, vars_arr, true);
+}
 
+// Get local variables from a stack frame (non-argument locals only)
+fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, Object* vars_arr) {
+	get_frame_vars_filtered(conn, id_mgr, ref, vars_arr, false);
+}
+
+// Get variables from a frame, filtered by args_only:
+// args_only=true: return slots < arg_count (excluding "this")
+// args_only=false: return slots >= arg_count
+fn void get_frame_vars_filtered(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, Object* vars_arr, bool args_only) {
 	// Get variable table for the method
 	if (ref.class_id == 0 || ref.method_id == 0) return;
 
@@ -148,11 +241,15 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 		int length = transport::get_int_be(vt_reply.data, pos); pos += 4;
 		int slot = transport::get_int_be(vt_reply.data, pos); pos += 4;
 
-		// Skip "this" (slot 0 for instance methods) — already handled above
+		// Skip "this" (slot 0 for instance methods) — handled in Arguments scope
 		if (name == "this") continue;
 
 		// Filter by scope: variable is alive when codeIndex <= currentPC < codeIndex + length
 		if (current_pc < code_index || current_pc >= code_index + (long)length) continue;
+
+		// Split args vs locals: slots < arg_count are arguments
+		if (args_only && slot >= arg_count) continue;
+		if (!args_only && slot < arg_count) continue;
 
 		// Map JVM signature to JDWP tag
 		char tag = sig_to_tag(sig);
@@ -184,7 +281,7 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 				int val_size = tag_value_size(val_tag);
 				if (vpos + (usz)val_size > reply.data.len) break;
 
-				String val_str = format_tagged_value(conn, val_tag, reply.data, vpos);
+				String val_str = format_tagged_value(conn, val_tag, reply.data, vpos, ref.thread_id);
 
 				int child_ref = 0;
 				if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
@@ -233,7 +330,7 @@ fn void get_frame_locals(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, O
 				int val_size = tag_value_size(val_tag);
 				if (vpos + (usz)val_size > reply.data.len) continue;
 
-				String val_str = format_tagged_value(conn, val_tag, reply.data, vpos);
+				String val_str = format_tagged_value(conn, val_tag, reply.data, vpos, ref.thread_id);
 
 				int child_ref = 0;
 				if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
@@ -375,6 +472,215 @@ fn String sig_to_type_name(String sig) {
 	}
 }
 
+// Get static fields for a class
+fn void get_static_fields(JdwpConnection* conn, IdManager* id_mgr, VarRef* ref, Object* vars_arr) {
+	if (ref.class_id == 0) return;
+
+	// Get fields for class
+	char[8] type_data;
+	transport::put_long_be(type_data[..], 0, ref.class_id);
+	int cmd_id;
+	if (try id = conn.send_command(protocol::CS_REFERENCE_TYPE, protocol::RT_FIELDS, type_data[:8])) {
+		cmd_id = id;
+	} else {
+		return;
+	}
+
+	JdwpReply fields_reply;
+	if (try r = conn.read_reply()) {
+		fields_reply = r;
+	} else {
+		return;
+	}
+	if (fields_reply.error_code != 0 || fields_reply.data.len < 4) return;
+
+	int field_count = transport::get_int_be(fields_reply.data, 0);
+	usz pos = 4;
+
+	// Collect static field IDs, names, sigs
+	const int MAX_STATIC = 64;
+	long[MAX_STATIC] field_ids;
+	String[MAX_STATIC] field_names;
+	String[MAX_STATIC] field_sigs;
+	int static_count = 0;
+
+	for (int i = 0; i < field_count && static_count < MAX_STATIC; i++) {
+		if (pos + 8 > fields_reply.data.len) break;
+		long field_id = transport::get_long_be(fields_reply.data, pos); pos += 8;
+
+		if (pos + 4 > fields_reply.data.len) break;
+		int name_len = transport::get_int_be(fields_reply.data, pos); pos += 4;
+		String name = "";
+		if (name_len > 0 && pos + (usz)name_len <= fields_reply.data.len) {
+			name = (String)fields_reply.data[pos:name_len];
+		}
+		pos += (usz)name_len;
+
+		if (pos + 4 > fields_reply.data.len) break;
+		int sig_len = transport::get_int_be(fields_reply.data, pos); pos += 4;
+		String sig = "";
+		if (sig_len > 0 && pos + (usz)sig_len <= fields_reply.data.len) {
+			sig = (String)fields_reply.data[pos:sig_len];
+		}
+		pos += (usz)sig_len;
+
+		if (pos + 4 > fields_reply.data.len) break;
+		int mod_bits = transport::get_int_be(fields_reply.data, pos); pos += 4;
+
+		// Only static fields
+		if (mod_bits & 0x0008 == 0) continue;
+
+		field_ids[static_count] = field_id;
+		field_names[static_count] = name;
+		field_sigs[static_count] = sig;
+		static_count++;
+	}
+
+	if (static_count == 0) return;
+
+	// Get static field values via ReferenceType.GetValues
+	// Data: refTypeID(8) + fieldCount(4) + fieldIDs(8*N)
+	usz data_len = 8 + 4 + (usz)static_count * 8;
+	char[] gv_data = mem::talloc_array(char, data_len);
+	transport::put_long_be(gv_data, 0, ref.class_id);
+	transport::put_int_be(gv_data, 8, static_count);
+	for (int i = 0; i < static_count; i++) {
+		transport::put_long_be(gv_data, 12 + (usz)i * 8, field_ids[i]);
+	}
+
+	if (try id = conn.send_command(protocol::CS_REFERENCE_TYPE, protocol::RT_GET_VALUES, gv_data[:data_len])) {
+		cmd_id = id;
+	} else {
+		return;
+	}
+
+	JdwpReply val_reply;
+	if (try r = conn.read_reply()) {
+		val_reply = r;
+	} else {
+		return;
+	}
+	if (val_reply.error_code != 0 || val_reply.data.len < 4) return;
+
+	int val_count = transport::get_int_be(val_reply.data, 0);
+	usz vpos = 4;
+
+	for (int i = 0; i < val_count && i < static_count; i++) {
+		if (vpos >= val_reply.data.len) break;
+		char val_tag = val_reply.data[vpos]; vpos++;
+
+		int val_size = tag_value_size(val_tag);
+		if (vpos + (usz)val_size > val_reply.data.len) break;
+
+		String val_str = format_tagged_value(conn, val_tag, val_reply.data, vpos, ref.thread_id);
+
+		int child_ref = 0;
+		if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
+			long obj_id = transport::get_long_be(val_reply.data, vpos);
+			if (obj_id != 0) {
+				VarRef child_vr;
+				child_vr.thread_id = ref.thread_id;
+				child_vr.frame_id = 0;
+				child_vr.scope = ScopeKind.THIS_OBJECT;
+				child_vr.object_id = obj_id;
+				child_vr.class_id = 0;
+				child_vr.method_id = 0;
+				child_ref = id_mgr.register_var_ref(child_vr);
+			}
+		}
+
+		Object* var_obj = object::new_obj(tmem);
+		var_obj.set("name", field_names[i]);
+		var_obj.set("value", val_str);
+		var_obj.set("type", sig_to_type_name(field_sigs[i]));
+		var_obj.set("variablesReference", child_ref);
+		vars_arr.push(var_obj);
+
+		vpos += (usz)val_size;
+	}
+}
+
+// Get array elements via JDWP
+fn void get_array_elements(JdwpConnection* conn, IdManager* id_mgr, long thread_id, long array_id, Object* vars_arr) {
+	// Get array length
+	int arr_len = 0;
+	if (try reply = protocol::get_array_length(conn, array_id)) {
+		if (reply.error_code == 0 && reply.data.len >= 4) {
+			arr_len = transport::get_int_be(reply.data, 0);
+		}
+	}
+	if (arr_len == 0) return;
+
+	// Add length pseudo-variable
+	Object* len_var = object::new_obj(tmem);
+	len_var.set("name", "length");
+	DString len_str;
+	len_str.tinit();
+	len_str.appendf("%d", arr_len);
+	len_var.set("value", len_str.str_view());
+	len_var.set("type", "Int");
+	len_var.set("variablesReference", 0);
+	vars_arr.push(len_var);
+
+	// Cap at 100 elements
+	int fetch_count = arr_len > 100 ? 100 : arr_len;
+
+	if (try reply = protocol::get_array_values(conn, array_id, 0, fetch_count)) {
+		if (reply.error_code != 0 || reply.data.len < 5) return;
+
+		char elem_tag = reply.data[0];
+		int count = transport::get_int_be(reply.data, 1);
+		usz pos = 5;
+
+		// Object arrays: each element tagged (tag + 8-byte objectID)
+		// Primitive arrays: elements untagged, raw values
+		bool is_object_array = (elem_tag == 'L' || elem_tag == '[' || elem_tag == 's');
+
+		for (int i = 0; i < count && i < fetch_count; i++) {
+			DString idx_name;
+			idx_name.tinit();
+			idx_name.appendf("[%d]", i);
+
+			char val_tag;
+			if (is_object_array) {
+				if (pos >= reply.data.len) break;
+				val_tag = reply.data[pos]; pos++;
+			} else {
+				val_tag = elem_tag;
+			}
+
+			int val_size = tag_value_size(val_tag);
+			if (pos + (usz)val_size > reply.data.len) break;
+
+			String val_str = format_tagged_value(conn, val_tag, reply.data, pos, thread_id);
+
+			int child_ref = 0;
+			if ((val_tag == 'L' || val_tag == '[' || val_tag == 's') && val_size == 8) {
+				long obj_id = transport::get_long_be(reply.data, pos);
+				if (obj_id != 0) {
+					VarRef child_vr;
+					child_vr.thread_id = thread_id;
+					child_vr.frame_id = 0;
+					child_vr.scope = ScopeKind.THIS_OBJECT;
+					child_vr.object_id = obj_id;
+					child_vr.class_id = 0;
+					child_vr.method_id = 0;
+					child_ref = id_mgr.register_var_ref(child_vr);
+				}
+			}
+
+			Object* var_obj = object::new_obj(tmem);
+			var_obj.set("name", idx_name.str_view());
+			var_obj.set("value", val_str);
+			var_obj.set("type", tag_to_type_name(val_tag));
+			var_obj.set("variablesReference", child_ref);
+			vars_arr.push(var_obj);
+
+			pos += (usz)val_size;
+		}
+	}
+}
+
 // Get object fields via JDWP
 fn void get_object_fields(JdwpConnection* conn, IdManager* id_mgr, long thread_id, long object_id, Object* vars_arr) {
 	// Get reference type of object
@@ -460,7 +766,7 @@ fn void get_object_fields(JdwpConnection* conn, IdManager* id_mgr, long thread_i
 					int val_count = transport::get_int_be(gv_reply.data, 0);
 					if (val_count > 0 && gv_reply.data.len > 4) {
 						char tag = gv_reply.data[4];
-						String val_str = format_tagged_value(conn, tag, gv_reply.data, 5);
+						String val_str = format_tagged_value(conn, tag, gv_reply.data, 5, thread_id);
 
 						int child_ref = 0;
 						// If object type, register for expansion
@@ -491,8 +797,103 @@ fn void get_object_fields(JdwpConnection* conn, IdManager* id_mgr, long thread_i
 	}
 }
 
+// Invoke toString() on an object, return result or empty string on failure
+fn String invoke_to_string(JdwpConnection* conn, long object_id, long thread_id) {
+	if (thread_id == 0 || object_id == 0) return "";
+
+	// Get reference type of object
+	char[8] rt_data;
+	transport::put_long_be(rt_data[..], 0, object_id);
+	int cmd_id;
+	if (try id = conn.send_command(protocol::CS_OBJECT_REFERENCE, protocol::OR_REFERENCE_TYPE, rt_data[:8])) {
+		cmd_id = id;
+	} else {
+		return "";
+	}
+	JdwpReply rt_reply;
+	if (try r = conn.read_reply()) {
+		rt_reply = r;
+	} else {
+		return "";
+	}
+	if (rt_reply.error_code != 0 || rt_reply.data.len < 9) return "";
+	long type_id = transport::get_long_be(rt_reply.data, 1);
+
+	// Find toString method (signature "()Ljava/lang/String;")
+	JdwpReply methods_reply;
+	if (try r = protocol::get_methods(conn, type_id)) {
+		methods_reply = r;
+	} else {
+		return "";
+	}
+	if (methods_reply.error_code != 0 || methods_reply.data.len < 4) return "";
+
+	int method_count = transport::get_int_be(methods_reply.data, 0);
+	usz pos = 4;
+	long to_string_id = 0;
+
+	for (int i = 0; i < method_count; i++) {
+		if (pos + 8 > methods_reply.data.len) break;
+		long mid = transport::get_long_be(methods_reply.data, pos); pos += 8;
+
+		if (pos + 4 > methods_reply.data.len) break;
+		int name_len = transport::get_int_be(methods_reply.data, pos); pos += 4;
+		String name = "";
+		if (name_len > 0 && pos + (usz)name_len <= methods_reply.data.len) {
+			name = (String)methods_reply.data[pos:name_len];
+		}
+		pos += (usz)name_len;
+
+		if (pos + 4 > methods_reply.data.len) break;
+		int sig_len = transport::get_int_be(methods_reply.data, pos); pos += 4;
+		String sig = "";
+		if (sig_len > 0 && pos + (usz)sig_len <= methods_reply.data.len) {
+			sig = (String)methods_reply.data[pos:sig_len];
+		}
+		pos += (usz)sig_len;
+
+		if (pos + 4 > methods_reply.data.len) break;
+		pos += 4;  // modBits
+
+		if (name == "toString" && sig == "()Ljava/lang/String;") {
+			to_string_id = mid;
+			break;
+		}
+	}
+
+	if (to_string_id == 0) return "";
+
+	// Invoke: no args, INVOKE_SINGLE_THREADED (0x01)
+	char[] empty_tags = {};
+	long[] empty_vals = {};
+	if (try reply = protocol::invoke_object_method(conn, object_id, thread_id, type_id, to_string_id, empty_tags, empty_vals, 0x01)) {
+		if (reply.error_code != 0 || reply.data.len < 1) return "";
+		char ret_tag = reply.data[0];
+		if (ret_tag == 's' && reply.data.len >= 9) {
+			long str_id = transport::get_long_be(reply.data, 1);
+			if (str_id != 0) {
+				// Check for exception at offset 9 (tag + 8-byte objectID)
+				if (reply.data.len >= 18) {
+					char exc_tag = reply.data[9];
+					long exc_id = transport::get_long_be(reply.data, 10);
+					if (exc_id != 0) return "";  // toString() threw exception
+				}
+				if (try sr = protocol::get_string_value(conn, str_id)) {
+					if (sr.error_code == 0 && sr.data.len >= 4) {
+						int slen = transport::get_int_be(sr.data, 0);
+						if (slen > 0 && 4 + (usz)slen <= sr.data.len) {
+							return (String)sr.data[4:slen];
+						}
+					}
+				}
+			}
+		}
+	}
+	return "";
+}
+
 // Format a JDWP tagged value as string
-fn String format_tagged_value(JdwpConnection* conn, char tag, char[] data, usz offset) {
+fn String format_tagged_value(JdwpConnection* conn, char tag, char[] data, usz offset, long thread_id) {
 	DString out;
 	out.tinit();
 
@@ -555,7 +956,13 @@ fn String format_tagged_value(JdwpConnection* conn, char tag, char[] data, usz o
 				if (obj_id == 0) {
 					out.appendf("null");
 				} else {
-					out.appendf("Object@%d", obj_id);
+					// Try toString() for meaningful display
+					String ts = invoke_to_string(conn, obj_id, thread_id);
+					if (ts.len > 0) {
+						out.appendf("%s", ts);
+					} else {
+						out.appendf("Object@%d", obj_id);
+					}
 				}
 			}
 		case '[':  // array reference
@@ -564,7 +971,17 @@ fn String format_tagged_value(JdwpConnection* conn, char tag, char[] data, usz o
 				if (arr_id == 0) {
 					out.appendf("null");
 				} else {
-					out.appendf("Array@%d", arr_id);
+					// Show array with length
+					if (try len_reply = protocol::get_array_length(conn, arr_id)) {
+						if (len_reply.error_code == 0 && len_reply.data.len >= 4) {
+							int arr_len = transport::get_int_be(len_reply.data, 0);
+							out.appendf("Array[%d]", arr_len);
+						} else {
+							out.appendf("Array");
+						}
+					} else {
+						out.appendf("Array");
+					}
 				}
 			}
 		case 'V':  // void

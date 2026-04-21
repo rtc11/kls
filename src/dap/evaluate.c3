@@ -1083,3 +1083,59 @@ fn bool evaluate_condition(JdwpConnection* conn, IdManager* id_mgr, long thread_
 
 	return result.is_truthy();
 }
+
+// ── Evaluate expression to string (for logpoints) ──────────────────
+
+// Evaluate an expression and return its string representation.
+// Returns "<error>" on evaluation failure.
+fn String evaluate_to_string(JdwpConnection* conn, IdManager* id_mgr, long thread_id, String expression) {
+	if (expression.len == 0) return "";
+
+	// Get top frame
+	int dap_frame_id = 0;
+	if (try reply = protocol::get_thread_frames(conn, thread_id, 0, 1)) {
+		if (reply.error_code == 0 && reply.data.len >= 12) {
+			int frame_count = transport::get_int_be(reply.data, 0);
+			if (frame_count > 0) {
+				long jdwp_frame_id = transport::get_long_be(reply.data, 4);
+				usz loc_pos = 12;
+				char type_tag = reply.data[loc_pos]; loc_pos++;
+				long class_id = transport::get_long_be(reply.data, loc_pos); loc_pos += 8;
+				long method_id = transport::get_long_be(reply.data, loc_pos);
+
+				FrameRef fref;
+				fref.thread_id = thread_id;
+				fref.frame_id = jdwp_frame_id;
+				fref.class_id = class_id;
+				fref.method_id = method_id;
+				dap_frame_id = id_mgr.register_frame(fref);
+			}
+		}
+	}
+
+	ExprLexer lexer;
+	lexer.init(expression);
+	lexer.tokenize();
+
+	EvalContext ctx = {
+		.conn = conn,
+		.id_mgr = id_mgr,
+		.dap_frame_id = dap_frame_id,
+	};
+
+	ExprParser parser = {
+		.tokens = &lexer.tokens[0],
+		.count = lexer.count,
+		.pos = 0,
+		.ctx = &ctx,
+	};
+
+	EvalValue result = parser.parse_expression();
+
+	if (result.is_error) {
+		log::err("[dap] Logpoint eval error: %s (expr=%s)", result.error_msg, expression);
+		return "<error>";
+	}
+
+	return format_eval_value(&ctx, &result);
+}

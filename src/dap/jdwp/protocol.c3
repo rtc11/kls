@@ -46,6 +46,7 @@ const char RT_SIGNATURE         = 1;
 const char RT_CLASS_LOADER      = 2;
 const char RT_FIELDS            = 4;
 const char RT_METHODS           = 5;
+const char RT_GET_VALUES        = 6;
 const char RT_SOURCE_FILE       = 7;
 const char RT_INTERFACES        = 10;
 const char RT_CLASS_OBJECT      = 11;

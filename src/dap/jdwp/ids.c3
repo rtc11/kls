@@ -38,6 +38,7 @@ enum ScopeKind : char {
 	LOCALS,
 	ARGUMENTS,
 	THIS_OBJECT,
+	STATIC_FIELDS,
 }
 
 struct VarRef {
