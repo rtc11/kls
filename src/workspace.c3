@@ -248,6 +248,63 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 			for (uint j = 0; j < pr.node_count; j++) {
 				AstNode* child = &pr.nodes[j];
 				if (child.parent != i) continue;
+
+				// Descend into companion object — its members are accessible via ClassName.member
+				if (child.kind == COMPANION_OBJECT_DECL) {
+					for (uint k = 0; k < pr.node_count; k++) {
+						AstNode* comp_child = &pr.nodes[k];
+						if (comp_child.parent != j) continue;
+						if (comp_child.name.len == 0) continue;
+
+						MemberDecl cm;
+						bool cvalid = false;
+
+						switch (comp_child.kind) {
+							case FUN_DECL:
+								cm = {
+									.name = comp_child.name.copy(mem),
+									.type_text = comp_child.type_text.len > 0 ? comp_child.type_text.copy(mem) : "",
+									.uri = uri.copy(mem),
+									.node_kind = FUN_DECL,
+									.mod_flags = comp_child.mod_flags,
+									.line = comp_child.name_line,
+									.col = comp_child.name_col,
+									.name_len = comp_child.name_len,
+									.param_count = 0,
+								};
+								uint comp_fun_idx = ast::node_index(pr, comp_child);
+								for (uint p = 0; p < pr.node_count && cm.param_count < MAX_PARAMS; p++) {
+									if (pr.nodes[p].parent != comp_fun_idx) continue;
+									if (pr.nodes[p].kind != PARAM) continue;
+									usz pi = cm.param_count;
+									cm.param_names[pi] = pr.nodes[p].name.len > 0 ? pr.nodes[p].name.copy(mem) : "";
+									cm.param_types[pi] = pr.nodes[p].type_text.len > 0 ? pr.nodes[p].type_text.copy(mem) : "";
+									cm.param_count++;
+								}
+								cvalid = true;
+							case PROPERTY_DECL:
+								cm = {
+									.name = comp_child.name.copy(mem),
+									.type_text = comp_child.type_text.len > 0 ? comp_child.type_text.copy(mem) : "",
+									.uri = uri.copy(mem),
+									.node_kind = PROPERTY_DECL,
+									.mod_flags = comp_child.mod_flags,
+									.line = comp_child.name_line,
+									.col = comp_child.name_col,
+									.name_len = comp_child.name_len,
+									.param_count = 0,
+								};
+								cvalid = true;
+							default:
+						}
+
+						if (cvalid) {
+							members.push(cm);
+						}
+					}
+					continue;
+				}
+
 				if (child.name.len == 0) continue;
 
 				MemberDecl m;
@@ -426,7 +483,7 @@ fn void WorkspaceIndex.index_nested_members(WorkspaceIndex* self, ParseResult* p
 	for (uint j = 0; j < pr.node_count; j++) {
 		AstNode* child = &pr.nodes[j];
 		if (child.parent != parent_idx) continue;
-		if (child.kind != CLASS_DECL && child.kind != INTERFACE_DECL && child.kind != OBJECT_DECL) continue;
+		if (child.kind != CLASS_DECL && child.kind != INTERFACE_DECL && child.kind != OBJECT_DECL && child.kind != COMPANION_OBJECT_DECL) continue;
 		if (child.name.len == 0) continue;
 
 		String nested_name = child.name;

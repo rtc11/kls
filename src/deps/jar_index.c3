@@ -289,6 +289,8 @@ fn void DependencyIndex.index_jar(DependencyIndex* self, String jar_path) {
  * Check if a .class file name has a '$' in the class name part.
  * This indicates an inner class. We skip these to avoid duplicating
  * symbols (outer class already has the public API).
+ * Exception: $Companion classes are allowed through — their members
+ * are accessible via ClassName.member in Kotlin and need indexing.
  * Does NOT skip Kotlin file-facade classes like CollectionsKt.
  */
 fn bool has_dollar_in_class_name(String name) {
@@ -300,7 +302,12 @@ fn bool has_dollar_in_class_name(String name) {
 	}
 	// Check the filename part for '$'
 	for (usz i = start; i < name.len; i++) {
-		if (name[i] == '$') return true;
+		if (name[i] == '$') {
+			// Allow $Companion.class through — Kotlin companion object members
+			// need to be indexed under the outer class name
+			if (name[i..].starts_with("$Companion.class")) return false;
+			return true;
+		}
 	}
 	return false;
 }
@@ -316,6 +323,18 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 	// Skip classes with empty or weird names
 	if (simple_name.len == 0) return;
 
+	// Detect Kotlin companion object classes (e.g. "HttpStatusCode$Companion").
+	// Index their members under the outer class name so ClassName.member resolves.
+	bool is_companion = false;
+	String outer_class_name = simple_name;
+	if (simple_name.len > 10) {  // "$Companion" = 10 chars
+		usz suffix_start = simple_name.len - 10;
+		if (simple_name[suffix_start..] == "$Companion") {
+			is_companion = true;
+			outer_class_name = simple_name[..suffix_start - 1];
+		}
+	}
+
 	// Try to parse Kotlin metadata for accurate type info
 	KmClass km_storage;
 	KmClass* km = null;
@@ -330,7 +349,8 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 	}
 
 	// Add the class/interface itself as a symbol (if public)
-	if ((info.access_flags & classfile::ACC_PUBLIC) != 0) {
+	// Skip companion object classes — we only want their members, indexed under outer class
+	if (!is_companion && (info.access_flags & classfile::ACC_PUBLIC) != 0) {
 		DepSymbolKind class_kind = DEP_CLASS;
 		if ((info.access_flags & classfile::ACC_INTERFACE) != 0) {
 			if ((info.access_flags & classfile::ACC_ANNOTATION) != 0) {
@@ -391,6 +411,9 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 	// Used to match JVM methods to their Kotlin metadata counterparts
 	// (We iterate JVM methods as primary, metadata as enrichment)
 
+	// For companion classes, index members under the outer class name
+	String effective_class = outer_class_name;
+
 	// Add public methods as symbols
 	for (usz i = 0; i < info.method_count; i++) {
 		ClassMember* m = &info.methods[i];
@@ -419,9 +442,9 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			if (recv_name.len > 0) {
 				sig.appendf("%s.", recv_name);
 			}
-		} else if (!is_static && simple_name.len > 0) {
+		} else if (!is_static && effective_class.len > 0) {
 			// For non-static methods on Kt classes, it's a member function
-			sig.appendf("%s.", simple_name);
+			sig.appendf("%s.", effective_class);
 		}
 
 		sig.appendf("%s", m.name);
@@ -450,14 +473,14 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			classfile::method_descriptor_to_kotlin(m.descriptor, &sig);
 		}
 
-		add_dep_symbol(idx, m.name, sig.str_view(), pkg, simple_name, jar_path, DEP_METHOD,
+		add_dep_symbol(idx, m.name, sig.str_view(), pkg, effective_class, jar_path, DEP_METHOD,
 			null, 0, jar_path_interned: true);
 
 		// For extension functions, also index under receiver type name
 		if (km_fn != null && km_fn.has_receiver_type) {
 			String recv_type_name = kotlin_metadata::resolve_type_name(
 				km, km_fn.receiver_type.class_name_id, info.metadata_d2[..], info.metadata_d2_len);
-			if (recv_type_name.len > 0 && recv_type_name != simple_name) {
+			if (recv_type_name.len > 0 && recv_type_name != effective_class) {
 				add_dep_symbol(idx, m.name, sig.str_view(), pkg, recv_type_name, jar_path, DEP_METHOD,
 					null, 0, jar_path_interned: true);
 			}
@@ -477,7 +500,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			prop_sig.tinit();
 			prop_sig.appendf("val %s", prop_name);
 			classfile::method_descriptor_to_kotlin(m.descriptor, &prop_sig);
-			add_dep_symbol(idx, prop_name, prop_sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD,
+			add_dep_symbol(idx, prop_name, prop_sig.str_view(), pkg, effective_class, jar_path, DEP_FIELD,
 				null, 0, jar_path_interned: true);
 		}
 	}
@@ -507,7 +530,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			classfile::descriptor_to_kotlin_type(f.descriptor, &sig);
 		}
 
-		add_dep_symbol(idx, f.name, sig.str_view(), pkg, simple_name, jar_path, DEP_FIELD,
+		add_dep_symbol(idx, f.name, sig.str_view(), pkg, effective_class, jar_path, DEP_FIELD,
 			null, 0, jar_path_interned: true);
 	}
 }

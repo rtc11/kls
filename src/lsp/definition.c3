@@ -561,6 +561,26 @@ fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String 
 			for (uint j = 0; j < pr.node_count; j++) {
 				AstNode* child = &pr.nodes[j];
 				if (child.parent != i) continue;
+
+				// Descend into companion object — its members are accessible via ClassName.member
+				if (child.kind == COMPANION_OBJECT_DECL) {
+					for (uint k = 0; k < pr.node_count; k++) {
+						AstNode* comp_child = &pr.nodes[k];
+						if (comp_child.parent != j) continue;
+						if (comp_child.name != member_name) continue;
+
+						if (ast::is_declaration(comp_child.kind)) {
+							return build_location_from_node(uri, comp_child);
+						}
+						if (comp_child.kind == PARAM) {
+							if ((comp_child.mod_flags & ast::MOD_VAR) != 0 || (comp_child.mod_flags & ast::MOD_FINAL) != 0) {
+								return build_location_from_node(uri, comp_child);
+							}
+						}
+					}
+					continue;
+				}
+
 				if (child.name != member_name) continue;
 
 				// Standard declarations (fun, property, nested class, etc.)
