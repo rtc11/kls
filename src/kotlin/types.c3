@@ -2536,13 +2536,77 @@ fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, TypeRef receiver,
 			for (usz s = 0; s < jar_index::MAX_DEP_SUPERTYPES; s++) {
 				if (best_class.supertypes[s].len == 0) break;
 				TypeRef super_result = resolve_dep_member_in_class(dep_index, best_class.supertypes[s], member_name);
-				if (super_result.kind != UNKNOWN) return super_result;
+				if (super_result.kind != UNKNOWN) return substitute_type_params(super_result, receiver);
 			}
 		}
 		return TYPE_UNKNOWN;
 	}
 
-	return extract_dep_return_type(best);
+	TypeRef result = extract_dep_return_type(best);
+	return substitute_type_params(result, receiver);
+}
+
+/**
+ * Substitute type parameter placeholders (T0, T1, ...) with concrete
+ * type arguments from a generic receiver type.
+ * E.g., receiver = List<String>, result = T0 → String
+ */
+fn TypeRef substitute_type_params(TypeRef result, TypeRef receiver) {
+	if (receiver.kind != GENERIC || receiver.type_arg_count == 0) return result;
+
+	// Direct type parameter: T0, T1, etc.
+	if (result.kind == SIMPLE && is_type_param_placeholder(result.name)) {
+		int idx = parse_type_param_index(result.name);
+		if (idx >= 0 && (usz)idx < receiver.type_arg_count) {
+			String arg_name = receiver.type_arg_names[idx];
+			if (arg_name.len > 0 && arg_name != "*") {
+				TypeRef subst = parse_type_text(arg_name);
+				if (result.nullable && !subst.nullable) subst.nullable = true;
+				return subst;
+			}
+		}
+	}
+
+	// Generic result with type param args: e.g., Map<T0, T1> with receiver Map<String, Int>
+	if (result.kind == GENERIC && result.type_arg_count > 0) {
+		for (usz i = 0; i < result.type_arg_count; i++) {
+			if (is_type_param_placeholder(result.type_arg_names[i])) {
+				int idx = parse_type_param_index(result.type_arg_names[i]);
+				if (idx >= 0 && (usz)idx < receiver.type_arg_count) {
+					String arg = receiver.type_arg_names[idx];
+					if (arg.len > 0 && arg != "*") {
+						result.type_arg_names[i] = arg;
+					}
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
+/**
+ * Check if a type name is a type parameter placeholder (T0, T1, ...).
+ */
+fn bool is_type_param_placeholder(String name) {
+	if (name.len < 2 || name[0] != 'T') return false;
+	for (usz i = 1; i < name.len; i++) {
+		if (name[i] < '0' || name[i] > '9') return false;
+	}
+	return true;
+}
+
+/**
+ * Parse the index from a type parameter placeholder: "T0" -> 0, "T1" -> 1.
+ */
+fn int parse_type_param_index(String name) {
+	if (name.len < 2 || name[0] != 'T') return -1;
+	int idx = 0;
+	for (usz i = 1; i < name.len; i++) {
+		if (name[i] < '0' || name[i] > '9') return -1;
+		idx = idx * 10 + (int)(name[i] - '0');
+	}
+	return idx;
 }
 
 /**

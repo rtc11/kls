@@ -3380,3 +3380,140 @@ fn void extract_lambda_receiver_no_params() @test {
 		assert(recv.kind == types::TypeKind.UNKNOWN, "expected UNKNOWN for no-param function");
 	};
 }
+
+// ── Generic type parameter substitution ────────────────────────────
+
+fn void is_type_param_placeholder_basic() @test {
+	assert(types::is_type_param_placeholder("T0"));
+	assert(types::is_type_param_placeholder("T1"));
+	assert(types::is_type_param_placeholder("T12"));
+	assert(!types::is_type_param_placeholder("T"));
+	assert(!types::is_type_param_placeholder("String"));
+	assert(!types::is_type_param_placeholder("Ta"));
+	assert(!types::is_type_param_placeholder(""));
+}
+
+fn void parse_type_param_index_basic() @test {
+	assert(types::parse_type_param_index("T0") == 0);
+	assert(types::parse_type_param_index("T1") == 1);
+	assert(types::parse_type_param_index("T12") == 12);
+	assert(types::parse_type_param_index("T") == -1);
+	assert(types::parse_type_param_index("String") == -1);
+}
+
+fn void substitute_simple_type_param() @test {
+	@pool() {
+		// List<String>.first() returns T0 → substitute to String
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "List" };
+		receiver.type_arg_count = 1;
+		receiver.type_arg_names[0] = "String";
+
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "T0" };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.kind == types::TypeKind.SIMPLE, "expected SIMPLE, got %d", (int)subst.kind);
+		assert(subst.name == "String", "expected String, got '%s'", subst.name);
+	};
+}
+
+fn void substitute_second_type_param() @test {
+	@pool() {
+		// Map<String, Int>.values returns Collection<T1> → T1 = Int
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "Map" };
+		receiver.type_arg_count = 2;
+		receiver.type_arg_names[0] = "String";
+		receiver.type_arg_names[1] = "Int";
+
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "T1" };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.kind == types::TypeKind.SIMPLE, "expected SIMPLE, got %d", (int)subst.kind);
+		assert(subst.name == "Int", "expected Int, got '%s'", subst.name);
+	};
+}
+
+fn void substitute_no_match_non_generic_receiver() @test {
+	@pool() {
+		// Non-generic receiver: no substitution
+		TypeRef receiver = { .kind = types::TypeKind.SIMPLE, .name = "String" };
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "T0" };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.name == "T0", "should not substitute for non-generic receiver");
+	};
+}
+
+fn void substitute_preserves_nullable() @test {
+	@pool() {
+		// T0? with List<String> → String?
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "List" };
+		receiver.type_arg_count = 1;
+		receiver.type_arg_names[0] = "String";
+
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "T0", .nullable = true };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.name == "String");
+		assert(subst.nullable, "nullable should be preserved");
+	};
+}
+
+fn void substitute_generic_type_args() @test {
+	@pool() {
+		// Map<T0, T1> with Map<String, Int> → Map<String, Int>
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "Map" };
+		receiver.type_arg_count = 2;
+		receiver.type_arg_names[0] = "String";
+		receiver.type_arg_names[1] = "Int";
+
+		TypeRef result = { .kind = types::TypeKind.GENERIC, .name = "List" };
+		result.type_arg_count = 1;
+		result.type_arg_names[0] = "T0";
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.kind == types::TypeKind.GENERIC);
+		assert(subst.type_arg_names[0] == "String", "expected String, got '%s'", subst.type_arg_names[0]);
+	};
+}
+
+fn void substitute_star_projection_unchanged() @test {
+	@pool() {
+		// T0 with List<*> → no substitution (star projection)
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "List" };
+		receiver.type_arg_count = 1;
+		receiver.type_arg_names[0] = "*";
+
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "T0" };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.name == "T0", "star projection should not substitute");
+	};
+}
+
+fn void substitute_out_of_bounds_unchanged() @test {
+	@pool() {
+		// T2 with List<String> (only 1 type arg) → no substitution
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "List" };
+		receiver.type_arg_count = 1;
+		receiver.type_arg_names[0] = "String";
+
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "T2" };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.name == "T2", "out of bounds T2 should not substitute");
+	};
+}
+
+fn void substitute_non_placeholder_unchanged() @test {
+	@pool() {
+		// String return type should pass through unchanged
+		TypeRef receiver = { .kind = types::TypeKind.GENERIC, .name = "List" };
+		receiver.type_arg_count = 1;
+		receiver.type_arg_names[0] = "Int";
+
+		TypeRef result = { .kind = types::TypeKind.SIMPLE, .name = "String" };
+
+		TypeRef subst = types::substitute_type_params(result, receiver);
+		assert(subst.name == "String", "non-placeholder should be unchanged");
+	};
+}
