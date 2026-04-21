@@ -317,17 +317,17 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 	if (simple_name.len == 0) return;
 
 	// Try to parse Kotlin metadata for accurate type info
+	KmClass km_storage;
 	KmClass* km = null;
 	bool has_km = false;
 	if (info.has_kotlin_metadata) {
-		km = mem::new(KmClass);
+		km_storage = {};
+		km = &km_storage;
 		has_km = kotlin_metadata::parse_metadata(info, km);
 		if (!has_km) {
-			mem::free(km);
 			km = null;
 		}
 	}
-	defer { if (km != null) mem::free(km); }
 
 	// Add the class/interface itself as a symbol (if public)
 	if ((info.access_flags & classfile::ACC_PUBLIC) != 0) {

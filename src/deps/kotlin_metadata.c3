@@ -216,11 +216,13 @@ fn void skip_field(char[] data, usz* pos, int wire_type) {
 
 fn KmType parse_type(char[] data, usz start, usz end) {
 	KmType t = { .class_name_id = -1, .type_parameter_id = -1 };
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		switch (tag.field_number) {
 			case 1: // flags
@@ -229,11 +231,13 @@ fn KmType parse_type(char[] data, usz start, usz end) {
 			case 2: // argument (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (t.arg_count < MAX_TYPE_ARGS) {
-						parse_type_argument_into(data, pos, pos + (usz)len, &t, t.arg_count);
+						parse_type_argument_into(data, pos, sub_end, &t, t.arg_count);
 						t.arg_count++;
 					}
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
@@ -247,6 +251,7 @@ fn KmType parse_type(char[] data, usz start, usz end) {
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
 					usz ann_end = pos + (usz)len;
+					if (ann_end > end) ann_end = end;
 					if (check_extension_annotation(data, pos, ann_end)) {
 						t.has_extension_annotation = true;
 					}
@@ -269,11 +274,13 @@ fn void parse_type_argument_into(char[] data, usz start, usz end, KmType* parent
 	parent.arg_projections[arg_idx] = 2; // default INV
 	parent.arg_class_ids[arg_idx] = -1;
 	parent.arg_nullable[arg_idx] = false;
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		switch (tag.field_number) {
 			case 1: // projection
@@ -281,10 +288,12 @@ fn void parse_type_argument_into(char[] data, usz start, usz end, KmType* parent
 			case 2: // type (length-delimited) — extract class_name_id and nullable
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
-					KmType inner = parse_type(data, pos, pos + (usz)len);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					KmType inner = parse_type(data, pos, sub_end);
 					parent.arg_class_ids[arg_idx] = inner.class_name_id;
 					parent.arg_nullable[arg_idx] = inner.nullable;
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
@@ -300,10 +309,12 @@ fn void parse_type_argument_into(char[] data, usz start, usz end, KmType* parent
  * We store this and check against "ExtensionFunctionType" during resolution.
  */
 fn bool check_extension_annotation(char[] data, usz start, usz end) {
+	if (end > data.len) end = data.len;
 	usz pos = start;
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 		if (tag.field_number == 1 && tag.wire_type == WIRE_VARINT) {
 			// This is the annotation class ID — we'll need to resolve it later
 			// For now, store true and let the caller verify
@@ -319,11 +330,13 @@ fn bool check_extension_annotation(char[] data, usz start, usz end) {
 
 fn KmValueParam parse_value_parameter(char[] data, usz start, usz end) {
 	KmValueParam vp = { .name_id = -1 };
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		switch (tag.field_number) {
 			case 2: // name (varint, string index)
@@ -331,8 +344,10 @@ fn KmValueParam parse_value_parameter(char[] data, usz start, usz end) {
 			case 3: // type (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
-					vp.type = parse_type(data, pos, pos + (usz)len);
-					pos += (usz)len;
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					vp.type = parse_type(data, pos, sub_end);
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
@@ -348,11 +363,13 @@ fn KmValueParam parse_value_parameter(char[] data, usz start, usz end) {
 
 fn KmFunction parse_function(char[] data, usz start, usz end) {
 	KmFunction f = { .name_id = -1, .return_type_id = -1, .receiver_type_id = -1 };
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		switch (tag.field_number) {
 			case 9: // flags
@@ -362,29 +379,35 @@ fn KmFunction parse_function(char[] data, usz start, usz end) {
 			case 3: // return_type (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
-					f.return_type = parse_type(data, pos, pos + (usz)len);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					f.return_type = parse_type(data, pos, sub_end);
 					f.has_return_type = true;
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
 			case 5: // receiver_type (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
-					f.receiver_type = parse_type(data, pos, pos + (usz)len);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					f.receiver_type = parse_type(data, pos, sub_end);
 					f.has_receiver_type = true;
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
 			case 6: // value_parameter (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (f.param_count < MAX_PARAMS) {
-						f.params[f.param_count] = parse_value_parameter(data, pos, pos + (usz)len);
+						f.params[f.param_count] = parse_value_parameter(data, pos, sub_end);
 						f.param_count++;
 					}
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
@@ -406,11 +429,13 @@ fn KmFunction parse_function(char[] data, usz start, usz end) {
 
 fn KmProperty parse_property(char[] data, usz start, usz end) {
 	KmProperty p = { .name_id = -1, .return_type_id = -1, .receiver_type_id = -1 };
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		switch (tag.field_number) {
 			case 11: // flags
@@ -420,18 +445,22 @@ fn KmProperty parse_property(char[] data, usz start, usz end) {
 			case 3: // return_type (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
-					p.return_type = parse_type(data, pos, pos + (usz)len);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					p.return_type = parse_type(data, pos, sub_end);
 					p.has_return_type = true;
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
 			case 5: // receiver_type (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
-					p.receiver_type = parse_type(data, pos, pos + (usz)len);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					p.receiver_type = parse_type(data, pos, sub_end);
 					p.has_receiver_type = true;
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
@@ -452,21 +481,25 @@ fn KmProperty parse_property(char[] data, usz start, usz end) {
 // ── TypeTable parser ───────────────────────────────────────────────
 
 fn void parse_type_table(char[] data, usz start, usz end, KmTypeTable* tt) {
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		switch (tag.field_number) {
 			case 1: // type (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, &pos);
+					usz sub_end = pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (tt.type_count < 64) {
-						tt.types[tt.type_count] = parse_type(data, pos, pos + (usz)len);
+						tt.types[tt.type_count] = parse_type(data, pos, sub_end);
 						tt.type_count++;
 					}
-					pos += (usz)len;
+					pos = sub_end;
 				} else {
 					skip_field(data, &pos, tag.wire_type);
 				}
@@ -481,16 +514,19 @@ fn void parse_type_table(char[] data, usz start, usz end, KmTypeTable* tt) {
 // ── QualifiedNameTable parser ──────────────────────────────────────
 
 fn void parse_qualified_name_table(char[] data, usz start, usz end, KmClass* out) {
+	if (end > data.len) end = data.len;
 	usz pos = start;
 
 	while (pos < end) {
+		usz prev = pos;
 		FieldTag tag = read_tag(data, &pos);
-		if (pos > end) break;
+		if (pos > end || pos == prev) break;
 
 		if (tag.field_number == 1 && tag.wire_type == WIRE_LENGTH_DELIMITED) {
 			// QualifiedName entry
 			ulong len = read_varint(data, &pos);
 			usz entry_end = pos + (usz)len;
+			if (entry_end > end) entry_end = end;
 
 			if (out.qn_count < MAX_QN_ENTRIES) {
 				QnEntry* entry = &out.qualified_names[out.qn_count];
@@ -500,8 +536,9 @@ fn void parse_qualified_name_table(char[] data, usz start, usz end, KmClass* out
 
 				usz epos = pos;
 				while (epos < entry_end) {
+					usz eprev = epos;
 					FieldTag etag = read_tag(data, &epos);
-					if (epos > entry_end) break;
+					if (epos > entry_end || epos == eprev) break;
 					switch (etag.field_number) {
 						case 1: // short_name (varint, string index)
 							entry.short_name = (int)read_varint(data, &epos);
@@ -528,8 +565,9 @@ fn bool parse_class_message(char[] data, usz* pos, KmClass* out) {
 	usz end = data.len;
 
 	while (*pos < end) {
+		usz prev = *pos;
 		FieldTag tag = read_tag(data, pos);
-		if (*pos > end) break;
+		if (*pos > end || *pos == prev) break;
 
 		switch (tag.field_number) {
 			case 1: // flags
@@ -539,11 +577,13 @@ fn bool parse_class_message(char[] data, usz* pos, KmClass* out) {
 			case 6: // supertype (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (out.supertype_count < MAX_SUPERTYPES) {
-						out.supertypes[out.supertype_count] = parse_type(data, *pos, *pos + (usz)len);
+						out.supertypes[out.supertype_count] = parse_type(data, *pos, sub_end);
 						out.supertype_count++;
 					}
-					*pos += (usz)len;
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
@@ -551,6 +591,7 @@ fn bool parse_class_message(char[] data, usz* pos, KmClass* out) {
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
 					usz packed_end = *pos + (usz)len;
+					if (packed_end > end) packed_end = end;
 					while (*pos < packed_end && out.supertype_count < MAX_SUPERTYPES) {
 						int id = (int)read_varint(data, pos);
 						out.supertypes[out.supertype_count].class_name_id = id;
@@ -570,38 +611,46 @@ fn bool parse_class_message(char[] data, usz* pos, KmClass* out) {
 			case 9: // function (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (out.function_count < MAX_FUNCTIONS) {
-						out.functions[out.function_count] = parse_function(data, *pos, *pos + (usz)len);
+						out.functions[out.function_count] = parse_function(data, *pos, sub_end);
 						out.function_count++;
 					}
-					*pos += (usz)len;
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
 			case 10: // property (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (out.property_count < MAX_PROPERTIES) {
-						out.properties[out.property_count] = parse_property(data, *pos, *pos + (usz)len);
+						out.properties[out.property_count] = parse_property(data, *pos, sub_end);
 						out.property_count++;
 					}
-					*pos += (usz)len;
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
 			case 30: // type_table (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
-					parse_type_table(data, *pos, *pos + (usz)len, &out.type_table);
-					*pos += (usz)len;
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					parse_type_table(data, *pos, sub_end, &out.type_table);
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
 			case 31: // qualified_name_table (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
-					parse_qualified_name_table(data, *pos, *pos + (usz)len, out);
-					*pos += (usz)len;
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					parse_qualified_name_table(data, *pos, sub_end, out);
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
@@ -622,45 +671,54 @@ fn bool parse_package_message(char[] data, usz* pos, KmClass* out) {
 	usz end = data.len;
 
 	while (*pos < end) {
+		usz prev = *pos;
 		FieldTag tag = read_tag(data, pos);
-		if (*pos > end) break;
+		if (*pos > end || *pos == prev) break;
 
 		switch (tag.field_number) {
 			case 3: // function (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (out.function_count < MAX_FUNCTIONS) {
-						out.functions[out.function_count] = parse_function(data, *pos, *pos + (usz)len);
+						out.functions[out.function_count] = parse_function(data, *pos, sub_end);
 						out.function_count++;
 					}
-					*pos += (usz)len;
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
 			case 4: // property (length-delimited, repeated)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
 					if (out.property_count < MAX_PROPERTIES) {
-						out.properties[out.property_count] = parse_property(data, *pos, *pos + (usz)len);
+						out.properties[out.property_count] = parse_property(data, *pos, sub_end);
 						out.property_count++;
 					}
-					*pos += (usz)len;
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
 			case 30: // type_table (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
-					parse_type_table(data, *pos, *pos + (usz)len, &out.type_table);
-					*pos += (usz)len;
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					parse_type_table(data, *pos, sub_end, &out.type_table);
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}
 			case 31: // qualified_name_table (length-delimited)
 				if (tag.wire_type == WIRE_LENGTH_DELIMITED) {
 					ulong len = read_varint(data, pos);
-					parse_qualified_name_table(data, *pos, *pos + (usz)len, out);
-					*pos += (usz)len;
+					usz sub_end = *pos + (usz)len;
+					if (sub_end > end) sub_end = end;
+					parse_qualified_name_table(data, *pos, sub_end, out);
+					*pos = sub_end;
 				} else {
 					skip_field(data, pos, tag.wire_type);
 				}

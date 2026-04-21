@@ -381,3 +381,59 @@ fn void test_resolve_string() {
 	assert(kotlin_metadata::resolve_string(-1, &d2, 3) == "");
 	assert(kotlin_metadata::resolve_string(5, &d2, 3) == "");
 }
+
+// ── Truncated / malformed metadata (infinite loop regression) ──────
+
+fn void test_parse_function_end_beyond_data() {
+	// end > data.len: must not infinite-loop
+	char[] data = { 0x10, 0x05 };
+	KmFunction f = kotlin_metadata::parse_function(data, 0, 100);
+	assert(f.name_id == 5);
+}
+
+fn void test_parse_type_end_beyond_data() {
+	char[] data = { 0x30, 0x02 };
+	KmType t = kotlin_metadata::parse_type(data, 0, 100);
+	assert(t.class_name_id == 2);
+}
+
+fn void test_parse_property_end_beyond_data() {
+	char[] data = { 0x10, 0x03 };
+	KmProperty p = kotlin_metadata::parse_property(data, 0, 100);
+	assert(p.name_id == 3);
+}
+
+fn void test_parse_function_truncated_submessage() {
+	// Length-delimited field claims 20 bytes but only 2 remain
+	char[] data = { 0x1a, 0x14, 0x30, 0x02 };
+	KmFunction f = kotlin_metadata::parse_function(data, 0, data.len);
+	assert(f.has_return_type);
+	assert(f.return_type.class_name_id == 2);
+}
+
+fn void test_parse_type_table_end_beyond_data() {
+	char[] data = { 0x0a, 0x02, 0x30, 0x05 };
+	KmTypeTable tt = {};
+	tt.first_nullable = -1;
+	kotlin_metadata::parse_type_table(data, 0, 100, &tt);
+	assert(tt.type_count == 1);
+	assert(tt.types[0].class_name_id == 5);
+}
+
+fn void test_parse_qn_table_end_beyond_data() {
+	char[] data = { 0x0a, 0x04, 0x08, 0x00, 0x18, 0x01 };
+	KmClass* km = mem::new(KmClass);
+	*km = {};
+	kotlin_metadata::parse_qualified_name_table(data, 0, 100, km);
+	assert(km.qn_count == 1);
+	assert(km.qualified_names[0].short_name == 0);
+	mem::free(km);
+}
+
+fn void test_read_varint_at_end_of_data() {
+	char[] data = {};
+	usz pos = 0;
+	ulong val = kotlin_metadata::read_varint(data, &pos);
+	assert(val == 0);
+	assert(pos == 0);
+}
