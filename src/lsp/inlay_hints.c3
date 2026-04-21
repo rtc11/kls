@@ -60,6 +60,10 @@ fn Object*? handle_inlay_hints(DocumentStore* store, WorkspaceIndex* workspace, 
 	// Collect implicit `it` hints for lambdas without explicit params
 	collect_lambda_it_hints(hints, pr, doc.content, start_line, end_line);
 
+	// Collect type hints for explicit lambda params lacking annotations:
+	//   { reply -> ... }   →   { reply: StatusReply -> ... }
+	collect_lambda_param_type_hints(hints, pr, ti, workspace, uri, doc.content, start_line, end_line);
+
 	// Collect chain type hints for long DOT_EXPR chains
 	collect_chain_type_hints(hints, pr, ti, doc.content, start_line, end_line);
 
@@ -1087,6 +1091,316 @@ fn bool is_descendant_of(ParseResult* pr, uint child_idx, uint ancestor_idx) {
 		current = parent;
 	}
 	return false;
+}
+
+// ── Lambda explicit-param type hints ──────────────────────────────
+
+/**
+ * Emit `: Type` hints for explicit lambda parameters that lack type
+ * annotations. e.g. `.map { reply -> ... }` shows `reply: StatusReply`.
+ *
+ * Strategy: for each LAMBDA_EXPR with explicit PARAM children that have
+ * no `type_text`, walk up to the enclosing CALL_EXPR. Resolve the callee
+ * (in-file AST first, then workspace MemberDecl). The lambda corresponds
+ * to a function-typed parameter on the callee; parse that function type
+ * (e.g. `(StatusReply) -> String`) and emit a hint per lambda param.
+ */
+fn void collect_lambda_param_type_hints(Object* hints, ParseResult* pr, TypeInfo* ti,
+	WorkspaceIndex* workspace, String current_uri, String content,
+	uint start_line, uint end_line) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.kind != LAMBDA_EXPR) continue;
+
+		// Filter by range
+		if (node.start_line > end_line || node.end_line < start_line) continue;
+
+		// Find PARAM children with no explicit type annotation
+		uint[8] param_indices;
+		uint param_count = 0;
+		for (uint j = 0; j < pr.node_count && param_count < 8; j++) {
+			if (pr.nodes[j].parent != i) continue;
+			if (pr.nodes[j].kind != PARAM) continue;
+			if (pr.nodes[j].name.len == 0) continue;
+			if (pr.nodes[j].type_text.len > 0) continue; // already has annotation
+			param_indices[param_count++] = j;
+		}
+
+		if (param_count == 0) continue;
+
+		// Walk up to find enclosing CALL_EXPR (lambda is either trailing-lambda
+		// child of CALL_EXPR, or argument inside parens of CALL_EXPR).
+		uint call_idx = ast::NO_PARENT;
+		uint cur = i;
+		while (cur < pr.node_count) {
+			uint parent = pr.nodes[cur].parent;
+			if (parent == ast::NO_PARENT || parent >= pr.node_count) break;
+			if (pr.nodes[parent].kind == CALL_EXPR) {
+				call_idx = parent;
+				break;
+			}
+			cur = parent;
+		}
+		if (call_idx == ast::NO_PARENT) continue;
+
+		String method_name = pr.nodes[call_idx].name;
+		if (method_name.len == 0) continue;
+
+		// Resolve callee → get function-type text of the parameter the lambda
+		// corresponds to. For trailing lambda, that's the last param. The
+		// helper returns the full function-type string.
+		String func_type = resolve_lambda_callee_param_type(pr, ti, workspace,
+			current_uri, call_idx, method_name);
+		if (func_type.len == 0) continue;
+
+		// Parse function type "(A, B, C) -> R" → param types
+		String[8] arg_types;
+		uint arg_count = parse_function_type_params(func_type, &arg_types);
+		if (arg_count == 0) continue;
+
+		// Emit a type hint after each lambda PARAM name
+		for (uint p = 0; p < param_count && p < arg_count; p++) {
+			AstNode* param = &pr.nodes[param_indices[p]];
+			String t = arg_types[p];
+			if (t.len == 0) continue;
+			if (param.name_line < start_line || param.name_line > end_line) continue;
+
+			DString label;
+			label.tinit();
+			label.appendf(": %s", t);
+
+			Object* hint = object::new_obj(tmem);
+			Object* position = object::new_obj(tmem);
+			position.set("line", (int)param.name_line);
+			position.set("character", (int)(param.name_col + param.name_len));
+			hint.set("position", position);
+			hint.set("label", label.str_view());
+			hint.set("kind", HINT_KIND_TYPE);
+			hint.set("paddingLeft", true);
+			hints.push(hint);
+		}
+	}
+}
+
+/**
+ * Resolve the function-type text of the parameter that a trailing lambda
+ * occupies on the called function. Tries in-file AST first, then workspace
+ * member cache (extension functions and top-level functions across files).
+ *
+ * Returns an empty string if the callee or its function-type param can't
+ * be resolved.
+ */
+fn String resolve_lambda_callee_param_type(ParseResult* pr, TypeInfo* ti,
+	WorkspaceIndex* workspace, String current_uri, uint call_idx, String method_name) {
+	// 1. In-file AST lookup
+	uint name_offset = pr.nodes[call_idx].name_offset;
+	if (try decl = definition::find_definition_in_ast(pr, method_name, name_offset, true, ti)) {
+		if (decl.kind == FUN_DECL) {
+			// Last PARAM whose type_text looks like a function type
+			uint decl_idx = ast::node_index(pr, decl);
+			String last_func = "";
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != decl_idx) continue;
+				if (pr.nodes[k].kind != PARAM) continue;
+				String t = pr.nodes[k].type_text;
+				if (is_function_type(t)) last_func = t;
+			}
+			if (last_func.len > 0) return last_func;
+		}
+	}
+
+	// 2. Workspace lookup: check member_cache for any receiver type that has
+	// this extension method, and top-level functions via name_index.
+	if (workspace == null) return "";
+
+	// Try direct name lookup — finds top-level functions and extension
+	// functions cached across the workspace.
+	if (try indices = workspace.lookup_by_name(method_name)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			usz sym_idx = (*indices)[i];
+			WorkspaceSymbol* sym = workspace.get_symbol(sym_idx);
+			// Look up MemberDecl for this symbol in member_cache
+			String key = sym.receiver.len > 0 ? sym.receiver : "";
+			if (key.len == 0) continue;
+			if (try members = workspace.lookup_members(key)) {
+				for (usz m = 0; m < members.len(); m++) {
+					MemberDecl* md = &(*members)[m];
+					if (md.name != method_name) continue;
+					// Find last function-type param
+					for (usz p = md.param_count; p > 0; p--) {
+						String t = md.param_types[p - 1];
+						if (is_function_type(t)) return t;
+					}
+				}
+			}
+		}
+	}
+
+	// Also scan all member_cache entries for the method (covers cases where
+	// receiver field on WorkspaceSymbol is empty but member_cache has it).
+	@pool() {
+		foreach (key : workspace.member_cache.tkeys()) {
+			if (try members = workspace.member_cache.get_ref(key)) {
+				for (usz m = 0; m < members.len(); m++) {
+					MemberDecl* md = &(*members)[m];
+					if (md.name != method_name) continue;
+					for (usz p = md.param_count; p > 0; p--) {
+						String t = md.param_types[p - 1];
+						if (is_function_type(t)) return t;
+					}
+				}
+			}
+		};
+	};
+
+	return "";
+}
+
+/**
+ * Quick check: does a type string look like a function type, i.e. contains
+ * "->" outside of nested generics? (Function types in Kotlin look like
+ * "(A, B) -> R" or "Receiver.(A) -> R" or "suspend (A) -> R".)
+ */
+fn bool is_function_type(String s) {
+	int angle = 0;
+	int paren = 0;
+	for (usz i = 0; i + 1 < s.len; i++) {
+		char c = s[i];
+		if (c == '<') { angle++; }
+		else if (c == '>') { if (angle > 0) { angle--; } }
+		else if (c == '(') { paren++; }
+		else if (c == ')') { if (paren > 0) { paren--; } }
+		else if (c == '-' && s[i + 1] == '>' && angle == 0 && paren == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Parse the parameter list of a function type into individual type strings.
+ * Examples:
+ *   "(StatusReply) -> String"        → ["StatusReply"]
+ *   "(K, V) -> Boolean"               → ["K", "V"]
+ *   "Receiver.(A, B) -> Unit"         → ["A", "B"]
+ *   "suspend (Foo<Int, Int>) -> Bar" → ["Foo<Int, Int>"]
+ *
+ * Returns the number of types extracted (capped at the slot count of the
+ * provided buffer).
+ */
+fn uint parse_function_type_params(String sig, String[8]* out) {
+	// Find the parameter list: outermost "(...)" that precedes "->"
+	usz arrow_pos = 0;
+	bool found_arrow = false;
+	int angle = 0;
+	int paren = 0;
+	for (usz i = 0; i + 1 < sig.len; i++) {
+		char c = sig[i];
+		if (c == '<') { angle++; }
+		else if (c == '>') { if (angle > 0) { angle--; } }
+		else if (c == '(') { paren++; }
+		else if (c == ')') { if (paren > 0) { paren--; } }
+		else if (c == '-' && sig[i + 1] == '>' && angle == 0 && paren == 0) {
+			arrow_pos = i;
+			found_arrow = true;
+			break;
+		}
+	}
+	if (!found_arrow) return 0;
+
+	// Walk back from arrow to find the matching "(...)" before it
+	usz close_paren = 0;
+	bool found_close = false;
+	for (usz i = arrow_pos; i > 0; i--) {
+		if (sig[i - 1] == ')') {
+			close_paren = i - 1;
+			found_close = true;
+			break;
+		}
+		if (sig[i - 1] != ' ' && sig[i - 1] != '\t') {
+			// Non-whitespace before arrow — malformed for our purposes
+			return 0;
+		}
+	}
+	if (!found_close) return 0;
+
+	// Find matching open paren
+	int depth = 1;
+	usz open_paren = 0;
+	bool found_open = false;
+	for (usz i = close_paren; i > 0; i--) {
+		char c = sig[i - 1];
+		if (c == ')') { depth++; }
+		else if (c == '(') {
+			depth--;
+			if (depth == 0) {
+				open_paren = i - 1;
+				found_open = true;
+				break;
+			}
+		}
+	}
+	if (!found_open) return 0;
+
+	String params = sig[open_paren + 1..close_paren - 1];
+
+	// Split on top-level commas
+	uint count = 0;
+	usz start = 0;
+	angle = 0;
+	paren = 0;
+	for (usz i = 0; i < params.len; i++) {
+		char c = params[i];
+		if (c == '<') { angle++; }
+		else if (c == '>') { if (angle > 0) { angle--; } }
+		else if (c == '(') { paren++; }
+		else if (c == ')') { if (paren > 0) { paren--; } }
+		else if (c == ',' && angle == 0 && paren == 0) {
+			if (count < 8) {
+				(*out)[count] = strip_param_name(trim_ws(params[start..i - 1]));
+				count++;
+			}
+			start = i + 1;
+		}
+	}
+	if (start < params.len && count < 8) {
+		(*out)[count] = strip_param_name(trim_ws(params[start..params.len - 1]));
+		count++;
+	}
+	return count;
+}
+
+/**
+ * Trim leading/trailing ASCII whitespace from a slice.
+ */
+fn String trim_ws(String s) {
+	usz a = 0;
+	usz b = s.len;
+	while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) a++;
+	while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\n' || s[b - 1] == '\r')) b--;
+	if (a >= b) return "";
+	return s[a..b - 1];
+}
+
+/**
+ * Drop a "name:" prefix from a function-type parameter slot.
+ * Kotlin function types may be written as `(name: Type)` — we want just `Type`.
+ * Skips a colon at top-level (no nested generics/parens).
+ */
+fn String strip_param_name(String s) {
+	int angle = 0;
+	int paren = 0;
+	for (usz i = 0; i < s.len; i++) {
+		char c = s[i];
+		if (c == '<') { angle++; }
+		else if (c == '>') { if (angle > 0) { angle--; } }
+		else if (c == '(') { paren++; }
+		else if (c == ')') { if (paren > 0) { paren--; } }
+		else if (c == ':' && angle == 0 && paren == 0) {
+			return trim_ws(s[i + 1..s.len - 1]);
+		}
+	}
+	return s;
 }
 
 // ── Utility helpers ────────────────────────────────────────────────

@@ -1049,3 +1049,100 @@ fn void smart_cast_hint_not_shown_for_negated_is() @test {
 		}
 	};
 }
+
+// ── Lambda explicit-param type hints ─────────────────────────────
+
+fn void lambda_param_type_hint_in_file_callee() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun apply(transform: (String) -> Int) {}` "\n"
+			`fun main() {` "\n"
+			`    apply { reply -> reply.length }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
+		assert(result != null, "expected non-null result");
+
+		bool found_reply = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label == ": String") {
+				found_reply = true;
+				break;
+			}
+		}
+		assert(found_reply, "expected ': String' type hint for lambda param 'reply'");
+	};
+}
+
+fn void lambda_param_type_hint_skipped_when_annotated() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun apply(transform: (String) -> Int) {}` "\n"
+			`fun main() {` "\n"
+			`    apply { reply: String -> reply.length }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
+
+		// Param has explicit ": String" annotation → no hint emitted for it
+		if (result != null) {
+			for (usz i = 0; i < result.get_len(); i++) {
+				if (get_hint_kind(result, i) != 1) continue;
+				String label = get_hint_label(result, i);
+				int line = get_hint_line(result, i);
+				// Line 2 is the lambda line; no type hint of ": String" should be there
+				assert(!(line == 2 && label == ": String"),
+					"hint should be suppressed for explicitly typed lambda param");
+			}
+		}
+	};
+}
+
+fn void lambda_param_type_hint_strips_param_name_in_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		// Function-type with named arg `(reply: StatusReply) -> String`
+		String content =
+			`class StatusReply` "\n"
+			`fun build(handler: (reply: StatusReply) -> String) {}` "\n"
+			`fun main() {` "\n"
+			`    build { reply -> reply.toString() }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label == ": StatusReply") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected ': StatusReply' hint, name 'reply:' should be stripped from sig");
+	};
+}

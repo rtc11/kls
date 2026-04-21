@@ -767,6 +767,14 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 				Object* import_result = find_dot_member_by_import(&workspace.dep_index, pr, tok.text, current_uri);
 				if (import_result != null) return import_result;
 			}
+			// Last resort: any workspace extension by name, ignoring imports.
+			// Helps when extension is reachable in workspace but not yet imported,
+			// or imported via a wildcard the import map didn't expand.
+			if (workspace != null) {
+				if (try result = find_extension_by_name_unimported(workspace, tok.text, current_uri)) {
+					return result;
+				}
+			}
 			return NOT_DOT_MEMBER~;
 		}
 
@@ -797,6 +805,13 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 			if (try result = find_extension_by_receiver_and_name(workspace, type_name, member_name, current_uri, pr)) {
 				return result;
 			}
+			// Receiver-name mismatch fallback: try by-name only (still
+			// import-filtered). Handles cases where the resolved receiver
+			// type differs from the declared extension receiver due to
+			// supertype/generic type relationships.
+			if (try result = find_extension_by_name(workspace, member_name, current_uri, pr)) {
+				return result;
+			}
 		}
 
 		// Check if this is a known scope function (apply, let, also, run, etc.)
@@ -813,6 +828,17 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 			// Even if sources aren't available, return null rather than
 			// falling through to the wrong definition
 			return null;
+		}
+
+		// Last resort: any workspace extension by name, ignoring imports.
+		// Handles workspace extensions where the resolved receiver type
+		// doesn't match the declared receiver (e.g. generics, supertypes)
+		// AND the extension isn't imported by simple name (e.g. wildcard
+		// import that the import map didn't expand).
+		if (workspace != null) {
+			if (try result = find_extension_by_name_unimported(workspace, member_name, current_uri)) {
+				return result;
+			}
 		}
 
 		break;
@@ -2355,6 +2381,35 @@ fn Object*? find_extension_by_name(WorkspaceIndex* workspace, String member_name
 		}
 	}
 
+	return NO_EXTENSION_FOUND~;
+}
+
+/**
+ * Permissive last-resort: locate any workspace extension function matching
+ * the member name, ignoring import visibility. Only used when no other
+ * lookup matched. Lets users navigate to extensions even when the import
+ * hasn't been added yet (a common editing situation), and avoids dead-end
+ * "no definition" responses for legitimate workspace symbols. Still respects
+ * module visibility so multi-module projects don't surface unreachable code.
+ */
+fn Object*? find_extension_by_name_unimported(WorkspaceIndex* workspace, String member_name, String current_uri) {
+	if (try indices = workspace.lookup_by_name(member_name)) {
+		// Prefer non-private symbols
+		WorkspaceSymbol* fallback = null;
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.uri == current_uri) continue;
+			if (sym.kind != symbols::SymbolKind.FUNCTION && sym.kind != symbols::SymbolKind.PROPERTY) continue;
+			if (sym.receiver.len == 0) continue;
+			if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
+			if (sym.is_private) {
+				if (fallback == null) fallback = sym;
+				continue;
+			}
+			return build_location_from_workspace_symbol(sym);
+		}
+		if (fallback != null) return build_location_from_workspace_symbol(fallback);
+	}
 	return NO_EXTENSION_FOUND~;
 }
 
