@@ -993,6 +993,10 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		current = scope.parent;
 	}
 
+	// Lambda receiver: resolve as member of lambda's implicit `this` receiver
+	TypeRef lambda_recv_member = resolve_lambda_receiver_member(pr, info, idx, node.name);
+	if (lambda_recv_member.kind != UNKNOWN) return lambda_recv_member;
+
 	// Cross-file: query workspace for class/object types
 	if (g_workspace != null) {
 		if (try indices = g_workspace.lookup_by_name(node.name)) {
@@ -1096,6 +1100,183 @@ fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+// ── Lambda receiver type inference ─────────────────────────────────
+
+/**
+ * Check if a method name is a scope function where the lambda receiver
+ * is the call receiver (apply, run) or first argument (with, buildString, etc).
+ */
+fn bool is_receiver_scope_function(String name) {
+	return name == "apply" || name == "run" ||
+	       name == "with" || name == "buildString" || name == "buildList" ||
+	       name == "buildSet" || name == "buildMap";
+}
+
+/**
+ * Resolve a name as a member of the lambda receiver type.
+ * For scope functions (apply/run), the receiver is the call's receiver.
+ * For dep functions with receiver-typed lambda params, extract from signature.
+ */
+fn TypeRef resolve_lambda_receiver_member(ParseResult* pr, TypeInfo* info, uint name_idx, String member_name) {
+	// Walk up to find enclosing LAMBDA_EXPR
+	uint lambda_idx = ast::NO_PARENT;
+	uint current = name_idx;
+	while (current != 0 && current != ast::NO_PARENT) {
+		uint parent = pr.nodes[current].parent;
+		if (parent == ast::NO_PARENT) break;
+		if (pr.nodes[parent].kind == LAMBDA_EXPR) {
+			lambda_idx = parent;
+			break;
+		}
+		current = parent;
+	}
+	if (lambda_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	// Find enclosing CALL_EXPR
+	uint call_idx = ast::NO_PARENT;
+	uint parent_of_lambda = pr.nodes[lambda_idx].parent;
+	if (parent_of_lambda != ast::NO_PARENT) {
+		if (pr.nodes[parent_of_lambda].kind == CALL_EXPR) {
+			call_idx = parent_of_lambda;
+		}
+	}
+	if (call_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	String method_name = pr.nodes[call_idx].name;
+	if (method_name.len == 0) return TYPE_UNKNOWN;
+
+	TypeRef receiver_type = TYPE_UNKNOWN;
+
+	// Scope functions: lambda receiver = call receiver
+	if (is_receiver_scope_function(method_name)) {
+		receiver_type = find_call_receiver_type(pr, info, call_idx);
+		if (receiver_type.nullable && is_safe_call(pr, call_idx)) {
+			receiver_type.nullable = false;
+		}
+	}
+
+	// If we have a receiver type, resolve the member on it
+	if (receiver_type.kind != UNKNOWN && g_workspace != null && g_workspace.dep_index.initialized) {
+		TypeRef result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, member_name, pr);
+		if (result.kind != UNKNOWN) return result;
+
+		// Also try workspace (cross-file) member lookup
+		if (try members = g_workspace.lookup_members(receiver_type.name)) {
+			for (usz i = 0; i < members.len(); i++) {
+				workspace::MemberDecl* m = &(*members)[i];
+				if (m.name == member_name) {
+					if (m.type_text.len > 0) {
+						return parse_type_text(m.type_text);
+					}
+					return { .kind = SIMPLE, .name = m.name };
+				}
+			}
+		}
+	}
+
+	// For dep function calls: check if lambda param has receiver type in signature
+	if (receiver_type.kind == UNKNOWN && g_workspace != null && g_workspace.dep_index.initialized) {
+		TypeRef lambda_recv = resolve_dep_lambda_receiver(&g_workspace.dep_index, pr, method_name);
+		if (lambda_recv.kind != UNKNOWN) {
+			TypeRef result = resolve_dep_member_type(&g_workspace.dep_index, lambda_recv, member_name, pr);
+			if (result.kind != UNKNOWN) return result;
+		}
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Look up a dep function by name and extract the receiver type from its
+ * last parameter if it's a function type with receiver (e.g., Route.() -> Unit).
+ */
+fn TypeRef resolve_dep_lambda_receiver(DependencyIndex* dep_index, ParseResult* pr, String method_name) {
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(method_name, &matches);
+	if (count == 0) return TYPE_UNKNOWN;
+
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].kind != DEP_METHOD) continue;
+		TypeRef recv = extract_lambda_receiver_from_sig(matches[i].signature);
+		if (recv.kind != UNKNOWN) return recv;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Extract the lambda receiver type from a function signature string.
+ * Looks for the last function-type parameter with a receiver.
+ * E.g., "fun get(path: String, body: PipelineContext.() -> Unit): Route"
+ *   -> returns TypeRef{PipelineContext}
+ */
+fn TypeRef extract_lambda_receiver_from_sig(String sig) {
+	// Find the parameter list between outermost ( and )
+	usz paren_start = 0;
+	usz paren_end = 0;
+	int depth = 0;
+	for (usz i = 0; i < sig.len; i++) {
+		if (sig[i] == '(' && depth == 0) {
+			paren_start = i + 1;
+			depth = 1;
+		} else if (sig[i] == '(') {
+			depth++;
+		} else if (sig[i] == ')') {
+			depth--;
+			if (depth == 0) {
+				paren_end = i;
+				break;
+			}
+		}
+	}
+	if (paren_end == 0) return TYPE_UNKNOWN;
+
+	String params = sig[paren_start..paren_end - 1];
+
+	// Find ".(" pattern — indicates a receiver function type
+	// Walk from end to find last occurrence
+	for (usz i = params.len; i > 1; i--) {
+		if (params[i - 1] == '(' && i >= 2 && params[i - 2] == '.') {
+			usz dot_pos = i - 2;
+			// Walk back to find start of type name
+			usz name_end = dot_pos;
+			usz name_start = dot_pos;
+			int gen_depth = 0;
+			while (name_start > 0) {
+				name_start--;
+				char c = params[name_start];
+				if (c == '>') {
+					gen_depth++;
+				} else if (c == '<') {
+					gen_depth--;
+				} else if (gen_depth == 0 && !is_type_name_char(c)) {
+					name_start++;
+					break;
+				}
+			}
+			if (name_start < name_end) {
+				String recv_name = params[name_start..name_end - 1];
+				// Strip generic params
+				for (usz j = 0; j < recv_name.len; j++) {
+					if (recv_name[j] == '<') {
+						recv_name = recv_name[:j];
+						break;
+					}
+				}
+				if (recv_name.len > 0) {
+					return { .kind = SIMPLE, .name = recv_name };
+				}
+			}
+		}
+	}
+
+	return TYPE_UNKNOWN;
+}
+
+fn bool is_type_name_char(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_' || c == '.';
 }
 
 /**

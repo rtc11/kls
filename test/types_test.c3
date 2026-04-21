@@ -3334,3 +3334,49 @@ fn void dep_member_type_no_supertype_match() @test {
 		assert(result.kind == types::TypeKind.UNKNOWN, "expected UNKNOWN for nonexistent member");
 	};
 }
+
+// ── Lambda receiver type extraction ────────────────────────────────
+
+fn void is_receiver_scope_fn_apply() @test {
+	assert(types::is_receiver_scope_function("apply"));
+	assert(types::is_receiver_scope_function("run"));
+	assert(types::is_receiver_scope_function("buildString"));
+	assert(!types::is_receiver_scope_function("let"));
+	assert(!types::is_receiver_scope_function("map"));
+}
+
+fn void extract_lambda_receiver_simple() @test {
+	@pool() {
+		// fun get(path: String, body: PipelineContext.() -> Unit): Route
+		TypeRef recv = types::extract_lambda_receiver_from_sig(
+			"fun get(path: String, body: PipelineContext.() -> Unit): Route");
+		assert(recv.kind == types::TypeKind.SIMPLE, "expected SIMPLE, got %d", (int)recv.kind);
+		assert(recv.name == "PipelineContext", "expected PipelineContext, got '%s'", recv.name);
+	};
+}
+
+fn void extract_lambda_receiver_with_generics() @test {
+	@pool() {
+		// fun get(body: PipelineContext<Unit, ApplicationCall>.() -> Unit): Route
+		TypeRef recv = types::extract_lambda_receiver_from_sig(
+			"fun get(body: PipelineContext<Unit, ApplicationCall>.() -> Unit): Route");
+		assert(recv.kind == types::TypeKind.SIMPLE, "expected SIMPLE, got %d", (int)recv.kind);
+		assert(recv.name == "PipelineContext", "expected PipelineContext, got '%s'", recv.name);
+	};
+}
+
+fn void extract_lambda_receiver_none() @test {
+	@pool() {
+		// No receiver type: fun filter(predicate: (T) -> Boolean): List<T>
+		TypeRef recv = types::extract_lambda_receiver_from_sig(
+			"fun filter(predicate: (T) -> Boolean): List<T>");
+		assert(recv.kind == types::TypeKind.UNKNOWN, "expected UNKNOWN for non-receiver lambda");
+	};
+}
+
+fn void extract_lambda_receiver_no_params() @test {
+	@pool() {
+		TypeRef recv = types::extract_lambda_receiver_from_sig("fun run(): Unit");
+		assert(recv.kind == types::TypeKind.UNKNOWN, "expected UNKNOWN for no-param function");
+	};
+}
