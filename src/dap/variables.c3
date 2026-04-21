@@ -2,6 +2,7 @@ module kls::dap::variables;
 
 import std::collections::object;
 import kls::log;
+import kls::json_rpc;
 import kls::dap::jdwp::transport;
 import kls::dap::jdwp::protocol;
 import kls::dap::jdwp::ids;
@@ -9,7 +10,7 @@ import kls::dap::jdwp::ids;
 // Handle scopes request — return scope list for a frame
 fn Object* handle_scopes(IdManager* id_mgr, Object* args) {
 	Object* body = object::new_obj(tmem);
-	Object* scopes_arr = object::new_obj(tmem);  // JSON array
+	Object* scopes_arr = json_rpc::new_json_arr();
 
 	int frame_id = (int)(args.get_int("frameId") ?? 0);
 
@@ -69,7 +70,7 @@ fn Object* handle_scopes(IdManager* id_mgr, Object* args) {
 	Object* static_scope = object::new_obj(tmem);
 	static_scope.set("name", "Static Fields");
 	static_scope.set("variablesReference", static_var_ref);
-	static_scope.set("expensive", false);
+	static_scope.set("expensive", true);
 	scopes_arr.push(static_scope);
 
 	body.set("scopes", scopes_arr);
@@ -79,7 +80,7 @@ fn Object* handle_scopes(IdManager* id_mgr, Object* args) {
 // Handle variables request — return variables for a scope/object
 fn Object* handle_variables(JdwpConnection* conn, IdManager* id_mgr, Object* args) {
 	Object* body = object::new_obj(tmem);
-	Object* vars_arr = object::new_obj(tmem);  // JSON array
+	Object* vars_arr = json_rpc::new_json_arr();
 
 	int var_ref = (int)(args.get_int("variablesReference") ?? 0);
 

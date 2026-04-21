@@ -50,6 +50,7 @@ fn void DapServer.init(DapServer* self) {
 	self.bp_mgr.init();
 	self.exc_mgr.init();
 	self.func_bp_mgr.init();
+	json_rpc::init_json_types();
 }
 
 fn void DapServer.run(DapServer* self) {
@@ -362,7 +363,7 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 				self.send_response(request_seq, command, body);
 			} else {
 				Object* body = object::new_obj(tmem);
-				body.set("breakpoints", object::new_obj(tmem));
+				body.set("breakpoints", json_rpc::new_json_arr());
 				self.send_response(request_seq, command, body);
 			}
 
@@ -420,7 +421,7 @@ fn void DapServer.dispatch(DapServer* self, Object* msg) {
 				self.send_response(request_seq, command, body);
 			} else {
 				Object* body = object::new_obj(tmem);
-				body.set("threads", object::new_obj(tmem));
+				body.set("threads", json_rpc::new_json_arr());
 				self.send_response(request_seq, command, body);
 			}
 

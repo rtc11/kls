@@ -26,6 +26,23 @@ const int MAX_MESSAGE_SIZE = 50 * 1024 * 1024; // 50 MB
 // Monotonic counter for server-originated request IDs
 int server_request_id = 0;
 
+// Cached typeid for JSON array objects (ObjectInternalList)
+typeid json_array_typeid;
+
+// Initialize the JSON array typeid — call once at startup
+fn void init_json_types() {
+	Object* tmp = object::new_obj(tmem);
+	tmp.push(object::new_null());
+	json_array_typeid = tmp.type;
+}
+
+// Create a new JSON array Object that serializes as [] when empty
+fn Object* new_json_arr() {
+	Object* arr = object::new_obj(tmem);
+	arr.type = json_array_typeid;
+	return arr;
+}
+
 /**
  * Read a complete LSP message from stdin.
  * Parses Content-Length header, then reads the JSON body.

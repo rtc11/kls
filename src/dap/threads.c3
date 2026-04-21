@@ -2,6 +2,7 @@ module kls::dap::threads;
 
 import std::collections::object;
 import kls::log;
+import kls::json_rpc;
 import kls::dap::jdwp::transport;
 import kls::dap::jdwp::protocol;
 import kls::dap::jdwp::ids;
@@ -9,7 +10,7 @@ import kls::dap::jdwp::ids;
 // Handle threads request — list all VM threads
 fn Object* handle_threads(JdwpConnection* conn, IdManager* id_mgr) {
 	Object* body = object::new_obj(tmem);
-	Object* threads_arr = object::new_obj(tmem);  // JSON array
+	Object* threads_arr = json_rpc::new_json_arr();
 
 	JdwpReply reply;
 	if (try r = protocol::get_all_threads(conn)) {

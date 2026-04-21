@@ -3,6 +3,7 @@ module kls::dap::breakpoints;
 import std::collections::object;
 import std::collections;
 import kls::log;
+import kls::json_rpc;
 import kls::dap::jdwp::transport;
 import kls::dap::jdwp::protocol;
 
@@ -98,7 +99,7 @@ fn Object* handle_set_breakpoints(BreakpointManager* self, JdwpConnection* conn,
 	log::info("[dap] Class lookup: class_id=%d", class_id);
 
 	// Build response array
-	Object* result_bps = object::new_obj(tmem);
+	Object* result_bps = json_rpc::new_json_arr();
 
 	for (sz i = 0; i < bp_list.get_len(); i++) {
 		Object* bp_req = bp_list.get_at(i);
@@ -493,7 +494,7 @@ fn Object* handle_set_exception_breakpoints(ExceptionBpManager* self, JdwpConnec
 	self.count = 0;
 
 	Object* filters = args.get("filters") ?? null;
-	Object* result_bps = object::new_obj(tmem);
+	Object* result_bps = json_rpc::new_json_arr();
 
 	if (filters == null || !filters.is_array()) {
 		Object* body = object::new_obj(tmem);
@@ -548,7 +549,7 @@ fn Object* handle_set_exception_breakpoints(ExceptionBpManager* self, JdwpConnec
 
 fn Object* build_empty_response() {
 	Object* body = object::new_obj(tmem);
-	body.set("breakpoints", object::new_obj(tmem));
+	body.set("breakpoints", json_rpc::new_json_arr());
 	return body;
 }
 
@@ -588,7 +589,7 @@ fn Object* handle_set_function_breakpoints(FuncBpManager* self, JdwpConnection* 
 	self.count = 0;
 
 	Object* bp_list = args.get("breakpoints") ?? null;
-	Object* result_bps = object::new_obj(tmem);
+	Object* result_bps = json_rpc::new_json_arr();
 
 	if (bp_list == null || !bp_list.is_array()) {
 		Object* body = object::new_obj(tmem);

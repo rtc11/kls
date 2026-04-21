@@ -4,6 +4,7 @@ import std::collections::object;
 import std::io::path;
 import std::io::file;
 import kls::log;
+import kls::json_rpc;
 import kls::dap::jdwp::transport;
 import kls::dap::jdwp::protocol;
 import kls::dap::jdwp::ids;
@@ -11,7 +12,7 @@ import kls::dap::jdwp::ids;
 // Handle stackTrace request
 fn Object* handle_stack_trace(JdwpConnection* conn, IdManager* id_mgr, Object* args, String workspace_path) {
 	Object* body = object::new_obj(tmem);
-	Object* frames_arr = object::new_obj(tmem);  // JSON array
+	Object* frames_arr = json_rpc::new_json_arr();
 
 	int dap_thread_id = (int)(args.get_int("threadId") ?? 0);
 	int start_frame = (int)(args.get_int("startFrame") ?? 0);
