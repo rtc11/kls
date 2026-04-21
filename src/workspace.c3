@@ -935,10 +935,19 @@ fn List{usz}*? WorkspaceIndex.lookup_by_supertype(WorkspaceIndex* self, String s
 	return self.super_index.get_ref(supertype_name);
 }
 
+// Sentinel returned by get_symbol on out-of-bounds. Empty `name` so existing
+// callers that already gate on `sym.name.len > 0` reject it safely.
+WorkspaceSymbol _empty_workspace_symbol = {};
+
 /**
- * Get a workspace symbol by index.
+ * Get a workspace symbol by index. Returns sentinel (empty name) if idx is
+ * out of bounds — defends against stale indices from incremental_remove_indices.
  */
 fn WorkspaceSymbol* WorkspaceIndex.get_symbol(WorkspaceIndex* self, usz idx) {
+	if (idx >= self.symbols.len()) {
+		log::warn("[kls] WorkspaceIndex.get_symbol: stale index %d (size %d)", idx, self.symbols.len());
+		return &_empty_workspace_symbol;
+	}
 	return &self.symbols[idx];
 }
 

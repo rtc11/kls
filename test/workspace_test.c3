@@ -849,3 +849,37 @@ fn void import_map_multiple_imports() @test {
 		assert(map.import_names[2] == "MyBaz", "import 2 alias");
 	};
 }
+
+// ── get_symbol bounds-check sentinel ───────────────────────────────
+
+fn void get_symbol_out_of_bounds_returns_sentinel() @test {
+	WorkspaceIndex idx;
+	idx.init();
+	defer idx.free();
+
+	idx.index_file("file:///t.kt", "package p\nclass Foo {}");
+	usz n = idx.symbols.len();
+	assert(n > 0, "expected at least one symbol");
+
+	// Stale / out-of-bounds index must return sentinel, not crash.
+	WorkspaceSymbol* s = idx.get_symbol(n + 100);
+	assert(s != null, "sentinel must be non-null");
+	assert(s.name.len == 0, "sentinel must have empty name");
+	assert(s.uri.len == 0, "sentinel must have empty uri");
+}
+
+fn void get_symbol_after_remove_file_handles_stale_indices() @test {
+	WorkspaceIndex idx;
+	idx.init();
+	defer idx.free();
+
+	idx.index_file("file:///a.kt", "package p\nclass A {}\nclass B {}");
+	usz before = idx.symbols.len();
+	idx.remove_file("file:///a.kt");
+	usz after = idx.symbols.len();
+	assert(after < before, "remove_file should compact symbols");
+
+	// Indices that were valid before remove_file are now out of range.
+	WorkspaceSymbol* s = idx.get_symbol(before - 1);
+	assert(s.name.len == 0, "stale index must yield sentinel");
+}
