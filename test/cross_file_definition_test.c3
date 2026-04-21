@@ -441,3 +441,101 @@ fn void extension_receiver_non_member_no_crash() @test {
 		}
 	};
 }
+
+// ── Regression: this.method() inside trailing-lambda (receiver lambda) ─
+
+fn void this_method_in_receiver_lambda_resolves_to_lambda_receiver() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A: ConsumedStream class with branch (taking receiver lambda)
+		// and processor (the target).
+		String stream =
+			"class ConsumedStream<K, V> {\n"
+			"    fun branch(pred: (V) -> Boolean, block: ConsumedStream<K, V>.() -> Unit) {}\n"
+			"    fun processor(p: Any): ConsumedStream<K, V> = this\n"
+			"}\n";
+		ws.index_file("file:///stream.kt", stream);
+
+		// File B: this.processor inside branch trailing lambda.
+		// Line 2 col offsets:
+		// 0:        "fun use(s: ConsumedStream<String, Int>) {"
+		// 1:        "    s.branch({ true }) {"
+		// 2:        "        this.processor(\"x\")"
+		// '.' before processor at col 12, 'p' of processor at col 13.
+		String use =
+			"fun use(s: ConsumedStream<String, Int>) {\n"
+			"    s.branch({ true }) {\n"
+			"        this.processor(\"x\")\n"
+			"    }\n"
+			"}\n";
+		store.open("file:///use.kt", "kotlin", 1, use);
+
+		Object* params = make_params("file:///use.kt", 2, 13);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected definition result for this.processor");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///stream.kt",
+			"expected stream.kt, got '%s'", uri);
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 2,
+			"expected processor at line 2 of stream.kt, got %d", line);
+	};
+}
+
+// ── Regression: chained call obj.factory(...).method on class method ─
+
+fn void chained_call_resolves_to_return_type_method() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Topology.consume returns ConsumedStream; ConsumedStream.processor
+		// is the target.
+		String stream =
+			"class ConsumedStream<K, V> {\n"
+			"    fun processor(p: Any): ConsumedStream<K, V> = this\n"
+			"}\n"
+			"class Topology {\n"
+			"    fun consume(topic: String): ConsumedStream<String, Int> = ConsumedStream()\n"
+			"}\n";
+		ws.index_file("file:///stream.kt", stream);
+
+		// File B: extension on Topology calls implicit-this consume(...).processor(...)
+		// Line 1: "    consume(\"t\").processor(\"x\")"
+		// indices: 0:'    consume("t").processor("x")'
+		// '.' before processor at col 19, 'p' of processor at col 20.
+		String use =
+			"fun Topology.use() {\n"
+			"    consume(\"t\").processor(\"x\")\n"
+			"}\n";
+		store.open("file:///use.kt", "kotlin", 1, use);
+
+		Object* params = make_params("file:///use.kt", 1, 20);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected definition for chained .processor");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///stream.kt",
+			"expected stream.kt, got '%s'", uri);
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 1,
+			"expected processor at line 1 of stream.kt, got %d", line);
+	};
+}

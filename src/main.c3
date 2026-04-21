@@ -2,6 +2,7 @@ module kls;
 
 import kls::server;
 import kls::dap::server;
+import kls::log;
 import std::io;
 
 fn void main(String[] args) {
@@ -9,6 +10,9 @@ fn void main(String[] args) {
 	foreach (arg : args) {
 		if (arg == "--dap") {
 			dap_mode = true;
+		}
+		if (arg == "--debug") {
+			log::set_level(log::LogLevel.DEBUG);
 		}
 	}
 

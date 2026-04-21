@@ -691,7 +691,31 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					// Try to find the receiver's declaration type (scope-aware)
 					String recv_name = pr.nodes[j].name;
 					uint recv_offset = pr.nodes[j].start_offset;
-					receiver_type = find_receiver_decl_type(pr, ti, recv_name, recv_offset);
+					if (recv_name == "this") {
+						// Resolve `this` to enclosing receiver type (extension fn,
+						// receiver lambda, or enclosing class).
+						String this_type = resolve_this_receiver_type(pr, workspace, store, recv_offset);
+						if (this_type.len > 0) {
+							receiver_type.kind = SIMPLE;
+							receiver_type.name = this_type;
+						}
+					} else {
+						receiver_type = find_receiver_decl_type(pr, ti, recv_name, recv_offset);
+					}
+				} else if (pr.nodes[j].kind == THIS_EXPR) {
+					// Explicit `this` (parsed as THIS_EXPR, not NAME_EXPR).
+					// Resolve to enclosing receiver type (extension fn, receiver
+					// lambda, or enclosing class).
+					uint recv_offset = pr.nodes[j].start_offset;
+					String this_type = resolve_this_receiver_type(pr, workspace, store, recv_offset);
+					// Strip generics: "ConsumedStream<K, V>" -> "ConsumedStream"
+					for (usz k = 0; k < this_type.len; k++) {
+						if (this_type[k] == '<') { this_type = this_type[:k]; break; }
+					}
+					if (this_type.len > 0) {
+						receiver_type.kind = SIMPLE;
+						receiver_type.name = this_type;
+					}
 				} else if (pr.nodes[j].kind == DOT_EXPR) {
 					// Chained access: a.b.c — inner DOT_EXPR is the receiver.
 					// Try type info first, then resolve via inner DOT_EXPR's member name
@@ -704,9 +728,16 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 						receiver_type = resolve_dot_expr_type(pr, ti, workspace, j);
 					}
 				} else if (pr.nodes[j].kind == CALL_EXPR) {
-					// Receiver is a call: factory().member — check type info
+					// Receiver is a call: factory().member — check type info first,
+					// fall back to resolving the call's receiver class.
 					if (ti.has_type[j]) {
 						receiver_type = ti.node_types[j];
+					} else {
+						String recv_class = resolve_call_receiver_class(pr, workspace, store, j);
+						if (recv_class.len > 0) {
+							receiver_type.kind = SIMPLE;
+							receiver_type.name = recv_class;
+						}
 					}
 				}
 				break;
@@ -1428,6 +1459,324 @@ fn bool is_declared_in_lambda_scope(ParseResult* pr, String name, uint cursor_of
  * `Module.() -> Unit`, navigating from `src` should go to Module's `src`
  * property, not to some other `src` in the file.
  */
+/**
+ * Resolve the type of `this` at the given cursor offset.
+ *
+ * Walks ancestors from the cursor outward. Returns the receiver type name
+ * for the innermost enclosing scope that defines `this`:
+ *   1. LAMBDA_EXPR: derive lambda receiver type from the enclosing CALL_EXPR.
+ *      Strategy: resolve the call's receiver expression type, then look up the
+ *      callee method on that class and read the lambda param's receiver type.
+ *      Falls back to scanning workspace.member_cache when the call's receiver
+ *      type can't be resolved (and the lambda receiver type can be inferred
+ *      from the workspace symbol alone, e.g. top-level extension fns).
+ *   2. FUN_DECL or PROPERTY_DECL extension receiver (extra_text).
+ *   3. Enclosing CLASS_DECL/OBJECT_DECL/INTERFACE_DECL.
+ *
+ * Returns empty string when no enclosing receiver is found.
+ */
+fn String resolve_this_receiver_type(ParseResult* pr, WorkspaceIndex* workspace,
+		DocumentStore* store, uint cursor_offset) {
+	// Find innermost ancestor (smallest enclosing node) by offset range.
+	uint innermost = ast::NO_PARENT;
+	uint best_size = (uint)-1;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) continue;
+		uint size = n.end_offset - n.start_offset;
+		if (size < best_size) {
+			best_size = size;
+			innermost = i;
+		}
+	}
+	if (innermost == ast::NO_PARENT) return "";
+
+	uint current = innermost;
+	while (current != ast::NO_PARENT) {
+		AstNode* n = &pr.nodes[current];
+
+		// Lambda with implicit receiver: derive from enclosing call's lambda param type
+		if (n.kind == LAMBDA_EXPR) {
+			uint call_idx = find_call_parent_of_lambda_def(pr, current);
+			if (call_idx != ast::NO_PARENT) {
+				String callee_name = pr.nodes[call_idx].name;
+
+				// Step 1: resolve the call's receiver class (the type of the
+				// expression on which the method is called). For `obj.branch(...)`,
+				// that's the type of `obj`.
+				String recv_class = resolve_call_receiver_class(pr, workspace, store, call_idx);
+
+				// Step 2: when we know the receiver class, look up the called
+				// method on that class and read the lambda param's receiver type.
+				if (recv_class.len > 0 && callee_name.len > 0 && workspace != null) {
+					String lambda_recv = find_lambda_receiver_for_class_method(
+						workspace, recv_class, callee_name);
+					if (lambda_recv.len > 0) return lambda_recv;
+				}
+
+				// Step 3: same-file FUN_DECL fallback (top-level extension fns).
+				String receiver_type = find_receiver_type_for_call_def(pr, call_idx);
+				if (receiver_type.len == 0 && workspace != null && callee_name.len > 0) {
+					receiver_type = find_lambda_receiver_in_workspace(
+						workspace, store, callee_name);
+				}
+				if (receiver_type.len > 0) {
+					// Strip generics: "MappedStream<K, V>" -> "MappedStream"
+					for (usz k = 0; k < receiver_type.len; k++) {
+						if (receiver_type[k] == '<') {
+							receiver_type = receiver_type[:k];
+							break;
+						}
+					}
+					return receiver_type;
+				}
+			}
+		}
+
+		// Extension fun/property: receiver type stored in extra_text
+		if ((n.kind == FUN_DECL || n.kind == PROPERTY_DECL) && n.extra_text.len > 0) {
+			String receiver = n.extra_text;
+			if (receiver.len > 0 && receiver[receiver.len - 1] == '?') {
+				receiver = receiver[:receiver.len - 1];
+			}
+			for (usz k = 0; k < receiver.len; k++) {
+				if (receiver[k] == '<') {
+					receiver = receiver[:k];
+					break;
+				}
+			}
+			if (receiver.len > 0) return receiver;
+		}
+
+		// Enclosing class/object/interface
+		if ((n.kind == CLASS_DECL || n.kind == OBJECT_DECL || n.kind == INTERFACE_DECL) && n.name.len > 0) {
+			return n.name;
+		}
+
+		current = n.parent;
+	}
+	return "";
+}
+
+/**
+ * Resolve the receiver class name for a CALL_EXPR. Returns the class on which
+ * the method is being called (e.g. "ConsumedStream" for `consumed.branch(...)`).
+ * Returns empty string when the call has no receiver or the type can't be resolved.
+ */
+fn String resolve_call_receiver_class(ParseResult* pr, WorkspaceIndex* workspace,
+		DocumentStore* store, uint call_idx) {
+	// Find DOT_EXPR child (the callee). For `a.b.method(...)`, callee is the
+	// outer DOT_EXPR whose member name = method name.
+	// Trailing-lambda calls (`obj.method(args) { lambda }`) wrap an inner
+	// CALL_EXPR — descend through nested CALL_EXPR children to find DOT_EXPR.
+	uint dot_idx = ast::NO_PARENT;
+	uint inner_call_idx = call_idx; // innermost call we descended to
+	uint scan_idx = call_idx;
+	for (uint depth = 0; depth < 4; depth++) {
+		// Callee is the FIRST child adopted (lowest node index among children).
+		uint first_child = ast::NO_PARENT;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != scan_idx) continue;
+			if (first_child == ast::NO_PARENT || j < first_child) first_child = j;
+		}
+		if (first_child == ast::NO_PARENT) break;
+		AstNode* callee_node = &pr.nodes[first_child];
+		if (callee_node.kind == DOT_EXPR) { dot_idx = first_child; break; }
+		if (callee_node.kind == CALL_EXPR) {
+			scan_idx = first_child;
+			inner_call_idx = first_child;
+			continue;
+		}
+		// Callee is NAME_EXPR or other — bare call.
+		break;
+	}
+
+	// Bare call: no DOT_EXPR callee. e.g. `consume(...)` inside an extension fn.
+	// Implicit `this` receiver = enclosing class/extension. Look up callee
+	// (CALL_EXPR.name) as a method on that class, return its return type.
+	if (dot_idx == ast::NO_PARENT) {
+		if (workspace == null) return "";
+		AstNode* call_node = &pr.nodes[inner_call_idx];
+		String callee = call_node.name;
+		if (callee.len == 0) return "";
+		String enclosing = resolve_this_receiver_type(pr, workspace, store, call_node.start_offset);
+		if (enclosing.len > 0) {
+			String ret_class = find_method_return_class(workspace, enclosing, callee);
+			if (ret_class.len > 0) return ret_class;
+		}
+		return "";
+	}
+
+	// Find the receiver child of the DOT_EXPR (its first child).
+	for (uint k = 0; k < pr.node_count; k++) {
+		if (pr.nodes[k].parent != dot_idx) continue;
+		AstNode* recv = &pr.nodes[k];
+
+		// NAME_EXPR: variable reference
+		if (recv.kind == NAME_EXPR) {
+			TypeRef t = find_receiver_decl_type(pr, null, recv.name, recv.start_offset);
+			if (t.kind != UNKNOWN && t.name.len > 0) return t.name;
+			// Could be a class reference itself
+			if (recv.name.len > 0 && recv.name[0] >= 'A' && recv.name[0] <= 'Z') {
+				return recv.name;
+			}
+			return "";
+		}
+
+		// CALL_EXPR: factory call. Resolve callee return type via workspace.
+		if (recv.kind == CALL_EXPR) {
+			String callee = recv.name;
+			if (callee.len == 0) return "";
+			if (workspace == null) return "";
+
+			// First: if the call has its own DOT_EXPR receiver (chained), recurse.
+			// e.g. for `obj.foo().branch`, callee=foo, receiver of foo is obj.
+			String inner_recv = resolve_call_receiver_class(pr, workspace, store, k);
+			if (inner_recv.len > 0) {
+				// Look up callee on inner_recv's class, get return type.
+				String ret_class = find_method_return_class(workspace, inner_recv, callee);
+				if (ret_class.len > 0) return ret_class;
+			}
+
+			// Otherwise: bare call. Implicit receiver = enclosing class/extension.
+			// Walk up from the call site to find the enclosing receiver type,
+			// then look up callee as a method of that class.
+			String enclosing = resolve_this_receiver_type(pr, workspace, store, recv.start_offset);
+			if (enclosing.len > 0) {
+				String ret_class = find_method_return_class(workspace, enclosing, callee);
+				if (ret_class.len > 0) return ret_class;
+			}
+
+			// Last resort: top-level FUN by name. Multiple overloads may exist;
+			// this picks one and may be wrong, so it's last.
+			if (try indices = workspace.lookup_by_name(callee)) {
+				for (usz i = 0; i < indices.len(); i++) {
+					WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+					if (sym.kind != SymbolKind.FUNCTION) continue;
+					String content;
+					char[] disk_data;
+					if (store != null) {
+						if (try doc = store.get(sym.uri)) content = doc.content;
+					}
+					if (content.len == 0) {
+						String path = workspace::uri_to_path(sym.uri);
+						if (path.len > 0) {
+							if (try data = std::io::file::load(tmem, path)) {
+								disk_data = data;
+								content = (String)disk_data;
+							}
+						}
+					}
+					if (content.len == 0) continue;
+
+					String found_ret = "";
+					@pool() {
+						ParseResult* cross_pr = mem::new(ParseResult);
+						defer mem::free(cross_pr);
+						parser::parse(content, cross_pr);
+						for (uint p = 0; p < cross_pr.node_count; p++) {
+							AstNode* fn_node = &cross_pr.nodes[p];
+							if (fn_node.kind != FUN_DECL) continue;
+							if (fn_node.name != callee) continue;
+							if (fn_node.type_text.len == 0) continue;
+							String rt = fn_node.type_text;
+							for (usz q = 0; q < rt.len; q++) {
+								if (rt[q] == '<' || rt[q] == '?') {
+									rt = rt[:q];
+									break;
+								}
+							}
+							static char[256] ret_buf;
+							usz copy_len = rt.len < 256 ? rt.len : 255;
+							ret_buf[:copy_len] = rt[:copy_len];
+							found_ret = (String)ret_buf[:copy_len];
+						}
+					};
+					if (found_ret.len > 0) return found_ret;
+				}
+			}
+			return "";
+		}
+
+		// DOT_EXPR: chained access — recurse
+		if (recv.kind == DOT_EXPR) {
+			// Treat the inner DOT_EXPR as the receiver of a virtual call.
+			// Find a CALL_EXPR ancestor wrapping it, or fall back to its member
+			// type lookup. Simpler: bail out — full recursion is expensive.
+			return "";
+		}
+
+		// THIS_EXPR: receiver is the enclosing receiver
+		if (recv.kind == THIS_EXPR) {
+			return resolve_this_receiver_type(pr, workspace, store, recv.start_offset);
+		}
+
+		return "";
+	}
+	return "";
+}
+
+/**
+ * Look up `method_name` on `class_name` in workspace.member_cache. If it's a
+ * function with a final lambda-typed param having a receiver, return that
+ * receiver type name. Returns empty string when not found.
+ */
+fn String find_lambda_receiver_for_class_method(WorkspaceIndex* workspace,
+		String class_name, String method_name) {
+	static char[256] recv_buf;
+	if (try members = workspace.lookup_members(class_name)) {
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = members.get_ref(i);
+			if (m.node_kind != FUN_DECL) continue;
+			if (m.name != method_name) continue;
+			for (usz p = 0; p < m.param_count; p++) {
+				String pt = m.param_types[p];
+				if (pt.len == 0) continue;
+				TypeRef tref = types::parse_type_text(pt);
+				if (tref.kind == FUNCTION && tref.receiver_type_name.len > 0) {
+					usz copy_len = tref.receiver_type_name.len < 256 ? tref.receiver_type_name.len : 255;
+					recv_buf[:copy_len] = tref.receiver_type_name[:copy_len];
+					return (String)recv_buf[:copy_len];
+				}
+			}
+		}
+	}
+	return "";
+}
+
+/**
+ * Find the return class of a method on a class.
+ *
+ * Iterates members of class_name, finds first FUN_DECL matching method_name,
+ * parses its type_text (return type), strips generics, returns class name.
+ * Returns "" if not found or return type unresolvable.
+ */
+fn String find_method_return_class(WorkspaceIndex* workspace,
+		String class_name, String method_name) {
+	static char[256] ret_buf;
+	if (try members = workspace.lookup_members(class_name)) {
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = members.get_ref(i);
+			if (m.node_kind != FUN_DECL) continue;
+			if (m.name != method_name) continue;
+			String rt = m.type_text;
+			if (rt.len == 0) continue;
+			// Strip generics: "ConsumedStream<K, V>" -> "ConsumedStream"
+			usz end = rt.len;
+			for (usz k = 0; k < rt.len; k++) {
+				if (rt[k] == '<') { end = k; break; }
+			}
+			// Strip nullable suffix
+			if (end > 0 && rt[end - 1] == '?') end--;
+			if (end == 0) continue;
+			usz copy_len = end < 256 ? end : 255;
+			ret_buf[:copy_len] = rt[:copy_len];
+			return (String)ret_buf[:copy_len];
+		}
+	}
+	return "";
+}
+
 /**
  * Navigate to a member of the extension function's receiver type.
  *
