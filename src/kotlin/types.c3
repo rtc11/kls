@@ -12,6 +12,19 @@ import kls::deps::jar_index;
 
 WorkspaceIndex* g_workspace;
 
+// Cache for dep member type lookups — flat array, no heap allocation for keys
+const usz DEP_CACHE_SIZE = 256;
+const usz DEP_CACHE_KEY_MAX = 128;
+
+struct DepMemberCacheEntry {
+	char[DEP_CACHE_KEY_MAX] key;
+	usz key_len;
+	TypeRef value;
+	bool occupied;
+}
+
+DepMemberCacheEntry[DEP_CACHE_SIZE] g_dep_member_cache;
+
 /**
  * Set the workspace index for cross-file type resolution.
  * Call before resolve_types() to enable workspace-aware inference.
@@ -25,6 +38,15 @@ fn void set_workspace(WorkspaceIndex* ws) {
  */
 fn void clear_workspace() {
 	g_workspace = null;
+}
+
+/**
+ * Clear the dep member type cache. Call when dep index is rebuilt.
+ */
+fn void clear_dep_member_cache() {
+	for (usz i = 0; i < DEP_CACHE_SIZE; i++) {
+		g_dep_member_cache[i].occupied = false;
+	}
 }
 
 // ── Type representation ────────────────────────────────────────────
@@ -2481,6 +2503,28 @@ fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, TypeRef receiver,
 	String type_name = receiver.name;
 	if (type_name.len == 0) return TYPE_UNKNOWN;
 
+	// Check cache for pre-substitution result
+	char[DEP_CACHE_KEY_MAX] key_buf;
+	usz key_len = 0;
+	if (type_name.len + 1 + member_name.len < DEP_CACHE_KEY_MAX) {
+		for (usz i = 0; i < type_name.len; i++) key_buf[i] = type_name[i];
+		key_buf[type_name.len] = 0;
+		for (usz i = 0; i < member_name.len; i++) key_buf[type_name.len + 1 + i] = member_name[i];
+		key_len = type_name.len + 1 + member_name.len;
+	}
+	if (key_len > 0) {
+		// Hash-based lookup into flat cache
+		uint hash = cache_hash(key_buf[:key_len]);
+		usz slot = (usz)hash % DEP_CACHE_SIZE;
+		if (g_dep_member_cache[slot].occupied && g_dep_member_cache[slot].key_len == key_len) {
+			bool match = true;
+			for (usz i = 0; i < key_len; i++) {
+				if (g_dep_member_cache[slot].key[i] != key_buf[i]) { match = false; break; }
+			}
+			if (match) return substitute_type_params(g_dep_member_cache[slot].value, receiver);
+		}
+	}
+
 	// Use imports to prefer correct package when multiple classes share the same name
 	String preferred_pkg = "";
 	if (pr != null) {
@@ -2536,14 +2580,43 @@ fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, TypeRef receiver,
 			for (usz s = 0; s < jar_index::MAX_DEP_SUPERTYPES; s++) {
 				if (best_class.supertypes[s].len == 0) break;
 				TypeRef super_result = resolve_dep_member_in_class(dep_index, best_class.supertypes[s], member_name);
-				if (super_result.kind != UNKNOWN) return substitute_type_params(super_result, receiver);
+				if (super_result.kind != UNKNOWN) {
+					cache_dep_member_type(&key_buf, key_len, super_result);
+					return substitute_type_params(super_result, receiver);
+				}
 			}
 		}
 		return TYPE_UNKNOWN;
 	}
 
 	TypeRef result = extract_dep_return_type(best);
+	cache_dep_member_type(&key_buf, key_len, result);
 	return substitute_type_params(result, receiver);
+}
+
+/**
+ * Store a pre-substitution TypeRef in the dep member cache.
+ */
+fn void cache_dep_member_type(char[] key, usz key_len, TypeRef value) {
+	if (key_len == 0 || key_len >= DEP_CACHE_KEY_MAX) return;
+	uint hash = cache_hash(key[:key_len]);
+	usz slot = (usz)hash % DEP_CACHE_SIZE;
+	for (usz i = 0; i < key_len; i++) g_dep_member_cache[slot].key[i] = key[i];
+	g_dep_member_cache[slot].key_len = key_len;
+	g_dep_member_cache[slot].value = value;
+	g_dep_member_cache[slot].occupied = true;
+}
+
+/**
+ * Simple FNV-1a hash for cache keys.
+ */
+fn uint cache_hash(char[] data) {
+	uint h = 0x811c9dc5;
+	for (usz i = 0; i < data.len; i++) {
+		h ^= (uint)data[i];
+		h *= 0x01000193;
+	}
+	return h;
 }
 
 /**

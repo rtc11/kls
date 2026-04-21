@@ -41,6 +41,7 @@ import kls::deps::classpath;
 import kls::deps::jar_index;
 import kls::deps::jdk_index;
 import kls::deps::kotlin_fallback;
+import kls::kotlin::types;
 
 // ── Async reindex state ────────────────────────────────────────────
 
@@ -806,6 +807,7 @@ fn void Server.check_reindex_complete(Server* self) {
 	self.workspace.dep_index.free();
 	self.workspace.dep_index = *new_idx;
 	mem::free(new_idx);
+	types::clear_dep_member_cache();
 
 	// Re-scan workspace with updated module source roots
 	progress::report("kls-reindex", "Re-scanning workspace...", 70);

@@ -3275,6 +3275,7 @@ fn void dep_member_type_direct() @test {
 		jar_index::DependencyIndex dep_idx;
 		dep_idx.init();
 		defer dep_idx.free();
+		defer types::clear_dep_member_cache();
 
 		// Add List class with supertype Any
 		String[8] supers = { "Any", "", "", "", "", "", "", "" };
@@ -3299,6 +3300,7 @@ fn void dep_member_type_via_supertype() @test {
 		jar_index::DependencyIndex dep_idx;
 		dep_idx.init();
 		defer dep_idx.free();
+		defer types::clear_dep_member_cache();
 
 		// Add List class with supertype Any
 		String[8] supers = { "Iterable", "Any", "", "", "", "", "", "" };
@@ -3323,6 +3325,7 @@ fn void dep_member_type_no_supertype_match() @test {
 		jar_index::DependencyIndex dep_idx;
 		dep_idx.init();
 		defer dep_idx.free();
+		defer types::clear_dep_member_cache();
 
 		// Add List with no supertypes
 		jar_index::add_dep_symbol(&dep_idx,
