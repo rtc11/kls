@@ -864,10 +864,10 @@ fn String invoke_to_string(JdwpConnection* conn, long object_id, long thread_id)
 
 	if (to_string_id == 0) return "";
 
-	// Invoke: no args, INVOKE_SINGLE_THREADED (0x01)
+	// Invoke: no args, resume all threads (0x00) — safer for complex toString() impls
 	char[] empty_tags = {};
 	long[] empty_vals = {};
-	if (try reply = protocol::invoke_object_method(conn, object_id, thread_id, type_id, to_string_id, empty_tags, empty_vals, 0x01)) {
+	if (try reply = protocol::invoke_object_method(conn, object_id, thread_id, type_id, to_string_id, empty_tags, empty_vals, 0x00)) {
 		if (reply.error_code != 0 || reply.data.len < 1) return "";
 		char ret_tag = reply.data[0];
 		if (ret_tag == 's' && reply.data.len >= 9) {

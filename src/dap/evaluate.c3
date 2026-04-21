@@ -941,16 +941,21 @@ fn EvalValue read_field_from_value(EvalContext* ctx, EvalValue* obj, String fiel
 						}
 						fpos += (usz)name_len;
 
-						// Skip signature + modBits
-						if (fpos + 4 > freply.data.len) break;
-						int sig_len = transport::get_int_be(freply.data, fpos); fpos += 4;
-						fpos += (usz)sig_len;
-						if (fpos + 4 > freply.data.len) break;
-						fpos += 4;
+					// Skip signature, read modBits
+					if (fpos + 4 > freply.data.len) break;
+					int sig_len = transport::get_int_be(freply.data, fpos); fpos += 4;
+					fpos += (usz)sig_len;
+					if (fpos + 4 > freply.data.len) break;
+					int mod_bits = transport::get_int_be(freply.data, fpos);
+					fpos += 4;
 
-						if (fname == field_name) {
-							return read_field_value_raw(ctx, object_id, fid_val);
+					if (fname == field_name) {
+						// Static fields must use ReferenceType.GetValues, not ObjectReference.GetValues
+						if ((mod_bits & 0x0008) != 0) {
+							return read_static_field_value(ctx, type_id, fid_val);
 						}
+						return read_field_value_raw(ctx, object_id, fid_val);
+					}
 					}
 				}
 			}
@@ -1071,6 +1076,109 @@ fn String eval_value_to_string(EvalContext* ctx, EvalValue* val) {
 	}
 }
 
+// ── Method signature helpers ────────────────────────────────────────
+
+const int ACC_SYNTHETIC = 0x1000;
+const int ACC_BRIDGE = 0x0040;
+
+// Count parameters in a JVM method signature like "(II)V" → 2, "(Ljava/lang/String;I)V" → 2
+fn int count_sig_params(String sig) {
+	if (sig.len < 2 || sig[0] != '(') return -1;
+	int count = 0;
+	usz i = 1;
+	while (i < sig.len && sig[i] != ')') {
+		switch (sig[i]) {
+			case 'B': case 'C': case 'D': case 'F':
+			case 'I': case 'J': case 'S': case 'Z':
+				count++;
+				i++;
+			case 'L':
+				count++;
+				// Skip to ';'
+				while (i < sig.len && sig[i] != ';') i++;
+				if (i < sig.len) i++;  // skip ';'
+			case '[':
+				// Array — skip dimensions, then the element type
+				while (i < sig.len && sig[i] == '[') i++;
+				if (i < sig.len && sig[i] == 'L') {
+					while (i < sig.len && sig[i] != ';') i++;
+					if (i < sig.len) i++;
+				} else if (i < sig.len) {
+					i++;  // primitive element
+				}
+				count++;
+			default:
+				i++;  // skip unknown
+		}
+	}
+	return count;
+}
+
+// Find best matching method by name, arg count, skipping synthetic/bridge.
+// Returns method ID or 0 if not found.
+fn long find_method(JdwpConnection* conn, long type_id, String method_name, int wanted_args) {
+	JdwpReply methods_reply;
+	if (try r = protocol::get_methods(conn, type_id)) {
+		methods_reply = r;
+	} else {
+		return 0;
+	}
+	if (methods_reply.error_code != 0 || methods_reply.data.len < 4) return 0;
+
+	int method_count = transport::get_int_be(methods_reply.data, 0);
+	usz mpos = 4;
+
+	long exact_match = 0;     // name + arg count match, non-synthetic
+	long name_match = 0;      // name match, non-synthetic (any arg count)
+	long fallback_match = 0;  // name match including synthetic
+
+	for (int mi = 0; mi < method_count; mi++) {
+		if (mpos + 8 > methods_reply.data.len) break;
+		long mid = transport::get_long_be(methods_reply.data, mpos); mpos += 8;
+
+		if (mpos + 4 > methods_reply.data.len) break;
+		int mname_len = transport::get_int_be(methods_reply.data, mpos); mpos += 4;
+		String mname = "";
+		if (mname_len > 0 && mpos + (usz)mname_len <= methods_reply.data.len) {
+			mname = (String)methods_reply.data[mpos:(usz)mname_len];
+		}
+		mpos += (usz)mname_len;
+
+		if (mpos + 4 > methods_reply.data.len) break;
+		int sig_len = transport::get_int_be(methods_reply.data, mpos); mpos += 4;
+		String sig = "";
+		if (sig_len > 0 && mpos + (usz)sig_len <= methods_reply.data.len) {
+			sig = (String)methods_reply.data[mpos:(usz)sig_len];
+		}
+		mpos += (usz)sig_len;
+
+		if (mpos + 4 > methods_reply.data.len) break;
+		int mod_bits = transport::get_int_be(methods_reply.data, mpos); mpos += 4;
+
+		if (mname != method_name) continue;
+
+		bool is_synthetic = (mod_bits & ACC_SYNTHETIC) != 0 || (mod_bits & ACC_BRIDGE) != 0;
+		int param_count = count_sig_params(sig);
+
+		if (!is_synthetic) {
+			if (param_count == wanted_args && exact_match == 0) {
+				exact_match = mid;
+			}
+			if (name_match == 0) {
+				name_match = mid;
+			}
+		}
+		if (fallback_match == 0) {
+			fallback_match = mid;
+		}
+	}
+
+	// Prefer: exact arg match > any non-synthetic > any match
+	if (exact_match != 0) return exact_match;
+	if (name_match != 0) return name_match;
+	return fallback_match;
+}
+
 // ── Method invocation ───────────────────────────────────────────────
 
 fn EvalValue invoke_method_on_value(EvalContext* ctx, EvalValue* obj, String method_name, EvalValue[] args) {
@@ -1100,38 +1208,8 @@ fn EvalValue invoke_method_on_value(EvalContext* ctx, EvalValue* obj, String met
 	}
 	if (type_id == 0) return eval_error("<cannot get type>");
 
-	// Find method by name in type's methods
-	long target_method_id = 0;
-	if (try reply = protocol::get_methods(ctx.conn, type_id)) {
-		if (reply.error_code == 0 && reply.data.len >= 4) {
-			int method_count = transport::get_int_be(reply.data, 0);
-			usz mpos = 4;
-			for (int mi = 0; mi < method_count; mi++) {
-				if (mpos + 8 > reply.data.len) break;
-				long mid = transport::get_long_be(reply.data, mpos); mpos += 8;
-
-				if (mpos + 4 > reply.data.len) break;
-				int mname_len = transport::get_int_be(reply.data, mpos); mpos += 4;
-				String mname = "";
-				if (mname_len > 0 && mpos + (usz)mname_len <= reply.data.len) {
-					mname = (String)reply.data[mpos:(usz)mname_len];
-				}
-				mpos += (usz)mname_len;
-
-				// Skip signature + modBits
-				if (mpos + 4 > reply.data.len) break;
-				int sig_len = transport::get_int_be(reply.data, mpos); mpos += 4;
-				mpos += (usz)sig_len;
-				if (mpos + 4 > reply.data.len) break;
-				mpos += 4;
-
-				if (mname == method_name) {
-					target_method_id = mid;
-					break;  // Take first match (name only, no overload resolution)
-				}
-			}
-		}
-	}
+	// Find method by name + arg count, skipping synthetic/bridge methods
+	long target_method_id = find_method(ctx.conn, type_id, method_name, (int)args.len);
 	if (target_method_id == 0) return eval_error("<method not found>");
 
 	// Build argument arrays
@@ -1144,8 +1222,9 @@ fn EvalValue invoke_method_on_value(EvalContext* ctx, EvalValue* obj, String met
 		arg_values[i] = args[i].raw;
 	}
 
-	// Invoke: INVOKE_SINGLE_THREADED = 0x01
-	if (try reply = protocol::invoke_object_method(ctx.conn, object_id, ctx.thread_id, type_id, target_method_id, arg_tags[:arg_count], arg_values[:arg_count], 0x01)) {
+	// Invoke: resume all threads (options=0) for safety — complex methods may need
+	// other threads for classloading, locks, JNI, etc.
+	if (try reply = protocol::invoke_object_method(ctx.conn, object_id, ctx.thread_id, type_id, target_method_id, arg_tags[:arg_count], arg_values[:arg_count], 0x00)) {
 		if (reply.error_code != 0) return eval_error("<invoke error>");
 		// Reply: returnValue(tagged) + exception(tagged-objectID)
 		if (reply.data.len >= 1) {
@@ -1172,37 +1251,8 @@ fn EvalValue invoke_method_on_value(EvalContext* ctx, EvalValue* obj, String met
 fn EvalValue invoke_static_method_on_class(EvalContext* ctx, long type_id, String method_name, EvalValue[] args) {
 	ctx.resolve_frame();
 
-	// Find method by name
-	long target_method_id = 0;
-	if (try reply = protocol::get_methods(ctx.conn, type_id)) {
-		if (reply.error_code == 0 && reply.data.len >= 4) {
-			int method_count = transport::get_int_be(reply.data, 0);
-			usz mpos = 4;
-			for (int mi = 0; mi < method_count; mi++) {
-				if (mpos + 8 > reply.data.len) break;
-				long mid = transport::get_long_be(reply.data, mpos); mpos += 8;
-
-				if (mpos + 4 > reply.data.len) break;
-				int mname_len = transport::get_int_be(reply.data, mpos); mpos += 4;
-				String mname = "";
-				if (mname_len > 0 && mpos + (usz)mname_len <= reply.data.len) {
-					mname = (String)reply.data[mpos:(usz)mname_len];
-				}
-				mpos += (usz)mname_len;
-
-				if (mpos + 4 > reply.data.len) break;
-				int sig_len = transport::get_int_be(reply.data, mpos); mpos += 4;
-				mpos += (usz)sig_len;
-				if (mpos + 4 > reply.data.len) break;
-				mpos += 4;
-
-				if (mname == method_name) {
-					target_method_id = mid;
-					break;
-				}
-			}
-		}
-	}
+	// Find method by name + arg count, skipping synthetic/bridge methods
+	long target_method_id = find_method(ctx.conn, type_id, method_name, (int)args.len);
 	if (target_method_id == 0) return eval_error("<method not found>");
 
 	char[8] arg_tags;
@@ -1214,7 +1264,8 @@ fn EvalValue invoke_static_method_on_class(EvalContext* ctx, long type_id, Strin
 		arg_values[i] = args[i].raw;
 	}
 
-	if (try reply = protocol::invoke_static_method(ctx.conn, type_id, ctx.thread_id, target_method_id, arg_tags[:arg_count], arg_values[:arg_count], 0x01)) {
+	// Invoke: resume all threads (options=0)
+	if (try reply = protocol::invoke_static_method(ctx.conn, type_id, ctx.thread_id, target_method_id, arg_tags[:arg_count], arg_values[:arg_count], 0x00)) {
 		if (reply.error_code != 0) return eval_error("<invoke error>");
 		if (reply.data.len >= 1) {
 			char ret_tag = reply.data[0];
