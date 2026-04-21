@@ -817,10 +817,17 @@ fn void import_visibility_no_package_symbol() @test {
 
 		ImportMap map = workspace::build_import_map(r);
 
-		// Symbol with no package — backward compat, should be visible
+		// Symbol with no package — NOT visible from a file with a package declaration
+		// (reduces false positives from package-less files leaking globally)
 		WorkspaceSymbol sym = { .name = "Foo", .package_name = "" };
 		String visible = workspace::is_symbol_visible(&sym, &map, "Foo");
-		assert(visible.len > 0, "symbol with no package should be visible (backward compat)");
+		assert(visible.len == 0, "no-package symbol should NOT be visible from packaged file");
+
+		// But visible from a file that also has no package
+		ParseResult* r2 = do_parse(`class Baz {}`); defer free_result(r2);
+		ImportMap map2 = workspace::build_import_map(r2);
+		String visible2 = workspace::is_symbol_visible(&sym, &map2, "Foo");
+		assert(visible2.len > 0, "no-package symbol should be visible from no-package file");
 	};
 }
 

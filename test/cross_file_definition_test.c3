@@ -325,3 +325,71 @@ fn void cross_file_definition_not_found_empty_workspace() @test {
 		assert(result == null, "expected null for symbol not found anywhere");
 	};
 }
+
+// ── Cross-file: same class name different packages uses imports ─────
+
+fn void cross_file_same_name_different_packages() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Two files define class Config in different packages
+		String file_a = "package com.a\nclass Config {\n    fun load() {}\n}";
+		String file_b = "package com.b\nclass Config {\n    fun save() {}\n}";
+		store.open("file:///a/Config.kt", "kotlin", 1, file_a);
+		store.open("file:///b/Config.kt", "kotlin", 1, file_b);
+		ws.index_file("file:///a/Config.kt", file_a);
+		ws.index_file("file:///b/Config.kt", file_b);
+
+		// Main file imports com.a.Config — should resolve there
+		String main_file = "package com.main\nimport com.a.Config\nfun main() { Config() }";
+		store.open("file:///main.kt", "kotlin", 1, main_file);
+
+		Object* params = make_params("file:///main.kt", 2, 14);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected a Location result");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///a/Config.kt", "should go to imported Config, got '%s'", uri);
+	};
+}
+
+// ── Cross-file: receiver lambda member via workspace function ──────
+
+fn void cross_file_receiver_lambda_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A defines Module class with "src" property
+		String file_a = "class Module {\n    var src: String = \"\"\n}";
+		ws.index_file("file:///module.kt", file_a);
+
+		// File B defines buildModule taking Module.() -> Unit
+		String file_b = "fun buildModule(block: Module.() -> Unit) { }";
+		ws.index_file("file:///builder.kt", file_b);
+		store.open("file:///builder.kt", "kotlin", 1, file_b);
+
+		// File C calls buildModule { src = "test" }
+		//                            ^ cursor on "src" (line 0, col 16)
+		String file_c = "fun main() { buildModule { src = \"test\" } }";
+		store.open("file:///main.kt", "kotlin", 1, file_c);
+
+		Object* params = make_params("file:///main.kt", 0, 27);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected Location for receiver lambda member");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///module.kt", "expected module.kt, got '%s'", uri);
+	};
+}

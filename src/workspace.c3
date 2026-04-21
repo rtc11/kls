@@ -387,14 +387,17 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 			}
 
 			// Check if there's already a cached entry for this class name
-			// (can happen with duplicate class names across files)
+			// (can happen with duplicate class names across files).
+			// Append new members instead of replacing, so both files'
+			// members are available (each MemberDecl carries its URI).
 			if (try existing = self.member_cache.get_ref(class_name)) {
-				for (usz j = 0; j < existing.len(); j++) {
-					free_member_decl(&(*existing)[j]);
+				for (usz j = 0; j < members.len(); j++) {
+					existing.push(members[j]);
 				}
-				existing.free();
+				members.free();
+			} else {
+				self.member_cache.set(class_name, members);
 			}
-			self.member_cache.set(class_name, members);
 
 			// Recursively index nested class-like members
 			self.index_nested_members(pr, i, uri);
@@ -709,11 +712,20 @@ fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
 		if (sym.kind == SymbolKind.CLASS || sym.kind == SymbolKind.INTERFACE ||
 			sym.kind == SymbolKind.OBJECT) {
 			if (try list_ref = self.member_cache.get_ref(sym.name)) {
-				for (usz j = 0; j < list_ref.len(); j++) {
-					free_member_decl(&(*list_ref)[j]);
+				// Remove only entries from this file (other files may share the class name)
+				usz j = 0;
+				while (j < list_ref.len()) {
+					if ((*list_ref)[j].uri == uri) {
+						free_member_decl(&(*list_ref)[j]);
+						list_ref.remove_at(j);
+					} else {
+						j++;
+					}
 				}
-				list_ref.free();
-				self.member_cache.remove(sym.name);
+				if (list_ref.len() == 0) {
+					list_ref.free();
+					self.member_cache.remove(sym.name);
+				}
 			}
 		}
 		// Remove extension function entries by matching URI
@@ -1271,9 +1283,13 @@ fn String is_symbol_visible(WorkspaceSymbol* sym, ImportMap* imports, String loo
 		}
 	}
 
-	// No package info on symbol — treat as same-package (backward compat)
+	// No package info on symbol — only visible if requesting file also has
+	// no package declaration (both are "default package" / script files).
 	if (sym.package_name.len == 0) {
-		return sym.name;
+		if (imports.package_name.len == 0) {
+			return sym.name;
+		}
+		return "";
 	}
 
 	return "";

@@ -48,7 +48,7 @@ struct GradleModule {
 
 struct Classpath {
 	BuildSystem build_system;
-	DependencyJar[256] jars;
+	DependencyJar[512] jars;
 	usz jar_count;
 	bool resolved;
 	GradleModule[MAX_MODULES] modules;
@@ -701,7 +701,7 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 			if (try pipe = find_substring(rest, "|")) {
 				String mod_name = rest[:pipe];
 				String jar_path = rest[pipe + 1..];
-				if (jar_path.len > 0 && cp.jar_count < 256) {
+				if (jar_path.len > 0 && cp.jar_count < 512) {
 					GradleModule* m = ensure_module(cp, mod_name, "");
 					if (add_jar(cp, jar_path)) {
 						if (m != null) {
@@ -711,7 +711,7 @@ fn void parse_gradle_output(Classpath* cp, String output) {
 				}
 			} else {
 				// No pipe — legacy format, jar without module
-				if (rest.len > 0 && cp.jar_count < 256) {
+				if (rest.len > 0 && cp.jar_count < 512) {
 					add_jar(cp, rest);
 				}
 			}
@@ -805,7 +805,7 @@ fn void parse_maven_output(Classpath* cp, String output) {
 
 	// Split on ':' (path separator on Unix) or ';' (Windows)
 	pos = 0;
-	while (pos < classpath_line.len && cp.jar_count < 256) {
+	while (pos < classpath_line.len && cp.jar_count < 512) {
 		usz sep = pos;
 		while (sep < classpath_line.len && classpath_line[sep] != ':' && classpath_line[sep] != ';') {
 			sep++;
@@ -827,7 +827,7 @@ fn void parse_maven_output(Classpath* cp, String output) {
  * optionally extracts group/artifact/version from the path.
  */
 fn bool add_jar(Classpath* cp, String jar_path) {
-	if (cp.jar_count >= 256) return false;
+	if (cp.jar_count >= 512) return false;
 
 	// Deduplicate: skip if we already have this JAR path
 	for (usz i = 0; i < cp.jar_count; i++) {

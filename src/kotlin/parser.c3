@@ -403,14 +403,19 @@ fn void Parser.parse_import_decl(Parser* self) {
 
 	// Parse dotted name: foo.bar.baz
 	uint path_start = self.current.offset;
+	Token last_ident = self.current; // track last identifier for name/position
+	bool is_star = false;
 	if (self.at_identifier()) {
+		last_ident = self.current;
 		self.advance();
 		while (self.eat(DOT)) {
 			if (self.eat(MULT)) {
 				// Wildcard import: foo.bar.*
+				is_star = true;
 				break;
 			}
 			if (self.at_identifier()) {
+				last_ident = self.current;
 				self.advance();
 			} else {
 				break;
@@ -420,10 +425,25 @@ fn void Parser.parse_import_decl(Parser* self) {
 	uint path_end = self.previous.offset + self.previous.len;
 	self.result.nodes[idx].extra_text = self.source[path_start:path_end - path_start];
 
-	// Optional alias: as Name
+	// Set name to last segment of import path (e.g., "MQQueue" for com.ibm.mq.jms.MQQueue)
+	// so that build_location_from_node returns the correct position.
+	// For star imports, use the last identifier before ".*".
+	if (!is_star) {
+		self.result.nodes[idx].name = last_ident.text;
+		self.result.nodes[idx].name_line = last_ident.line;
+		self.result.nodes[idx].name_col = last_ident.col;
+		self.result.nodes[idx].name_offset = last_ident.offset;
+		self.result.nodes[idx].name_len = last_ident.len;
+	}
+
+	// Optional alias: as Name — overrides the default name
 	if (self.eat(KW_AS)) {
 		Token alias_tok = self.expect_identifier();
 		self.result.nodes[idx].name = alias_tok.text;
+		self.result.nodes[idx].name_line = alias_tok.line;
+		self.result.nodes[idx].name_col = alias_tok.col;
+		self.result.nodes[idx].name_offset = alias_tok.offset;
+		self.result.nodes[idx].name_len = alias_tok.len;
 	}
 
 	self.eat(SEMICOLON);

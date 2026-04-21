@@ -60,6 +60,9 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 		return null;
 	}
 
+	// Get type info for overload disambiguation
+	TypeInfo* ti = store.get_types(uri) ?? null;
+
 	// Detect call context: prefer AST-based detection, fall back to lexer
 	bool is_call = is_call_context_ast(pr, tok.offset) || is_call_context(doc.content, tok);
 
@@ -70,13 +73,13 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	// global fallback to avoid matching same-named declarations in
 	// unrelated scopes. Kotlin priority: local-in-lambda > receiver > outer.
 	if (!is_declared_in_lambda_scope(pr, target_name, tok.offset)) {
-		if (try result = find_receiver_lambda_member_definition(pr, workspace, target_name, tok.offset, uri)) {
+		if (try result = find_receiver_lambda_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
 			return result;
 		}
 	}
 
 	// Find definition using scope-aware AST search
-	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
+	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call, ti)) {
 		log::debug("[def] found via AST scope search");
 		return build_location_from_node(uri, node);
 	}
@@ -92,7 +95,6 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	// ── Dot-member navigation ────────────────────────────────────
 	// If the token is a member of a DOT_EXPR, resolve the receiver type
 	// and search for the member declaration in the receiver class.
-	TypeInfo* ti = store.get_types(uri) ?? null;
 	bool is_dot_member = is_token_dot_member(pr, tok);
 	if (ti != null) {
 		if (try result = find_dot_member_definition(pr, ti, store, workspace, tok, uri)) {
@@ -179,23 +181,177 @@ fn int find_call_arg_count(ParseResult* pr, String target_name, uint cursor_offs
 }
 
 /**
- * Pick the best FUN_DECL among candidates by matching argument count.
+ * Collect argument type names from a CALL_EXPR at the cursor position.
+ * Uses TypeInfo to resolve each argument's type. Returns count of filled entries.
+ */
+fn usz find_call_arg_types(ParseResult* pr, TypeInfo* ti, String target_name, uint cursor_offset, String[] out_types) {
+	if (ti == null) return 0;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != target_name) continue;
+		if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) continue;
+
+		usz count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.kind == NAME_EXPR && child.name == target_name) continue;
+			if (child.kind == LAMBDA_EXPR) continue;
+			if (count >= out_types.len) break;
+
+			if (ti.has_type[j]) {
+				out_types[count] = ti.node_types[j].name;
+			} else {
+				out_types[count] = "";
+			}
+			count++;
+		}
+		return count;
+	}
+	return 0;
+}
+
+/**
+ * Pick the best FUN_DECL among candidates by matching argument count
+ * and optionally argument types.
  * If call_arg_count is -1, returns the first func_match (no scoring).
  */
-fn AstNode* pick_best_overload(ParseResult* pr, AstNode*[] candidates, usz count, int call_arg_count) {
+fn AstNode* pick_best_overload(ParseResult* pr, AstNode*[] candidates, uint[] candidate_indices, usz count, int call_arg_count, String[] arg_types = {}, String[] named_args = {}) {
 	if (count == 0) return null;
 	if (count == 1 || call_arg_count < 0) return candidates[0];
 
-	// Try to find exact parameter count match
+	// Collect candidates with matching param count
+	AstNode*[16] param_matches;
+	uint[16] pm_indices;
+	usz pm_count = 0;
 	for (usz i = 0; i < count; i++) {
 		uint param_count = ast::count_children_of_kind(pr, candidates[i], PARAM);
-		if (param_count == (uint)call_arg_count) {
-			return candidates[i];
+		if (param_count == (uint)call_arg_count && pm_count < 16) {
+			param_matches[pm_count] = candidates[i];
+			pm_indices[pm_count] = candidate_indices[i];
+			pm_count++;
 		}
 	}
 
-	// No exact match -- return first candidate
-	return candidates[0];
+	if (pm_count == 0) return candidates[0];
+	if (pm_count == 1) return param_matches[0];
+
+	// Multiple param-count matches — try type-based + named arg disambiguation
+	if (arg_types.len > 0 || named_args.len > 0) {
+		AstNode* best = null;
+		int best_score = -1;
+		for (usz i = 0; i < pm_count; i++) {
+			int score = 0;
+			if (arg_types.len > 0) {
+				score += score_param_types(pr, pm_indices[i], arg_types);
+			}
+			if (named_args.len > 0) {
+				score += score_named_args(pr, pm_indices[i], named_args);
+			}
+			if (score > best_score) {
+				best_score = score;
+				best = param_matches[i];
+			}
+		}
+		if (best != null) return best;
+	}
+
+	return param_matches[0];
+}
+
+/**
+ * Score how well a FUN_DECL's parameter types match the given argument types.
+ * Returns number of matching type names (higher = better).
+ */
+fn int score_param_types(ParseResult* pr, uint fun_idx, String[] arg_types) {
+	int score = 0;
+	usz arg_idx = 0;
+
+	for (uint i = 0; i < pr.node_count && arg_idx < arg_types.len; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.parent != fun_idx) continue;
+		if (n.kind != PARAM) continue;
+
+		if (arg_types[arg_idx].len > 0 && n.type_text.len > 0) {
+			String param_type = strip_type_suffix(n.type_text);
+			String arg_type = strip_type_suffix(arg_types[arg_idx]);
+			if (param_type == arg_type) {
+				score++;
+			}
+		}
+		arg_idx++;
+	}
+	return score;
+}
+
+/**
+ * Strip generic parameters and nullable suffix from a type name.
+ * "List<String>?" -> "List", "String" -> "String"
+ */
+fn String strip_type_suffix(String t) {
+	for (usz k = 0; k < t.len; k++) {
+		if (t[k] == '<' || t[k] == '?') {
+			return t[:k];
+		}
+	}
+	return t;
+}
+
+/**
+ * Extract named argument names from a CALL_EXPR.
+ * In Kotlin, `foo(name = "x", count = 5)` has ASSIGNMENT_EXPR children
+ * whose first child NAME_EXPR gives the argument name.
+ */
+fn usz find_call_named_args(ParseResult* pr, String target_name, uint cursor_offset, String[] out_names) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != target_name) continue;
+		if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) continue;
+
+		usz count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != i) continue;
+			if (child.kind != ASSIGNMENT_EXPR) continue;
+
+			// First child of ASSIGNMENT_EXPR is the name
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				if (pr.nodes[k].kind == NAME_EXPR && pr.nodes[k].name.len > 0) {
+					if (count < out_names.len) {
+						out_names[count] = pr.nodes[k].name;
+						count++;
+					}
+				}
+				break; // only first child
+			}
+		}
+		return count;
+	}
+	return 0;
+}
+
+/**
+ * Score how well a FUN_DECL's parameter names match the given named arguments.
+ * Returns number of matching parameter names (higher = better).
+ */
+fn int score_named_args(ParseResult* pr, uint fun_idx, String[] named_args) {
+	int score = 0;
+	for (usz i = 0; i < named_args.len; i++) {
+		for (uint k = 0; k < pr.node_count; k++) {
+			AstNode* p = &pr.nodes[k];
+			if (p.parent != fun_idx) continue;
+			if (p.kind != PARAM) continue;
+			if (p.name == named_args[i]) {
+				score++;
+				break;
+			}
+		}
+	}
+	return score;
 }
 
 /**
@@ -205,13 +361,19 @@ fn AstNode* pick_best_overload(ParseResult* pr, AstNode*[] candidates, usz count
  * When multiple overloads match, prefers the one whose parameter
  * count matches the call's argument count.
  */
-fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cursor_offset, bool is_call) {
+fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
 	if (pr.node_count == 0) return ast::NOT_FOUND~;
 
-	// If this is a call, find the argument count for overload resolution
+	// If this is a call, find the argument count and types for overload resolution
 	int call_arg_count = -1;
+	String[16] call_arg_types;
+	usz call_arg_type_count = 0;
+	String[16] call_named_args;
+	usz call_named_arg_count = 0;
 	if (is_call) {
 		call_arg_count = find_call_arg_count(pr, target_name, cursor_offset);
+		call_arg_type_count = find_call_arg_types(pr, ti, target_name, cursor_offset, call_arg_types[..]);
+		call_named_arg_count = find_call_named_args(pr, target_name, cursor_offset, call_named_args[..]);
 	}
 
 	// Find the innermost scope containing the cursor.
@@ -235,7 +397,14 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 		// Search direct children of this scope for matching declarations
 		AstNode* first_match = null;
 		AstNode*[16] func_candidates;
+		uint[16] func_indices;
 		usz func_count = 0;
+
+		// Class members are visible throughout class body (no order constraint).
+		// Local declarations (in BLOCK, FUN_DECL, LAMBDA_EXPR, FOR_STMT, CATCH_CLAUSE)
+		// are only visible after their declaration point.
+		bool is_class_scope = scope.kind == CLASS_DECL || scope.kind == INTERFACE_DECL ||
+			scope.kind == OBJECT_DECL || scope.kind == COMPANION_OBJECT_DECL || scope.kind == FILE;
 
 		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
@@ -243,17 +412,23 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 			if (!is_definition_target(n.kind)) continue;
 			if (n.name != target_name) continue;
 
+			// Declaration-before-use: in local scopes, skip declarations after cursor
+			if (!is_class_scope && (n.kind == PROPERTY_DECL || n.kind == PARAM)) {
+				if (n.start_offset > cursor_offset) continue;
+			}
+
 			if (first_match == null) {
 				first_match = n;
 			}
 			if (n.kind == FUN_DECL && func_count < 16) {
 				func_candidates[func_count] = n;
+				func_indices[func_count] = i;
 				func_count++;
 			}
 		}
 
 		if (is_call && func_count > 0) {
-			return pick_best_overload(pr, func_candidates[:func_count], func_count, call_arg_count);
+			return pick_best_overload(pr, func_candidates[:func_count], func_indices[:func_count], func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
 		}
 		if (first_match != null) {
 			return first_match;
@@ -270,10 +445,16 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 	// The scope-walk didn't find a match. This happens when the
 	// identifier refers to a member of a class/object that doesn't
 	// contain the cursor (e.g. `nob.module { }` or `Nob.new(args)`).
-	// Search ALL declarations in the entire AST as a fallback.
+	// Search ALL declarations in the entire AST, but prefer:
+	// 1. Declarations in enclosing scopes (closest to cursor)
+	// 2. Declarations before the cursor (declaration-before-use)
+	// 3. Top-level declarations over nested ones in unrelated scopes
 	{
-		AstNode* first_match = null;
+		AstNode* best_match = null;
+		int best_score = -1;
 		AstNode*[16] func_candidates;
+		uint[16] func_indices;
+		int[16] func_scores;
 		usz func_count = 0;
 
 		for (uint i = 0; i < pr.node_count; i++) {
@@ -281,24 +462,90 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 			if (!is_definition_target(n.kind)) continue;
 			if (n.name != target_name) continue;
 
-			if (first_match == null) {
-				first_match = n;
+			// Score: higher = better match
+			// +8: top-level (parent is FILE node 0)
+			// +4: in an enclosing scope (ancestor contains cursor)
+			// +2: declared before cursor
+			// -2: nested inside a class/object that doesn't enclose cursor
+			//     (penalize but don't exclude — document_highlight needs these)
+			int score = 0;
+			if (n.parent == 0 || n.parent == ast::NO_PARENT) {
+				score += 8;
+			}
+			if (n.start_offset < cursor_offset) {
+				score += 2;
+			}
+			// Check if the declaration's parent scope encloses cursor
+			if (n.parent < pr.node_count && n.parent != 0) {
+				AstNode* parent = &pr.nodes[n.parent];
+				if (cursor_offset >= parent.start_offset && cursor_offset < parent.end_offset) {
+					score += 4;
+				}
+			}
+			// Penalize declarations nested in non-enclosing classes
+			if (is_nested_in_non_enclosing_class(pr, i, cursor_offset)) {
+				score -= 2;
+			}
+
+			if (score > best_score) {
+				best_score = score;
+				best_match = n;
 			}
 			if (n.kind == FUN_DECL && func_count < 16) {
 				func_candidates[func_count] = n;
+				func_indices[func_count] = i;
+				func_scores[func_count] = score;
 				func_count++;
 			}
 		}
 
 		if (is_call && func_count > 0) {
-			return pick_best_overload(pr, func_candidates[:func_count], func_count, call_arg_count);
+			// Filter func_candidates to those with best score, then pick by overload
+			int max_func_score = -1;
+			for (usz fi = 0; fi < func_count; fi++) {
+				if (func_scores[fi] > max_func_score) max_func_score = func_scores[fi];
+			}
+			AstNode*[16] best_funcs;
+			uint[16] best_func_indices;
+			usz best_func_count = 0;
+			for (usz fi = 0; fi < func_count; fi++) {
+				if (func_scores[fi] == max_func_score && best_func_count < 16) {
+					best_funcs[best_func_count] = func_candidates[fi];
+					best_func_indices[best_func_count] = func_indices[fi];
+					best_func_count++;
+				}
+			}
+			return pick_best_overload(pr, best_funcs[:best_func_count], best_func_indices[:best_func_count], best_func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
 		}
-		if (first_match != null) {
-			return first_match;
+		if (best_match != null) {
+			return best_match;
 		}
 	}
 
 	return ast::NOT_FOUND~;
+}
+
+/**
+ * Check if a declaration node at `node_idx` is nested inside a class/object
+ * that does NOT enclose the cursor. Walk parent chain; if any ancestor is
+ * a class-like node whose range does not contain cursor_offset, return true.
+ * Top-level declarations (parent chain reaches FILE without hitting a class) pass.
+ */
+fn bool is_nested_in_non_enclosing_class(ParseResult* pr, uint node_idx, uint cursor_offset) {
+	uint current = pr.nodes[node_idx].parent;
+	while (current != ast::NO_PARENT && current < pr.node_count) {
+		AstNode* n = &pr.nodes[current];
+		if (n.kind == CLASS_DECL || n.kind == INTERFACE_DECL ||
+			n.kind == OBJECT_DECL || n.kind == COMPANION_OBJECT_DECL) {
+			// This ancestor is a class — does it enclose cursor?
+			if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) {
+				return true; // cursor outside this class → skip
+			}
+		}
+		if (current == 0) break; // reached FILE
+		current = n.parent;
+	}
+	return false;
 }
 
 /**
@@ -428,19 +675,10 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 				if (ti.has_type[j]) {
 					receiver_type = ti.node_types[j];
 				} else if (pr.nodes[j].kind == NAME_EXPR) {
-					// Try to find the receiver's declaration type
+					// Try to find the receiver's declaration type (scope-aware)
 					String recv_name = pr.nodes[j].name;
-					for (uint k = 0; k < pr.node_count; k++) {
-						if ((ast::is_declaration(pr.nodes[k].kind) || pr.nodes[k].kind == PARAM) &&
-							pr.nodes[k].name == recv_name) {
-							if (ti.has_type[k]) {
-								receiver_type = ti.node_types[k];
-							} else if (pr.nodes[k].type_text.len > 0) {
-								receiver_type = types::parse_type_text(pr.nodes[k].type_text);
-							}
-							break;
-						}
-					}
+					uint recv_offset = pr.nodes[j].start_offset;
+					receiver_type = find_receiver_decl_type(pr, ti, recv_name, recv_offset);
 				} else if (pr.nodes[j].kind == DOT_EXPR) {
 					// Chained access: a.b.c — inner DOT_EXPR is the receiver.
 					// Try type info first, then resolve via inner DOT_EXPR's member name
@@ -518,10 +756,13 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 		if (workspace != null && workspace.dep_index.initialized) {
 			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr);
 			if (dep_result != null) return dep_result;
+		}
 
-			// Import-aware fallback: extension function from dep not keyed by receiver type
-			Object* import_result = find_dot_member_by_import(&workspace.dep_index, pr, member_name, current_uri);
-			if (import_result != null) return import_result;
+		// Search workspace for extension functions matching receiver type
+		if (workspace != null) {
+			if (try result = find_extension_by_receiver_and_name(workspace, type_name, member_name, current_uri, pr)) {
+				return result;
+			}
 		}
 
 		// Check if this is a known scope function (apply, let, also, run, etc.)
@@ -986,7 +1227,7 @@ fn Object*? find_extension_receiver_member_definition(ParseResult* pr, Workspace
 }
 
 fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
-		String target_name, uint cursor_offset, String current_uri) {
+		DocumentStore* store, String target_name, uint cursor_offset, String current_uri) {
 	// Find the NAME_EXPR at the cursor position
 	uint name_node_idx = ast::NO_PARENT;
 	for (uint i = 0; i < pr.node_count; i++) {
@@ -1009,6 +1250,16 @@ fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceInd
 		uint call_idx = find_call_parent_of_lambda_def(pr, lambda_idx);
 		if (call_idx != ast::NO_PARENT) {
 			String receiver_type = find_receiver_type_for_call_def(pr, call_idx);
+
+			// Cross-file fallback: look up callee in workspace, parse its file,
+			// scan for lambda receiver param type
+			if (receiver_type.len == 0 && workspace != null) {
+				String callee_name = pr.nodes[call_idx].name;
+				if (callee_name.len > 0) {
+					receiver_type = find_lambda_receiver_in_workspace(workspace, store, callee_name);
+				}
+			}
+
 			if (receiver_type.len > 0) {
 				// Found a receiver type -- look for the member in that class
 				if (try result = find_member_in_class_ast(pr, receiver_type, target_name, current_uri)) {
@@ -1016,7 +1267,7 @@ fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceInd
 				}
 				// Try workspace
 				if (workspace != null) {
-					if (try result = find_member_in_workspace_class(workspace, null, receiver_type, target_name)) {
+					if (try result = find_member_in_workspace_class(workspace, store, receiver_type, target_name)) {
 						return result;
 					}
 				}
@@ -1065,22 +1316,80 @@ fn uint find_call_parent_of_lambda_def(ParseResult* pr, uint lambda_idx) {
  * Searches from the reference point upward through scopes.
  */
 fn String find_variable_type_in_ast(ParseResult* pr, uint ref_offset, String var_name) {
-	for (uint i = 0; i < pr.node_count; i++) {
+	// Scope-aware: find innermost scope containing ref_offset, walk outward.
+	// This ensures we resolve the correct variable when names shadow.
+	uint scope_idx = 0; // FILE node
+	for (uint i = 1; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
-		if (n.kind != PROPERTY_DECL && n.kind != PARAM) continue;
-		if (n.name != var_name) continue;
-		if (n.type_text.len > 0) {
-			// Strip generics and nullable for simple type name
-			String t = n.type_text;
-			for (usz k = 0; k < t.len; k++) {
-				if (t[k] == '<' || t[k] == '?') {
-					return t[:k];
-				}
-			}
-			return t;
+		if (!is_scope_node(n.kind)) continue;
+		if (ref_offset >= n.start_offset && ref_offset < n.end_offset) {
+			scope_idx = i;
 		}
 	}
+
+	uint current = scope_idx;
+	while (true) {
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.parent != current) continue;
+			if (n.kind != PROPERTY_DECL && n.kind != PARAM) continue;
+			if (n.name != var_name) continue;
+			if (n.type_text.len > 0) {
+				String t = n.type_text;
+				for (usz k = 0; k < t.len; k++) {
+					if (t[k] == '<' || t[k] == '?') {
+						return t[:k];
+					}
+				}
+				return t;
+			}
+		}
+		AstNode* scope = &pr.nodes[current];
+		if (current == 0 || scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
 	return "";
+}
+
+/**
+ * Scope-aware lookup of a receiver variable's declaration type.
+ * Walks from innermost scope outward, returning the nearest declaration's type.
+ * Used by dot-member resolution to find the correct receiver type when
+ * multiple variables share the same name in different scopes.
+ */
+fn TypeRef find_receiver_decl_type(ParseResult* pr, TypeInfo* ti, String var_name, uint ref_offset) {
+	// Find innermost scope
+	uint scope_idx = 0;
+	for (uint i = 1; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!is_scope_node(n.kind)) continue;
+		if (ref_offset >= n.start_offset && ref_offset < n.end_offset) {
+			scope_idx = i;
+		}
+	}
+
+	uint current = scope_idx;
+	while (true) {
+		for (uint k = 0; k < pr.node_count; k++) {
+			AstNode* n = &pr.nodes[k];
+			if (n.parent != current) continue;
+			if (!ast::is_declaration(n.kind) && n.kind != PARAM) continue;
+			if (n.name != var_name) continue;
+
+			if (ti != null && ti.has_type[k]) {
+				return ti.node_types[k];
+			}
+			if (n.type_text.len > 0) {
+				return types::parse_type_text(n.type_text);
+			}
+			// Found declaration but no type info — still the right decl
+			return types::TYPE_UNKNOWN;
+		}
+		AstNode* scope = &pr.nodes[current];
+		if (current == 0 || scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+	return types::TYPE_UNKNOWN;
 }
 
 fn String find_receiver_type_for_call_def(ParseResult* pr, uint call_idx) {
@@ -1152,6 +1461,73 @@ fn String find_receiver_type_for_call_def(ParseResult* pr, uint call_idx) {
 		}
 	}
 
+	return "";
+}
+
+/**
+ * Look up a function by name in the workspace, parse its file, and extract
+ * the receiver type from its last function-type parameter with a receiver.
+ * E.g., `fun buildModule(block: Module.() -> Unit)` -> "Module"
+ */
+fn String find_lambda_receiver_in_workspace(WorkspaceIndex* workspace, DocumentStore* store, String callee_name) {
+	static char[256] recv_buf;
+	if (try indices = workspace.lookup_by_name(callee_name)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.kind != SymbolKind.FUNCTION) continue;
+
+			// Get content: from open doc or disk
+			String content;
+			char[] disk_data;
+
+			if (store != null) {
+				if (try doc = store.get(sym.uri)) {
+					content = doc.content;
+				}
+			}
+
+			if (content.len == 0) {
+				String path = workspace::uri_to_path(sym.uri);
+				if (path.len > 0) {
+					if (try data = std::io::file::load(tmem, path)) {
+						disk_data = data;
+						content = (String)disk_data;
+					}
+				}
+			}
+
+			if (content.len == 0) continue;
+
+			// Parse the file and scan the function's PARAM children
+			String found_receiver;
+			@pool() {
+				ParseResult* cross_pr = mem::new(ParseResult);
+				defer mem::free(cross_pr);
+				parser::parse(content, cross_pr);
+				for (uint j = 0; j < cross_pr.node_count; j++) {
+					AstNode* n = &cross_pr.nodes[j];
+					if (n.kind != FUN_DECL) continue;
+					if (n.name != callee_name) continue;
+
+					// Scan PARAM children for function type with receiver
+					for (uint k = 0; k < cross_pr.node_count; k++) {
+						AstNode* p = &cross_pr.nodes[k];
+						if (p.parent != j) continue;
+						if (p.kind != PARAM) continue;
+						if (p.type_text.len == 0) continue;
+
+						TypeRef tref = types::parse_type_text(p.type_text);
+						if (tref.kind == FUNCTION && tref.receiver_type_name.len > 0) {
+							usz copy_len = tref.receiver_type_name.len < 256 ? tref.receiver_type_name.len : 255;
+							recv_buf[:copy_len] = tref.receiver_type_name[:copy_len];
+							found_receiver = (String)recv_buf[:copy_len];
+						}
+					}
+				}
+			};
+			if (found_receiver.len > 0) return found_receiver;
+		}
+	}
 	return "";
 }
 
@@ -1271,6 +1647,8 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 
 	WorkspaceSymbol* first_match = null;
 	WorkspaceSymbol* func_match = null;
+	WorkspaceSymbol* same_pkg_match = null;       // same package as current file
+	WorkspaceSymbol* same_pkg_func_match = null;   // same package, function kind
 	WorkspaceSymbol* imported_match = null;
 	WorkspaceSymbol* imported_func_match = null;
 	WorkspaceSymbol* imported_file_match = null;      // imported + filename matches symbol name
@@ -1282,6 +1660,9 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 
 		// Skip symbols from the current file (already checked via AST)
 		if (sym.uri == current_uri) continue;
+
+		// Skip private symbols from other files
+		if (sym.is_private) continue;
 
 		// Skip symbols not reachable via module dependency graph
 		String from_mod = workspace.get_file_module(current_uri);
@@ -1300,6 +1681,12 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		}
 		if (func_match == null && sym.kind == FUNCTION) {
 			func_match = sym;
+		}
+
+		// Track same-package symbols (visible without import in Kotlin)
+		if (imports.package_name.len > 0 && sym.package_name == imports.package_name) {
+			if (same_pkg_match == null) same_pkg_match = sym;
+			if (same_pkg_func_match == null && sym.kind == FUNCTION) same_pkg_func_match = sym;
 		}
 
 		// Check import visibility
@@ -1347,7 +1734,14 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		} else if (imported_match != null) {
 			chosen = imported_match;
 		} else if (!has_explicit) {
-			chosen = func_match != null ? func_match : first_match;
+			// Prefer same-package > any visible
+			if (same_pkg_func_match != null) {
+				chosen = same_pkg_func_match;
+			} else if (same_pkg_match != null) {
+				chosen = same_pkg_match;
+			} else {
+				chosen = func_match != null ? func_match : first_match;
+			}
 		}
 	} else {
 		if (imported_file_match != null) {
@@ -1355,7 +1749,7 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		} else if (imported_match != null) {
 			chosen = imported_match;
 		} else if (!has_explicit) {
-			chosen = first_match;
+			chosen = same_pkg_match != null ? same_pkg_match : first_match;
 		}
 	}
 
@@ -1511,18 +1905,10 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 		if (ti.has_type[j]) {
 			recv_type = ti.node_types[j];
 		} else if (pr.nodes[j].kind == NAME_EXPR) {
-			// Look up the variable declaration type
+			// Look up the variable declaration type (scope-aware)
 			String var_name = pr.nodes[j].name;
-			for (uint k = 0; k < pr.node_count; k++) {
-				if ((ast::is_declaration(pr.nodes[k].kind) || pr.nodes[k].kind == PARAM) && pr.nodes[k].name == var_name) {
-					if (ti.has_type[k]) {
-						recv_type = ti.node_types[k];
-					} else if (pr.nodes[k].type_text.len > 0) {
-						recv_type = types::parse_type_text(pr.nodes[k].type_text);
-					}
-					break;
-				}
-			}
+			uint var_offset = pr.nodes[j].start_offset;
+			recv_type = find_receiver_decl_type(pr, ti, var_name, var_offset);
 			// If not a variable, it might be a class/object reference
 			if (recv_type.kind == UNKNOWN) {
 				recv_type = { .kind = SIMPLE, .name = var_name };
@@ -1556,14 +1942,112 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 				break;
 			}
 		}
+
+		// Try dep index for method/field return types (JDK, library classes)
+		if (workspace.dep_index.initialized) {
+			TypeRef dep_type = resolve_dep_member_type(&workspace.dep_index, recv_type.name, member_name);
+			if (dep_type.kind != UNKNOWN) return dep_type;
+		}
 	}
 
 	return types::TYPE_UNKNOWN;
 }
 
+/**
+ * Resolve the return type of a dep method/field by parsing the signature.
+ * Signature format: "fun name(params): ReturnType" or "val name: Type"
+ */
+fn TypeRef resolve_dep_member_type(DependencyIndex* dep_index, String class_name, String member_name) {
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(member_name, &matches);
+
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].class_name != class_name) continue;
+		if (matches[i].kind != DEP_METHOD && matches[i].kind != DEP_FIELD) continue;
+
+		String sig = matches[i].signature;
+		if (sig.len == 0) continue;
+
+		// Extract return type: find last "): " or ": " pattern
+		String ret = extract_return_type_from_signature(sig);
+		if (ret.len > 0) {
+			return types::parse_type_text(ret);
+		}
+	}
+	return types::TYPE_UNKNOWN;
+}
+
+/**
+ * Extract the return type from a Kotlin-style signature.
+ * "fun stream(): Stream<E>" -> "Stream<E>"
+ * "val size: Int" -> "Int"
+ * "fun add(element: E): Boolean" -> "Boolean"
+ */
+fn String extract_return_type_from_signature(String sig) {
+	// For val/var: "val name: Type" — find ": " after the name
+	if (sig.len > 4 && (sig[..2] == "val" || sig[..2] == "var")) {
+		for (usz i = 4; i + 1 < sig.len; i++) {
+			if (sig[i] == ':' && i + 1 < sig.len && sig[i + 1] == ' ') {
+				return sig[i + 2..];
+			}
+		}
+		return "";
+	}
+
+	// For fun: find "): " after closing paren
+	// Need to handle nested parens in param types
+	int paren_depth = 0;
+	for (usz i = 0; i + 2 < sig.len; i++) {
+		if (sig[i] == '(') paren_depth++;
+		if (sig[i] == ')') {
+			paren_depth--;
+			if (paren_depth == 0 && i + 2 < sig.len && sig[i + 1] == ':' && sig[i + 2] == ' ') {
+				return sig[i + 3..];
+			}
+		}
+	}
+	return "";
+}
+
 // ── Extension function fallback ───────────────────────────────────
 
 faultdef NO_EXTENSION_FOUND;
+
+/**
+ * Search workspace for an extension function matching BOTH receiver type
+ * and member name. More precise than find_extension_by_name.
+ */
+fn Object*? find_extension_by_receiver_and_name(WorkspaceIndex* workspace, String receiver_type,
+		String member_name, String current_uri, ParseResult* pr) {
+	ImportMap imports = workspace::build_import_map(pr);
+
+	if (try indices = workspace.lookup_by_name(member_name)) {
+		for (usz i = 0; i < indices.len(); i++) {
+			WorkspaceSymbol* sym = workspace.get_symbol(indices.get(i));
+			if (sym.uri == current_uri) continue;
+			if (sym.kind != symbols::SymbolKind.FUNCTION && sym.kind != symbols::SymbolKind.PROPERTY) continue;
+			if (sym.receiver.len == 0) continue;
+
+			// Match receiver type: strip generics/nullable from stored receiver
+			String recv = sym.receiver;
+			usz recv_end = 0;
+			while (recv_end < recv.len && recv[recv_end] != '<' && recv[recv_end] != '?' && recv[recv_end] != '.') {
+				recv_end++;
+			}
+			if (recv_end == 0) continue;
+			if (recv[:recv_end] != receiver_type) continue;
+
+			// Check import + module visibility
+			String visible = workspace::is_symbol_visible(sym, &imports, member_name);
+			if (visible.len == 0) continue;
+			if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
+
+			return build_location_from_workspace_symbol(sym);
+		}
+	}
+
+	return NO_EXTENSION_FOUND~;
+}
 
 /**
  * Search all member_cache entries for an extension function matching

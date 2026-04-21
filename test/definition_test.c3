@@ -1493,3 +1493,181 @@ fn void definition_dot_member_via_explicit_import() @test {
 		// Exercised without crashing. Real sources would navigate.
 	};
 }
+
+// ── Global fallback prefers top-level declaration before cursor ─────
+
+fn void global_fallback_prefers_top_level_before_cursor() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Two classes both have `process()`, cursor on `process()` at top level
+		// outside both classes. Global fallback should prefer top-level decl.
+		String content =
+			"fun process() {}\nclass Foo {\n    fun process() {}\n}\nfun main() { process() }";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "process" in main() call — line 4, col 14
+		Object* params = make_params("file:///test.kt", 4, 14);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+
+		assert(result != null, "expected a Location result");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to top-level fun process() at line 0, not the nested one at line 2
+		assert(line == 0, "global fallback should prefer top-level decl, got line %d", line);
+	};
+}
+
+// ── Global fallback prefers enclosing scope ────────────────────────
+
+fn void global_fallback_prefers_declaration_before_use() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `name` declared inside a class and at top level. Reference inside class
+		// should resolve to inner class member, not top-level.
+		String content =
+			"val name = \"top\"\nclass Foo {\n    val name = \"inner\"\n    fun bar() { println(name) }\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "name" in bar() — line 3, col 25
+		Object* params = make_params("file:///test.kt", 3, 25);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+
+		assert(result != null, "expected a Location result");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to class member `name` at line 2 (scope walk finds it)
+		assert(line == 2, "should resolve to inner scope decl, got line %d", line);
+	};
+}
+
+// Dot member with known receiver type should NOT fall back to import-based
+// name matching. E.g., record.get("key") should NOT navigate to HashMap.get()
+// just because java.util.* is imported.
+fn void definition_dot_member_no_import_fallback_when_receiver_known() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a class "Record" with a member "value"
+		ws.index_file("file:///record.kt",
+			"class Record(val value: String)");
+
+		// Index another class with a "get" method in a different file
+		ws.index_file("file:///cache.kt",
+			"class Cache {\n  fun get(key: String): String = \"\"\n}");
+
+		// File under test: record.get("x") — Record has no "get" method
+		String content =
+`import java.util.*
+fun test(record: Record) {
+    record.get("x")
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "get" in "record.get" at line 2, col 11
+		Object* params = make_params("file:///test.kt", 2, 11);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// "get" is not a member of Record, should return null rather than
+		// incorrectly navigating to Cache.get or HashMap.get
+		assert(result == null, "should NOT find definition for non-existent member");
+	};
+}
+
+// Type-based overload disambiguation: when two overloads have the same
+// name and param count, prefer the one whose param types match arg types.
+fn void definition_overload_by_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+`fun process(input: String): String = input
+fun process(input: Int): Int = input
+fun main() {
+    val x: String = "hello"
+    process(x)
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "process" call at line 4, col 4
+		Object* params = make_params("file:///test.kt", 4, 4);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+
+		assert(result != null, "expected definition result");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should go to line 0 (fun process(input: String)) not line 1 (fun process(input: Int))
+		assert(line == 0, "expected String overload at line 0, got line %d", line);
+	};
+}
+
+// ── extract_return_type_from_signature tests ─────────────────────
+
+fn void definition_extract_return_type_fun() @test {
+	String sig = "fun stream(): Stream<E>";
+	String ret = definition::extract_return_type_from_signature(sig);
+	assert(ret == "Stream<E>", "expected 'Stream<E>', got '%s'", ret);
+}
+
+fn void definition_extract_return_type_fun_with_params() @test {
+	String sig = "fun add(element: E): Boolean";
+	String ret = definition::extract_return_type_from_signature(sig);
+	assert(ret == "Boolean", "expected 'Boolean', got '%s'", ret);
+}
+
+fn void definition_extract_return_type_val() @test {
+	String sig = "val size: Int";
+	String ret = definition::extract_return_type_from_signature(sig);
+	assert(ret == "Int", "expected 'Int', got '%s'", ret);
+}
+
+fn void definition_extract_return_type_void() @test {
+	String sig = "fun clear()";
+	String ret = definition::extract_return_type_from_signature(sig);
+	assert(ret == "", "expected empty for void, got '%s'", ret);
+}
+
+fn void definition_extract_return_type_nested_parens() @test {
+	String sig = "fun map(transform: (T) -> R): List<R>";
+	String ret = definition::extract_return_type_from_signature(sig);
+	assert(ret == "List<R>", "expected 'List<R>', got '%s'", ret);
+}
+
+fn void definition_overload_by_named_arg() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Two overloads with same param count but different param names
+		String src = `fun connect(host: String, port: Int) { }
+fun connect(url: String, timeout: Int) { }
+fun main() { connect(url = "http://x", timeout = 30) }`;
+		//                    ^ cursor on "connect" at line 2, col 14
+		store.open("file:///test.kt", "kotlin", 1, src);
+
+		Object* params = make_params("file:///test.kt", 2, 14);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected a definition result");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		// Should pick the second overload (url, timeout) on line 1
+		assert(line == 1, "expected line 1 (url/timeout overload), got %d", line);
+	};
+}

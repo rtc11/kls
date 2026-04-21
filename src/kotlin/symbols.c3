@@ -114,57 +114,58 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 				}
 				saw_private = false;
 
-			// Modifier keywords: skip and let next iteration handle
-			// the declaration keyword that follows.
-			case KW_DATA:
-				nextcase;
-			case KW_ENUM:
-				nextcase;
-			case KW_SEALED:
-				nextcase;
-			case KW_ANNOTATION:
-				nextcase;
-			case KW_VALUE:
-				nextcase;
-			case KW_ABSTRACT:
-				nextcase;
-			case KW_OPEN:
-				nextcase;
-			case KW_INNER:
-				nextcase;
-			case KW_PRIVATE:
-				saw_private = true;
-				nextcase;
-			case KW_PROTECTED:
-				nextcase;
-			case KW_PUBLIC:
-				nextcase;
-			case KW_INTERNAL:
-				nextcase;
-			case KW_FINAL:
-				nextcase;
-			case KW_OVERRIDE:
-				nextcase;
-			case KW_EXTERNAL:
-				nextcase;
-			case KW_INLINE:
-				nextcase;
-			case KW_INFIX:
-				nextcase;
-			case KW_OPERATOR:
-				nextcase;
-			case KW_SUSPEND:
-				nextcase;
-			case KW_TAILREC:
-				nextcase;
-			case KW_EXPECT:
-				nextcase;
-			case KW_ACTUAL:
-				nextcase;
-			case KW_LATEINIT:
-				nextcase;
-			case KW_CONST:
-				break;
+		// Modifier keywords: skip and let next iteration handle
+		// the declaration keyword that follows.
+		case KW_DATA:
+			nextcase;
+		case KW_ENUM:
+			nextcase;
+		case KW_SEALED:
+			nextcase;
+		case KW_ANNOTATION:
+			nextcase;
+		case KW_VALUE:
+			nextcase;
+		case KW_ABSTRACT:
+			nextcase;
+		case KW_OPEN:
+			nextcase;
+		case KW_INNER:
+			nextcase;
+		case KW_PROTECTED:
+			nextcase;
+		case KW_PUBLIC:
+			nextcase;
+		case KW_INTERNAL:
+			nextcase;
+		case KW_FINAL:
+			nextcase;
+		case KW_OVERRIDE:
+			nextcase;
+		case KW_EXTERNAL:
+			nextcase;
+		case KW_INLINE:
+			nextcase;
+		case KW_INFIX:
+			nextcase;
+		case KW_OPERATOR:
+			nextcase;
+		case KW_SUSPEND:
+			nextcase;
+		case KW_TAILREC:
+			nextcase;
+		case KW_EXPECT:
+			nextcase;
+		case KW_ACTUAL:
+			nextcase;
+		case KW_LATEINIT:
+			nextcase;
+		case KW_CONST:
+			break;
+
+		case KW_PRIVATE:
+			saw_private = true;
+			break;
 
 			case KW_COMPANION:
 				// companion object [Name]
