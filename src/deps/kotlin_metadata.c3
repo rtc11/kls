@@ -73,6 +73,38 @@ struct KmTypeTable {
 	int first_nullable;  // types at index >= this are nullable
 }
 
+// ── JVM StringTableTypes Record ────────────────────────────────────
+
+const int STT_OP_NONE = 0;
+const int STT_OP_INTERNAL_TO_CLASS_ID = 1;  // replace '$' with '.'
+const int STT_OP_DESC_TO_CLASS_ID = 2;       // substring(1, len-1) then replace '$' with '.'
+
+struct SttRecord {
+	int predefined_index;     // -1 if not predefined
+	int operation;            // STT_OP_*
+	String override_string;   // non-empty if record has explicit string field
+	// substring_index and replace_char omitted for now (rare)
+}
+
+// Kotlin predefined strings (0-indexed, prefix "kotlin" implied by format)
+const String[44] PREDEFINED_STRINGS = {
+	"kotlin/Any", "kotlin/Nothing", "kotlin/Unit", "kotlin/Throwable",
+	"kotlin/Number", "kotlin/Byte", "kotlin/Double", "kotlin/Float",
+	"kotlin/Int", "kotlin/Long", "kotlin/Short", "kotlin/Boolean",
+	"kotlin/Char", "kotlin/CharSequence", "kotlin/String", "kotlin/Comparable",
+	"kotlin/Enum", "kotlin/Array", "kotlin/ByteArray", "kotlin/DoubleArray",
+	"kotlin/FloatArray", "kotlin/IntArray", "kotlin/LongArray", "kotlin/ShortArray",
+	"kotlin/BooleanArray", "kotlin/CharArray", "kotlin/Cloneable", "kotlin/Annotation",
+	"kotlin/collections/Iterable", "kotlin/collections/MutableIterable",
+	"kotlin/collections/Collection", "kotlin/collections/MutableCollection",
+	"kotlin/collections/List", "kotlin/collections/MutableList",
+	"kotlin/collections/Set", "kotlin/collections/MutableSet",
+	"kotlin/collections/Map", "kotlin/collections/MutableMap",
+	"kotlin/collections/Map.Entry", "kotlin/collections/MutableMap.MutableEntry",
+	"kotlin/collections/Iterator", "kotlin/collections/MutableIterator",
+	"kotlin/collections/ListIterator", "kotlin/collections/MutableListIterator",
+};
+
 struct KmClass {
 	int fq_name_id;
 	int flags;
@@ -85,6 +117,87 @@ struct KmClass {
 	KmTypeTable type_table;
 	usz qn_count;
 	QnEntry[MAX_QN_ENTRIES] qualified_names;
+	// JVM StringTableTypes: maps string IDs to resolved strings
+	usz stt_record_count;
+	SttRecord[128] stt_records;  // expanded (one per string index)
+}
+
+// ── JVM String Table Prefix ────────────────────────────────────────
+
+/**
+ * Parse the JvmStringTableTypes prefix in Kotlin JVM metadata d1.
+ * JVM metadata d1 = writeDelimitedTo(StringTableTypes) + Package/Class protobuf.
+ * writeDelimitedTo writes: varint(message_byte_size) + message_bytes.
+ * Populates km.stt_records with expanded records (one per string index).
+ */
+fn void parse_jvm_string_table_prefix(char[] data, usz* pos, KmClass* km) {
+	if (*pos >= data.len) return;
+	ulong msg_len = read_varint(data, pos);
+	usz msg_end = *pos + (usz)msg_len;
+	if (msg_end > data.len) msg_end = data.len;
+
+	km.stt_record_count = 0;
+
+	// Parse StringTableTypes message: field 1 = Record (repeated, length-delimited)
+	while (*pos < msg_end) {
+		usz prev = *pos;
+		FieldTag tag = read_tag(data, pos);
+		if (*pos > msg_end || *pos == prev) break;
+
+		if (tag.field_number == 1 && tag.wire_type == WIRE_LENGTH_DELIMITED) {
+			ulong rec_len = read_varint(data, pos);
+			usz rec_end = *pos + (usz)rec_len;
+			if (rec_end > msg_end) rec_end = msg_end;
+
+			// Parse Record fields
+			int range = 1;
+			int predefined_idx = -1;
+			int operation = STT_OP_NONE;
+			String override_str = "";
+
+			while (*pos < rec_end) {
+				usz rprev = *pos;
+				FieldTag rtag = read_tag(data, pos);
+				if (*pos > rec_end || *pos == rprev) break;
+
+				switch (rtag.field_number) {
+					case 1: // range (varint)
+						range = (int)read_varint(data, pos);
+					case 2: // predefined_index (varint)
+						predefined_idx = (int)read_varint(data, pos);
+					case 3: // operation (varint enum)
+						operation = (int)read_varint(data, pos);
+					case 6: // string (length-delimited)
+						if (rtag.wire_type == WIRE_LENGTH_DELIMITED) {
+							ulong slen = read_varint(data, pos);
+							usz s_end = *pos + (usz)slen;
+							if (s_end > rec_end) s_end = rec_end;
+							override_str = (String)data[*pos..s_end - 1];
+							*pos = s_end;
+						} else {
+							skip_field(data, pos, rtag.wire_type);
+						}
+					default:
+						skip_field(data, pos, rtag.wire_type);
+				}
+			}
+			*pos = rec_end;
+
+			// Expand range: add `range` copies of this record
+			for (int r = 0; r < range && km.stt_record_count < 128; r++) {
+				km.stt_records[km.stt_record_count] = {
+					.predefined_index = predefined_idx,
+					.operation = operation,
+					.override_string = override_str,
+				};
+				km.stt_record_count++;
+			}
+		} else {
+			skip_field(data, pos, tag.wire_type);
+		}
+	}
+
+	*pos = msg_end;
 }
 
 // ── Public API ─────────────────────────────────────────────────────
@@ -103,8 +216,9 @@ fn bool parse_metadata(ClassInfo* info, KmClass* out) {
 	char[] d1 = info.metadata_d1[:info.metadata_d1_len];
 	usz pos = 0;
 
-	// First pass: extract QualifiedNameTable and TypeTable
-	// Then extract functions, properties, supertypes
+	// JVM metadata d1 starts with a length-delimited StringTableTypes message
+	// (writeDelimitedTo format), followed by the actual Package/Class protobuf.
+	parse_jvm_string_table_prefix(d1, &pos, out);
 
 	if (info.metadata_kind == 1) {
 		// Class metadata
@@ -118,10 +232,71 @@ fn bool parse_metadata(ClassInfo* info, KmClass* out) {
 }
 
 /**
- * Resolve a QualifiedName ID to a simple class name using the string table.
- * Returns the simple name (last segment), not the full path.
+ * Resolve a string table index using JVM StringTableTypes records.
+ * Falls back to d2[id] if no records or out of range.
+ */
+fn String jvm_resolve_string(KmClass* km, int id, String[] d2, usz d2_len) {
+	if (id < 0) return "";
+
+	// If we have StringTableTypes records, use them
+	if (km.stt_record_count > 0 && (usz)id < km.stt_record_count) {
+		SttRecord* rec = &km.stt_records[id];
+
+		// Check for explicit override string
+		if (rec.override_string.len > 0) return rec.override_string;
+
+		// Check for predefined string
+		if (rec.predefined_index >= 0 && (usz)rec.predefined_index < 44) {
+			return PREDEFINED_STRINGS[rec.predefined_index];
+		}
+
+		// Use d2 string with optional operation
+		if ((usz)id >= d2_len) return "";
+		String s = d2[id];
+
+		if (rec.operation == STT_OP_INTERNAL_TO_CLASS_ID) {
+			// Replace '$' with '.' for inner classes: kotlin/Map$Entry -> kotlin/Map.Entry
+			return s; // For now return as-is; $ replacement done at use site if needed
+		} else if (rec.operation == STT_OP_DESC_TO_CLASS_ID) {
+			// Trim L...;  descriptor format: Lkotlin/String; -> kotlin/String
+			if (s.len >= 2 && s[0] == 'L' && s[s.len - 1] == ';') {
+				return s[1..s.len - 2];
+			}
+		}
+
+		return s;
+	}
+
+	// Fallback: direct d2 lookup (no records — shouldn't happen for JVM metadata)
+	if ((usz)id < d2_len) return d2[id];
+	return "";
+}
+
+/**
+ * Resolve a type name ID (class_name_id from KmType) to a simple class name.
+ * For JVM metadata, uses StringTableTypes records.
+ * For non-JVM, falls back to QualifiedNameTable.
  */
 fn String resolve_type_name(KmClass* km, int class_name_id, String[] d2, usz d2_len) {
+	// JVM path: use StringTableTypes records
+	if (km.stt_record_count > 0) {
+		String fqn = jvm_resolve_string(km, class_name_id, d2, d2_len);
+		if (fqn.len == 0) return "";
+		// Extract simple name: "kotlin/collections/List" -> "List"
+		// Find last '/' or '.'
+		usz last_sep = 0;
+		bool found_sep = false;
+		for (usz i = 0; i < fqn.len; i++) {
+			if (fqn[i] == '/' || fqn[i] == '.') {
+				last_sep = i;
+				found_sep = true;
+			}
+		}
+		if (found_sep) return fqn[last_sep + 1..];
+		return fqn;
+	}
+
+	// Non-JVM fallback: QualifiedNameTable
 	if (class_name_id < 0 || (usz)class_name_id >= km.qn_count) return "";
 	int str_id = km.qualified_names[class_name_id].short_name;
 	if (str_id < 0 || (usz)str_id >= d2_len) return "";
@@ -129,9 +304,29 @@ fn String resolve_type_name(KmClass* km, int class_name_id, String[] d2, usz d2_
 }
 
 /**
- * Resolve a QualifiedName ID to a full dot-separated path.
+ * Resolve a type name ID to a fully qualified name.
+ * For JVM metadata, uses StringTableTypes records (already FQ).
+ * For non-JVM, walks QualifiedNameTable parent chain.
  */
 fn String resolve_type_fqn(KmClass* km, int class_name_id, String[] d2, usz d2_len) {
+	// JVM path: StringTableTypes already gives FQ names
+	if (km.stt_record_count > 0) {
+		String fqn = jvm_resolve_string(km, class_name_id, d2, d2_len);
+		if (fqn.len == 0) return "";
+		// Convert internal format to dot-separated: "kotlin/collections/List" -> "kotlin.collections.List"
+		DString result;
+		result.tinit();
+		for (usz i = 0; i < fqn.len; i++) {
+			if (fqn[i] == '/') {
+				result.appendf(".");
+			} else {
+				result.appendf("%c", fqn[i]);
+			}
+		}
+		return result.str_view();
+	}
+
+	// Non-JVM fallback
 	if (class_name_id < 0 || (usz)class_name_id >= km.qn_count) return "";
 
 	// Walk parent chain to build full name

@@ -336,17 +336,18 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 	}
 
 	// Try to parse Kotlin metadata for accurate type info
-	KmClass km_storage;
 	KmClass* km = null;
 	bool has_km = false;
 	if (info.has_kotlin_metadata) {
-		km_storage = {};
-		km = &km_storage;
+		km = mem::new(KmClass);
+		*km = {};
 		has_km = kotlin_metadata::parse_metadata(info, km);
 		if (!has_km) {
+			mem::free(km);
 			km = null;
 		}
 	}
+	defer if (km != null) mem::free(km);
 
 	// Add the class/interface itself as a symbol (if public)
 	// Skip companion object classes — we only want their members, indexed under outer class
@@ -494,8 +495,15 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		}
 
 		// Register Kotlin property name for getter/setter methods.
+		// getBreed() -> "breed", getName() -> "name"
 		if (m.name.len > 3 && m.name[..2] == "get" && m.name[3] >= 'A' && m.name[3] <= 'Z') {
-			String prop_name = m.name[3..];
+			String raw_prop = m.name[3..];
+			// Lowercase the first character: "Breed" -> "breed"
+			static char[256] prop_buf;
+			usz plen = raw_prop.len < 256 ? raw_prop.len : 255;
+			prop_buf[:plen] = raw_prop[:plen];
+			prop_buf[0] = (char)(raw_prop[0] + ('a' - 'A'));
+			String prop_name = (String)prop_buf[:plen];
 			DString prop_sig;
 			prop_sig.tinit();
 			prop_sig.appendf("val %s", prop_name);

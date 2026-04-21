@@ -313,6 +313,78 @@ fn void? parse_annotations(char[] data, usz* pos, usz attr_end, CpEntry[] cp, us
 	}
 }
 
+/**
+ * Compute the decoded length of a Modified UTF-8 string.
+ * Kotlin metadata d1 uses BitEncoding where each JVM char becomes one byte
+ * (low 8 bits of the char value). Modified UTF-8 encodes chars as:
+ *   \0         → c0 80 (2 bytes) → 1 output byte (0x00)
+ *   0x01-0x7F  → 1 byte          → 1 output byte
+ *   0x80-0x7FF → 2 bytes         → 1 output byte (low 8 bits of char)
+ *   0x800-0xFFFF → 3 bytes       → 1 output byte (low 8 bits of char)
+ */
+fn usz mutf8_decoded_len(String s) {
+	usz len = 0;
+	usz i = 0;
+	while (i < s.len) {
+		char b = s[i];
+		if ((b & 0x80) == 0) {
+			// 1-byte: ASCII (0x00-0x7F) — but \0 is encoded as c0 80, not 0x00
+			len++;
+			i++;
+		} else if ((b & 0xe0) == 0xc0) {
+			// 2-byte sequence: char 0x0000-0x07FF → 1 output byte
+			len++;
+			i += 2;
+		} else if ((b & 0xf0) == 0xe0) {
+			// 3-byte sequence: char 0x0800-0xFFFF → 1 output byte
+			len++;
+			i += 3;
+		} else {
+			// Malformed — skip
+			len++;
+			i++;
+		}
+	}
+	return len;
+}
+
+/**
+ * Decode Modified UTF-8 string into raw bytes (one byte per char, low 8 bits).
+ * This matches Kotlin's BitEncoding.decodeBytes which takes char values and
+ * extracts the low 8 bits as protobuf bytes.
+ * Returns number of bytes written to out.
+ */
+fn usz mutf8_decode(String s, char[] out) {
+	usz wi = 0;
+	usz ri = 0;
+	while (ri < s.len && wi < out.len) {
+		char b = s[ri];
+		if ((b & 0x80) == 0) {
+			// 1-byte: char value = b (0x00-0x7F)
+			out[wi++] = b;
+			ri++;
+		} else if ((b & 0xe0) == 0xc0 && ri + 1 < s.len) {
+			// 2-byte: char value = ((b & 0x1F) << 6) | (s[ri+1] & 0x3F)
+			// Low 8 bits: ((b & 0x03) << 6) | (s[ri+1] & 0x3F)
+			char c1 = s[ri + 1];
+			out[wi++] = (char)(((b & 0x03) << 6) | (c1 & 0x3F));
+			ri += 2;
+		} else if ((b & 0xf0) == 0xe0 && ri + 2 < s.len) {
+			// 3-byte: char value = ((b & 0x0F) << 12) | ((s[ri+1] & 0x3F) << 6) | (s[ri+2] & 0x3F)
+			// Low 8 bits: ((s[ri+1] & 0x03) << 6) | (s[ri+2] & 0x3F)
+			char c1 = s[ri + 1];
+			char c2 = s[ri + 2];
+			out[wi++] = (char)(((c1 & 0x03) << 6) | (c2 & 0x3F));
+			ri += 3;
+		} else {
+			// Malformed — copy raw
+			out[wi++] = b;
+			ri++;
+		}
+	}
+	return wi;
+}
+
 fn void? parse_kotlin_metadata_pairs(char[] data, usz* pos, ushort num_pairs,
 		CpEntry[] cp, usz cp_len, ClassInfo* info) {
 	for (usz p = 0; p < (usz)num_pairs; p++) {
@@ -360,7 +432,11 @@ fn void? read_string_array_element(char[] data, usz* pos, CpEntry[] cp, usz cp_l
 
 	if (is_d1) {
 		// d1: concatenate all strings into byte array
-		// First pass: calculate total length
+		// JVM uses Modified UTF-8 where \0 is encoded as c0 80.
+		// Kotlin metadata d1 is raw protobuf bytes, so we must decode
+		// modified UTF-8 back to raw bytes.
+
+		// First pass: calculate decoded total length
 		usz save_pos = *pos;
 		usz total_len = 0;
 		for (usz v = 0; v < (usz)num_values; v++) {
@@ -369,12 +445,12 @@ fn void? read_string_array_element(char[] data, usz* pos, CpEntry[] cp, usz cp_l
 			if (vtag == 's') {
 				ushort str_idx = read_u16(data, pos)!;
 				String s = resolve_utf8(cp, cp_len, str_idx) ?? "";
-				total_len += s.len;
+				total_len += mutf8_decoded_len(s);
 			} else {
 				skip_element_value_after_tag(data, pos, vtag)!;
 			}
 		}
-		// Allocate and second pass: copy bytes
+		// Allocate and second pass: copy with decoding
 		char[] buf = mem::talloc_array(char, total_len);
 		*pos = save_pos;
 		usz offset = 0;
@@ -384,16 +460,20 @@ fn void? read_string_array_element(char[] data, usz* pos, CpEntry[] cp, usz cp_l
 			if (vtag == 's') {
 				ushort str_idx = read_u16(data, pos)!;
 				String s = resolve_utf8(cp, cp_len, str_idx) ?? "";
-				for (usz b = 0; b < s.len; b++) {
-					buf[offset + b] = s[b];
-				}
-				offset += s.len;
+				offset += mutf8_decode(s, buf[offset..]);
 			} else {
 				skip_element_value_after_tag(data, pos, vtag)!;
 			}
 		}
-		info.metadata_d1 = buf;
-		info.metadata_d1_len = total_len;
+		// Kotlin BitEncoding: if first byte is 0x00, it's a UTF encoding marker
+		// (dropMarker removes it before stringsToBytes). Strip it.
+		if (offset > 0 && buf[0] == 0) {
+			info.metadata_d1 = buf[1..];
+			info.metadata_d1_len = offset - 1;
+		} else {
+			info.metadata_d1 = buf;
+			info.metadata_d1_len = offset;
+		}
 	} else {
 		// d2: store individual strings
 		info.metadata_d2_len = 0;
