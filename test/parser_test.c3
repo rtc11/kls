@@ -4220,3 +4220,31 @@ fn void parse_return_nested_when() @test {
 		}
 	};
 }
+
+// ── FQN dot chain inside index expression ──────────────────────────
+
+fn void fqn_dot_chain_in_index_expr() @test {
+	@pool() {
+		String src = `import libs.kafka.StreamsConfig
+
+class Config {
+    val kafka: StreamsConfig = StreamsConfig(
+        additionalProperties = Properties().apply {
+            this[org.apache.kafka.streams.StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG] = 0
+            this[org.apache.kafka.streams.StreamsConfig.NUM_STREAM_THREADS_CONFIG] = 3
+        }
+    )
+}`;
+		ParseResult* r = do_parse(src);
+		defer free_result(r);
+
+		// Count DOT_EXPRs with name="StreamsConfig"
+		uint sc_count = 0;
+		for (uint i = 0; i < r.node_count; i++) {
+			AstNode* n = &r.nodes[i];
+			if (n.kind != DOT_EXPR) continue;
+			if (n.name == "StreamsConfig") sc_count++;
+		}
+		assert(sc_count >= 2, "expected >=2 DOT_EXPRs with name='StreamsConfig', got %d", sc_count);
+	};
+}

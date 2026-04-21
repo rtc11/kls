@@ -103,6 +103,19 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 		}
 	}
 
+	// ── FQN text-based detection ────────────────────────────────
+	// If the token is preceded by a dot in the source text, it may be
+	// part of a fully-qualified name (e.g., org.apache.kafka.streams.StreamsConfig).
+	// Reconstruct the FQN from the source text and try dep lookup.
+	// This must run BEFORE workspace lookup to avoid matching a workspace
+	// symbol with the same name but different package.
+	if (workspace != null && workspace.dep_index.initialized) {
+		if (try result = find_definition_by_text_fqn(doc.content, tok, &workspace.dep_index)) {
+			log::debug("[def] found via text-based FQN dep lookup");
+			return result;
+		}
+	}
+
 	// ── Cross-file lookup via workspace index ────────────────────
 	// Workspace symbols take priority over dependency symbols, because
 	// the user's own code is the most relevant navigation target.
@@ -139,14 +152,14 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 		}
 	}
 
-	// ── Dependency fallback via source JARs ───────────────────────
-	// Skip for dot members — falling through here matches unrelated members
-	// (e.g., TestRecord.timestamp instead of Record.timestamp).
+	// ── Star-import dependency lookup ────────────────────────────
+	// If the file has a wildcard import (e.g., import java.util.*),
+	// try the dependency index filtered by the star package.
+	// Returns nothing if ambiguous (multiple star packages match).
 	if (workspace != null && !is_dot_member) {
-		Object* dep_result = source_nav::find_definition_in_deps(&workspace.dep_index, target_name, is_call);
-		if (dep_result != null) {
-			log::debug("[def] found via dep JAR fallback");
-			return dep_result;
+		if (try result = find_definition_by_star_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
+			log::debug("[def] found via star import dep lookup");
+			return result;
 		}
 	}
 
@@ -716,6 +729,27 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr);
 					if (dep_result != null) return dep_result;
 				}
+
+				// FQN fallback: reconstruct the full dot chain (e.g., "org.apache.kafka.streams")
+				// and try to split it as package.ClassName for dep member lookup.
+				// This handles fully-qualified references like:
+				//   org.apache.kafka.streams.StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG
+				uint recv_idx = pr.node_count; // sentinel
+				for (uint j = 0; j < pr.node_count; j++) {
+					if (pr.nodes[j].parent == dot_idx) {
+						recv_idx = j;
+						break;
+					}
+				}
+				if (recv_idx < pr.node_count) {
+					String chain = reconstruct_dot_chain(pr, recv_idx);
+					log::debug("[def] FQN: reconstructed chain='%s', member='%s'", chain, tok.text);
+					if (chain.len > 0) {
+						if (try result = find_definition_by_fqn(&workspace.dep_index, chain, tok.text)) {
+							return result;
+						}
+					}
+				}
 			}
 
 			// Fallback: search extension functions by member name across all
@@ -1110,6 +1144,196 @@ fn Object* find_dep_member_in_class(DependencyIndex* dep_index, String class_nam
 		return source_nav::resolve_dep_definition(member_matches[i]);
 	}
 	return null;
+}
+
+/**
+ * Reconstruct the full dotted text from a DOT_EXPR chain or NAME_EXPR.
+ * For a chain like a.b.c.D (nested DOT_EXPRs), returns "a.b.c.D".
+ * For a NAME_EXPR, returns the name.
+ * Returns empty string if the node structure is unexpected.
+ */
+fn String reconstruct_dot_chain(ParseResult* pr, uint node_idx) {
+	if (node_idx >= pr.node_count) return "";
+
+	AstNode* n = &pr.nodes[node_idx];
+
+	if (n.kind == NAME_EXPR) {
+		return n.name;
+	}
+
+	if (n.kind != DOT_EXPR) return "";
+
+	// Find the receiver child (first child of this DOT_EXPR)
+	uint child_idx = pr.node_count; // sentinel
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == node_idx) {
+			child_idx = j;
+			break;
+		}
+	}
+
+	String receiver_text = reconstruct_dot_chain(pr, child_idx);
+	if (receiver_text.len == 0) return n.name;
+
+	return string::tformat("%s.%s", receiver_text, n.name);
+}
+
+/**
+ * Try to resolve a fully-qualified name as package.ClassName and look up a member.
+ * Splits the FQN at each dot, trying the last segment as class_name and the rest
+ * as package_name. Also handles the case where member_name refers to the class itself
+ * (i.e., cursor is on the class name part of the FQN, and member_name is the class).
+ *
+ * When the dep symbol is found but source JAR is unavailable, returns a synthesized
+ * null-location rather than falling through — the FQN is unambiguous.
+ */
+fn Object*? find_definition_by_fqn(DependencyIndex* dep_index, String receiver_chain, String member_name) {
+	if (dep_index == null || !dep_index.initialized) return FQN_NOT_FOUND~;
+
+	// Try interpreting receiver_chain as "package.ClassName"
+	// Split at last dot: package = everything before, class = last segment
+	usz last_dot = 0;
+	bool has_dot = false;
+	for (usz i = 0; i < receiver_chain.len; i++) {
+		if (receiver_chain[i] == '.') {
+			last_dot = i;
+			has_dot = true;
+		}
+	}
+
+	if (has_dot) {
+		String pkg = receiver_chain[:last_dot];
+		String cls = receiver_chain[last_dot + 1..];
+
+		// First: check if cursor is on a member of the class (e.g., NUM_STANDBY_REPLICAS_CONFIG)
+		DepSymbol*[32] member_matches;
+		usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
+		for (usz i = 0; i < member_count; i++) {
+			if (member_matches[i].class_name != cls) continue;
+			if (member_matches[i].package_name != pkg) continue;
+			if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
+			Object* result = source_nav::resolve_dep_definition(member_matches[i]);
+			if (result != null) return result;
+			// Found the right symbol but no source — return empty location
+			// to prevent falling through to wrong results.
+			log::debug("[def] FQN member matched %s.%s.%s but no source available", pkg, cls, member_name);
+			return null;
+		}
+
+		// Second: check if the receiver_chain itself is a class reference
+		// and cursor is on a companion member or class-level constant.
+		DepSymbol*[16] class_matches;
+		usz class_count = dep_index.lookup_by_name(cls, &class_matches);
+		for (usz i = 0; i < class_count; i++) {
+			if (class_matches[i].package_name != pkg) continue;
+			if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
+				class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
+				// Found the class — now look up member under this exact package+class
+				for (usz m = 0; m < member_count; m++) {
+					if (member_matches[m].class_name == cls && member_matches[m].package_name == pkg) {
+						Object* result = source_nav::resolve_dep_definition(member_matches[m]);
+						if (result != null) return result;
+						log::debug("[def] FQN class+member matched %s.%s.%s but no source available", pkg, cls, member_name);
+						return null;
+					}
+				}
+			}
+		}
+	}
+
+	// Also try: the entire receiver_chain + member_name forms "package.ClassName"
+	// E.g., receiver_chain = "org.apache.kafka.streams", member_name = "StreamsConfig"
+	// → package = "org.apache.kafka.streams", class = "StreamsConfig"
+	DepSymbol*[16] class_matches;
+	usz class_count = dep_index.lookup_by_name(member_name, &class_matches);
+	for (usz i = 0; i < class_count; i++) {
+		if (class_matches[i].package_name != receiver_chain) continue;
+		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
+			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
+			Object* result = source_nav::resolve_dep_definition(class_matches[i]);
+			if (result != null) return result;
+			// FQN class matched but no source — return null to stop further lookups
+			log::debug("[def] FQN class matched %s.%s but no source available", receiver_chain, member_name);
+			return null;
+		}
+	}
+
+	return FQN_NOT_FOUND~;
+}
+
+faultdef FQN_NOT_FOUND;
+faultdef NOT_TEXT_FQN;
+
+/**
+ * Text-based FQN detection and dep lookup.
+ * Scans the source text around the token to detect if it's part of a
+ * dot-separated chain (e.g., org.apache.kafka.streams.StreamsConfig).
+ * If so, reconstructs the prefix and tries dep lookup.
+ * This is independent of AST DOT_EXPR matching — handles cases where
+ * the AST position doesn't match the lexer token position.
+ */
+fn Object*? find_definition_by_text_fqn(String source, Token tok, DependencyIndex* dep_index) {
+	if (dep_index == null || !dep_index.initialized) return NOT_TEXT_FQN~;
+
+	// Check if there's a dot immediately before the token
+	usz tok_off = (usz)tok.offset;
+	if (tok_off == 0 || source[tok_off - 1] != '.') return NOT_TEXT_FQN~;
+
+	// Walk backward from the dot to reconstruct the prefix chain
+	// e.g., for "org.apache.kafka.streams.StreamsConfig", starting before "StreamsConfig"
+	// we walk back through "org.apache.kafka.streams"
+	usz prefix_end = tok_off - 1; // points at the dot
+	usz prefix_start = prefix_end;
+
+	// Walk backward: accept identifiers and dots
+	while (prefix_start > 0) {
+		char c = source[prefix_start - 1];
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '.') {
+			prefix_start--;
+		} else {
+			break;
+		}
+	}
+
+	if (prefix_start >= prefix_end) return NOT_TEXT_FQN~;
+
+	String prefix = source[prefix_start..prefix_end - 1]; // exclude trailing dot
+	if (prefix.len == 0) return NOT_TEXT_FQN~;
+
+	// Also check if there's a dot AFTER the token — to determine if cursor
+	// is on a middle segment (class name) vs the last segment (member name)
+	usz tok_end = tok_off + (usz)tok.text.len;
+	bool has_dot_after = tok_end < source.len && source[tok_end] == '.';
+
+	String member_name = tok.text;
+
+	if (has_dot_after) {
+		// Token is a middle segment — e.g., "StreamsConfig" in "...StreamsConfig.NUM_..."
+		// The prefix is the package, the token is the class name
+		// Try: prefix = package, member_name = class name → look up class in dep index
+		DepSymbol*[16] class_matches;
+		usz class_count = dep_index.lookup_by_name(member_name, &class_matches);
+		for (usz i = 0; i < class_count; i++) {
+			if (class_matches[i].package_name != prefix) continue;
+			if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
+				class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
+				Object* result = source_nav::resolve_dep_definition(class_matches[i]);
+				if (result != null) return result;
+				// Found but no source — return null to stop further lookups
+				log::debug("[def] text-FQN class matched %s.%s but no source", prefix, member_name);
+				return null;
+			}
+		}
+	}
+
+	// Token is the last segment — try as member of a FQN class
+	// prefix might be "org.apache.kafka.streams.StreamsConfig" or "org.apache.kafka.streams"
+	if (try result = find_definition_by_fqn(dep_index, prefix, member_name)) {
+		return result;
+	}
+
+	return NOT_TEXT_FQN~;
 }
 
 // ── Receiver lambda member definition lookup ──────────────────────
@@ -1589,6 +1813,61 @@ fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex*
 		}
 	}
 	if (try loc = find_import_statement_location(pr, full_import, current_uri)) {
+		return loc;
+	}
+
+	return NOT_FOUND_BY_IMPORT~;
+}
+
+/**
+ * Find definition via star (wildcard) imports in the dependency index.
+ * For `import java.util.*`, looks up target_name in dep index and filters
+ * to symbols whose package matches a star-imported package.
+ * Returns null if no match or ambiguous (multiple star packages match).
+ */
+fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call, String current_uri) {
+	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
+
+	ImportMap imports = workspace::build_import_map(pr);
+
+	// Collect star packages
+	bool has_star = false;
+	for (usz i = 0; i < imports.import_count; i++) {
+		if (imports.is_star[i]) { has_star = true; break; }
+	}
+	if (!has_star) return NOT_FOUND_BY_IMPORT~;
+
+	// Look up all dep symbols with this name
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(target_name, &matches);
+	if (count == 0) return NOT_FOUND_BY_IMPORT~;
+
+	// Filter to symbols whose package matches a star-imported package
+	DepSymbol* best = null;
+	String best_star_path = "";
+	for (usz i = 0; i < count; i++) {
+		for (usz j = 0; j < imports.import_count; j++) {
+			if (!imports.is_star[j]) continue;
+			if (matches[i].package_name == imports.star_packages[j]) {
+				if (best != null && best.package_name != matches[i].package_name) {
+					// Ambiguous: multiple star packages match different symbols
+					log::debug("[def] star import ambiguous for '%s': %s vs %s",
+						target_name, best.package_name, matches[i].package_name);
+					return NOT_FOUND_BY_IMPORT~;
+				}
+				best = matches[i];
+				best_star_path = imports.import_paths[j];
+				break; // found matching star package for this symbol
+			}
+		}
+	}
+	if (best == null) return NOT_FOUND_BY_IMPORT~;
+
+	Object* result = source_nav::resolve_dep_definition(best);
+	if (result != null) return result;
+
+	// Source JAR not available — fall back to the star import statement itself.
+	if (try loc = find_import_statement_location(pr, best_star_path, current_uri)) {
 		return loc;
 	}
 

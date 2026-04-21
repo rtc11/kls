@@ -6,6 +6,7 @@ import kls::lsp::definition;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::classpath;
+import kls::lsp::hover;
 
 // ── Helper: build params object ────────────────────────────────────
 
@@ -1669,5 +1670,175 @@ fun main() { connect(url = "http://x", timeout = 30) }`;
 		int line = start.get_int("line")!!;
 		// Should pick the second overload (url, timeout) on line 1
 		assert(line == 1, "expected line 1 (url/timeout overload), got %d", line);
+	};
+}
+
+// ── Star import dep lookup: correct package ────────────────────────
+
+fn void definition_star_import_picks_correct_package() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Two classes named "Properties" in different packages
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"Properties", "class Properties", "com.sun.xml.fastinfoset.sax", "Properties", "/fake/fastinfoset.jar",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"Properties", "class Properties", "java.util", "Properties", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+
+		// Star import for java.util.* — should resolve to java.util.Properties
+		String content = `import java.util.*
+fun main() { val p = Properties() }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "Properties" at line 1 — "    val p = Properties()" col 22
+		Object* params = make_params("file:///test.kt", 1, 22);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// Source JAR is fake so resolve_dep_definition returns null,
+		// but it should fall back to the import statement at line 0.
+		assert(result != null, "expected result from star import lookup");
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 0, "expected fallback to import at line 0, got %d", line);
+	};
+}
+
+// ── No star import match: returns null ─────────────────────────────
+
+fn void definition_no_star_import_match_returns_null() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Class in dep index but not matching any star import
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"FakeWidget", "class FakeWidget", "com.example.widgets", "FakeWidget", "/fake/widgets.jar",
+			DEP_CLASS, null, 0);
+
+		// Star import for java.util.* — FakeWidget not in java.util
+		String content = `import java.util.*
+fun main() { val w = FakeWidget() }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "FakeWidget" at line 1
+		Object* params = make_params("file:///test.kt", 1, 22);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// No star import matches, no unfiltered fallback — should be null
+		assert(result == null, "expected null when no import matches");
+	};
+}
+
+// ── FQN dot-member: class member via fully-qualified reference ──────
+
+fn void definition_fqn_class_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add StreamsConfig class and its field to dep_index
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"StreamsConfig", "class StreamsConfig", "org.apache.kafka.streams", "StreamsConfig", "/fake/kafka.jar",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"NUM_STANDBY_REPLICAS_CONFIG", "val NUM_STANDBY_REPLICAS_CONFIG: String", "org.apache.kafka.streams", "StreamsConfig", "/fake/kafka.jar",
+			DEP_FIELD, null, 0);
+
+		// Fully-qualified reference: org.apache.kafka.streams.StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG
+		String content = `fun main() {
+    val x = org.apache.kafka.streams.StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "NUM_STANDBY_REPLICAS_CONFIG" at line 1
+		// "    val x = org.apache.kafka.streams.StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG"
+		// offset: "    val x = org.apache.kafka.streams.StreamsConfig." = 51 chars
+		Object* params = make_params("file:///test.kt", 1, 51);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// Source JAR is fake so resolve_dep_definition returns null,
+		// but the FQN path should be exercised without crashing.
+		// With a real JAR this would return a location.
+	};
+}
+
+// ── FQN: cursor on class name navigates to class ────────────────────
+
+fn void definition_fqn_class_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Add StreamsConfig class to dep_index
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"StreamsConfig", "class StreamsConfig", "org.apache.kafka.streams", "StreamsConfig", "/fake/kafka.jar",
+			DEP_CLASS, null, 0);
+
+		// Also add StreamsConfig to workspace (simulating libs.kafka.StreamsConfig)
+		String ws_content = `package libs.kafka
+class StreamsConfig(val additionalProperties: Any? = null)`;
+		store.open("file:///libs/kafka/StreamsConfig.kt", "kotlin", 1, ws_content);
+		ws.index_file("file:///libs/kafka/StreamsConfig.kt", ws_content);
+
+		// File with FQN reference inside this[...]
+		String content = `import libs.kafka.StreamsConfig
+
+class Config {
+    val kafka: StreamsConfig = StreamsConfig(
+        additionalProperties = Properties().apply {
+            this[org.apache.kafka.streams.StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG] = 0
+        }
+    )
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "StreamsConfig" in the FQN at line 5
+		// "            this[org.apache.kafka.streams.StreamsConfig..."
+		// 12 spaces + "this[" (5) + "org." (4) + "apache." (7) + "kafka." (6) + "streams." (8) = 42
+		Object* params = make_params("file:///test.kt", 5, 42);
+
+		// Verify token is found at this position
+		Document* doc = store.get("file:///test.kt") ?? null;
+		assert(doc != null, "document should exist");
+		if (try tok = hover::find_token_at_position(doc.content, 5, 42)) {
+			assert(tok.text == "StreamsConfig", "expected token 'StreamsConfig' at 5:42, got '%s'", tok.text);
+		} else {
+			assert(false, "no token found at line 5, col 42");
+		}
+
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// Should NOT go to libs/kafka/StreamsConfig.kt (workspace match)
+		// Should either go to dep source or return null (no source available)
+		if (result != null) {
+			String result_uri = result.get_string("uri")!!;
+			assert(result_uri != "file:///libs/kafka/StreamsConfig.kt",
+				"FQN should not resolve to workspace StreamsConfig, got uri=%s", result_uri);
+		}
+		// Returning null is acceptable (dep source unavailable)
 	};
 }
