@@ -15,6 +15,7 @@ import kls::kotlin::types;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::javadoc;
+import kls::lsp::definition;
 
 faultdef NO_TOKEN, NO_DESCRIPTION;
 
@@ -56,23 +57,11 @@ fn Object*? handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object
 				found_description = true;
 			}
 		}
-		// Cross-file fallback: look up in workspace index
-		if (!found_description && workspace != null) {
-			if (try desc = describe_identifier_from_workspace(workspace, store, tok, uri)) {
-				description = desc;
-				found_description = true;
-			}
-		}
-		// Dependency fallback: look up in indexed JARs
-		if (!found_description && workspace != null && workspace.dep_index.initialized) {
-			if (try desc = describe_identifier_from_deps(&workspace.dep_index, tok)) {
-				description = desc;
-				found_description = true;
-			}
-		}
-		// Stdlib fallback: look up in bundled kotlin-stdlib index
+		// Cross-file fallback: reuse definition resolution to find the single
+		// correct target, then build hover docs for that one symbol only.
+		// This ensures hover and go-to-definition always agree.
 		if (!found_description) {
-			if (try desc = describe_identifier_from_stdlib(tok)) {
+			if (try desc = describe_from_definition(store, workspace, params)) {
 				description = desc;
 				found_description = true;
 			}
@@ -172,7 +161,7 @@ fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok, Wo
 			n.name_line == tok.line && n.name_col == tok.col) {
 			if (ti.has_type[i]) {
 				String type_str = types::format_type(&ti.node_types[i]);
-				if (type_str.len > 0) {
+				if (type_str.len > 0 && type_str != tok.text) {
 					DString ds;
 					ds.tinit();
 					ds.appendf("```kotlin\n%s: %s\n```", tok.text, type_str);
@@ -732,7 +721,7 @@ fn String? extract_doc_comment(String source, uint decl_start_offset) {
 	usz pos = (usz)decl_start_offset;
 
 	// Skip backwards over whitespace and annotations
-	pos = skip_back_whitespace(source, pos);
+	pos = skip_back_whitespace_and_annotations(source, pos);
 
 	if (pos == 0) return NO_DESCRIPTION~;
 
@@ -765,6 +754,154 @@ fn usz skip_back_whitespace(String source, usz pos) {
 		}
 	}
 	return pos;
+}
+
+/**
+ * Skip backward over whitespace and annotations (e.g., @KtorDsl, @Suppress("...")).
+ * Annotations can appear between a KDoc comment and the declaration keyword.
+ * Handles nested parentheses in annotation arguments.
+ */
+fn usz skip_back_whitespace_and_annotations(String source, usz pos) {
+	while (pos > 0) {
+		pos = skip_back_whitespace(source, pos);
+		if (pos == 0) break;
+
+		// Check if we're at the end of an annotation
+		// Annotations end with either: identifier (no args) or ')' (with args)
+		char c = source[pos - 1];
+
+		if (c == ')') {
+			// Skip backward over balanced parentheses
+			usz paren_pos = skip_back_balanced_parens(source, pos);
+			if (paren_pos == pos) break; // couldn't match parens
+			pos = paren_pos;
+			// Now skip the annotation name and @
+			pos = skip_back_whitespace(source, pos);
+			pos = skip_back_annotation_name(source, pos);
+			continue;
+		}
+
+		// Check for bare annotation: @Name without parens
+		// Or modifier keywords (public, abstract, data, etc.)
+		if (is_identifier_char(c)) {
+			usz saved = pos;
+			usz name_start = skip_back_identifier(source, pos);
+			if (name_start < saved) {
+				String word = source[name_start..saved - 1];
+				// Check for @ before the identifier → annotation
+				usz at_pos = skip_back_whitespace(source, name_start);
+				if (at_pos > 0 && source[at_pos - 1] == '@') {
+					pos = at_pos - 1;
+					continue;
+				}
+				// Check if it's a modifier keyword → skip it
+				if (is_modifier_keyword(word)) {
+					pos = name_start;
+					continue;
+				}
+			}
+			// Not an annotation or modifier, stop
+			break;
+		}
+
+		break;
+	}
+	return pos;
+}
+
+/**
+ * Skip backward over balanced parentheses. pos points just past ')'.
+ * Returns position just before the matching '('.
+ */
+fn usz skip_back_balanced_parens(String source, usz pos) {
+	if (pos == 0 || source[pos - 1] != ')') return pos;
+	pos--; // skip ')'
+	int depth = 1;
+	while (pos > 0 && depth > 0) {
+		pos--;
+		if (source[pos] == ')') {
+			depth++;
+		} else if (source[pos] == '(') {
+			depth--;
+		}
+	}
+	return pos; // now points just past the content before '('
+}
+
+/**
+ * Skip backward over an annotation name and @ prefix.
+ * Handles dotted names like @file:Suppress or @io.ktor.KtorDsl.
+ */
+fn usz skip_back_annotation_name(String source, usz pos) {
+	// Skip identifier chars and dots (for dotted annotation names)
+	while (pos > 0) {
+		char c = source[pos - 1];
+		if (is_identifier_char(c) || c == '.' || c == ':') {
+			pos--;
+		} else {
+			break;
+		}
+	}
+	// Skip @
+	if (pos > 0 && source[pos - 1] == '@') {
+		pos--;
+	}
+	return pos;
+}
+
+/**
+ * Skip backward over identifier characters.
+ */
+fn usz skip_back_identifier(String source, usz pos) {
+	while (pos > 0 && is_identifier_char(source[pos - 1])) {
+		pos--;
+	}
+	return pos;
+}
+
+fn bool is_identifier_char(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_';
+}
+
+/**
+ * Check if a word is a Kotlin modifier keyword that can appear before
+ * a declaration (between KDoc and the declaration keyword).
+ */
+fn bool is_modifier_keyword(String word) {
+	switch (word) {
+		case "public":
+		case "private":
+		case "protected":
+		case "internal":
+		case "abstract":
+		case "open":
+		case "final":
+		case "sealed":
+		case "data":
+		case "enum":
+		case "inner":
+		case "annotation":
+		case "value":
+		case "inline":
+		case "infix":
+		case "operator":
+		case "suspend":
+		case "tailrec":
+		case "override":
+		case "lateinit":
+		case "const":
+		case "external":
+		case "expect":
+		case "actual":
+		case "vararg":
+		case "crossinline":
+		case "noinline":
+		case "reified":
+			return true;
+		default:
+			return false;
+	}
 }
 
 /**
@@ -1271,6 +1408,100 @@ fn String? describe_token(Token tok) {
 		default:
 			return NO_DESCRIPTION~;
 	}
+}
+
+// ── Definition-based hover resolution ─────────────────────────────
+
+/**
+ * Resolve the definition target using the same logic as go-to-definition,
+ * then build hover documentation for that single resolved symbol.
+ *
+ * This ensures hover shows exactly one result — the same symbol that
+ * go-to-definition would navigate to — instead of listing all name matches.
+ */
+fn String? describe_from_definition(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
+	// Call the definition handler to resolve the target location
+	Object* location = definition::handle_definition(store, workspace, params)!;
+	if (location == null) return NO_DESCRIPTION~;
+
+	// Extract uri, line, col from the Location result
+	String target_uri = location.get_string("uri")!;
+
+	Object* range = location.get("range")!;
+	Object* start = range.get("start")!;
+	uint target_line = (uint)start.get_int("line")!;
+	uint target_col = (uint)start.get_int("character")!;
+
+	// Get the content of the target file
+	String content;
+	char[] disk_data;
+	bool have_content = false;
+
+	if (try doc = store.get(target_uri)) {
+		content = doc.content;
+		have_content = true;
+	} else {
+		String file_path = workspace::uri_to_path(target_uri);
+		if (try d = std::io::file::load(tmem, file_path)) {
+			disk_data = d;
+			content = (String)disk_data;
+			have_content = true;
+		}
+	}
+
+	if (!have_content) {
+		// File not accessible — fall back to workspace symbol info
+		if (workspace != null) {
+			if (try desc = describe_workspace_symbol_at(workspace, target_uri, target_line, target_col)) {
+				return desc;
+			}
+		}
+		return NO_DESCRIPTION~;
+	}
+
+	// Parse the target file and find the declaration at the resolved position
+	ParseResult* pr = mem::new(ParseResult);
+	defer mem::free(pr);
+	parser::parse(content, pr);
+	if (pr.node_count == 0) return NO_DESCRIPTION~;
+
+	// Find the declaration node at the exact resolved position
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind) && n.kind != PARAM && n.kind != TYPE_PARAM) continue;
+		if (n.name_line == target_line && n.name_col == target_col) {
+			return build_signature(n, pr, content);
+		}
+	}
+
+	// Exact match not found — try name match at the target line
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind) && n.kind != PARAM && n.kind != TYPE_PARAM) continue;
+		if (n.name_line == target_line) {
+			return build_signature(n, pr, content);
+		}
+	}
+
+	return NO_DESCRIPTION~;
+}
+
+/**
+ * Find a workspace symbol at a specific uri/line/col and return a basic
+ * hover description (no AST parsing). Used when the target file is not
+ * accessible (not open and not on disk).
+ */
+fn String? describe_workspace_symbol_at(WorkspaceIndex* workspace, String uri, uint line, uint col) {
+	// Scan all symbols to find one matching the location
+	for (usz i = 0; i < workspace.symbols.len(); i++) {
+		WorkspaceSymbol* sym = workspace.get_symbol(i);
+		if (sym.name.len == 0) continue;
+		if (sym.uri != uri) continue;
+		if (sym.line == line && sym.col == col) {
+			return describe_workspace_symbol(sym);
+		}
+	}
+	return NO_DESCRIPTION~;
 }
 
 // ── Cross-file hover ──────────────────────────────────────────────

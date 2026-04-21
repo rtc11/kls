@@ -609,3 +609,49 @@ fn void hover_typealias_with_type_params() @test {
 		assert(value.contains("StringMap<V>"), "expected 'StringMap<V>' in hover, got: '%s'", value);
 	};
 }
+
+// ── KDoc extraction through annotations ────────────────────────────
+
+fn void hover_kdoc_through_annotation() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String src = `/**
+ * Builder for engine connectors
+ */
+@Suppress("unused")
+class EngineConnectorBuilder {}`;
+		store.open("file:///test.kt", "kotlin", 1, src);
+		Object* params = make_hover_params("file:///test.kt", 4, 6);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("class EngineConnectorBuilder"), "expected class signature, got: '%s'", value);
+		assert(value.contains("Builder for engine connectors"), "expected KDoc through annotation, got: '%s'", value);
+	};
+}
+
+fn void hover_kdoc_through_modifiers_and_annotation() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// KDoc → annotation → modifier → class declaration
+		String src_lines = "/**\n * Mutable implementation\n */\n@KtorDsl\npublic class EngineConnectorBuilder {}";
+		store.open("file:///test.kt", "kotlin", 1, src_lines);
+		// line 4: "public class EngineConnectorBuilder {}", col 13 = 'E'
+		Object* params = make_hover_params("file:///test.kt", 4, 13);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("EngineConnectorBuilder"), "expected class name, got: '%s'", value);
+		assert(value.contains("Mutable implementation"), "expected KDoc through annotation+modifier, got: '%s'", value);
+	};
+}
