@@ -393,3 +393,51 @@ fn void cross_file_receiver_lambda_member() @test {
 		assert(uri == "file:///module.kt", "expected module.kt, got '%s'", uri);
 	};
 }
+
+// ── Regression: extension fn body referencing non-member class ─────
+//
+// Crash repro: cursor on `Processor` inside `fun Topology.f() { Processor(...) }`
+// where `Processor` is NOT a member of `Topology` but IS a class declared
+// elsewhere in the workspace. Previously crashed with SIGSEGV in
+// find_extension_receiver_member_definition because it passed null store
+// to find_member_in_workspace_class which dereferenced it on cache miss.
+fn void extension_receiver_non_member_no_crash() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A: Topology class with some unrelated members
+		String file_a = "class Topology { fun consume() {} }";
+		ws.index_file("file:///topology.kt", file_a);
+
+		// File B: Processor class (not a member of Topology)
+		String file_b = "class Processor { val x: Int = 0 }";
+		ws.index_file("file:///processor.kt", file_b);
+
+		// File C: extension function on Topology referencing Processor.
+		// Cursor on `Processor` (line 0, col offset of P).
+		// Text: "fun Topology.oppdrag() { Processor() }"
+		//        0         1         2         3
+		//        0123456789012345678901234567890123456789
+		// 'P' of Processor at col 25.
+		String file_c = "fun Topology.oppdrag() { Processor() }";
+		ws.index_file("file:///kafka.kt", file_c);
+		store.open("file:///kafka.kt", "kotlin", 1, file_c);
+
+		Object* params = make_params("file:///kafka.kt", 0, 25);
+		// Must NOT crash. Result may be null or the Processor location.
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		// If non-null, must point at Processor declaration in file B.
+		if (result != null) {
+			String uri = result.get_string("uri")!!;
+			assert(uri == "file:///processor.kt",
+				"expected processor.kt, got '%s'", uri);
+		}
+	};
+}

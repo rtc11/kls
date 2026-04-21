@@ -87,7 +87,7 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	// ── Extension function receiver member navigation ────────────
 	// If the cursor is inside an extension function (fun Receiver.name()),
 	// bare identifiers may refer to implicit `this` members of the receiver.
-	if (try result = find_extension_receiver_member_definition(pr, workspace, target_name, tok.offset, uri)) {
+	if (try result = find_extension_receiver_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
 		log::debug("[def] found via extension receiver member");
 		return result;
 	}
@@ -963,10 +963,15 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 			// Try to parse the file and find the member
 			String content;
 			char[] disk_data;
+			bool got_content = false;
 
-			if (try doc = store.get(sym.uri)) {
-				content = doc.content;
-			} else {
+			if (store != null) {
+				if (try doc = store.get(sym.uri)) {
+					content = doc.content;
+					got_content = true;
+				}
+			}
+			if (!got_content) {
 				String file_path = workspace::uri_to_path(sym.uri);
 				if (try d = std::io::file::load(tmem, file_path)) {
 					disk_data = d;
@@ -1023,9 +1028,14 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 				// Members not cached — parse the file containing this nested class
 				String content;
 				char[] disk_data;
-				if (try doc = store.get(pm.uri)) {
-					content = doc.content;
-				} else {
+				bool got_content = false;
+				if (store != null) {
+					if (try doc = store.get(pm.uri)) {
+						content = doc.content;
+						got_content = true;
+					}
+				}
+				if (!got_content) {
 					String file_path = workspace::uri_to_path(pm.uri);
 					if (try d = std::io::file::load(tmem, file_path)) {
 						disk_data = d;
@@ -1428,7 +1438,7 @@ fn bool is_declared_in_lambda_scope(ParseResult* pr, String name, uint cursor_of
  * the member in that class.
  */
 fn Object*? find_extension_receiver_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
-		String target_name, uint cursor_offset, String current_uri) {
+		DocumentStore* store, String target_name, uint cursor_offset, String current_uri) {
 	// Find the NAME_EXPR at the cursor position
 	uint name_node_idx = ast::NO_PARENT;
 	for (uint i = 0; i < pr.node_count; i++) {
@@ -1465,7 +1475,7 @@ fn Object*? find_extension_receiver_member_definition(ParseResult* pr, Workspace
 			}
 			// Try workspace
 			if (workspace != null) {
-				if (try result = find_member_in_workspace_class(workspace, null, receiver, target_name)) {
+				if (try result = find_member_in_workspace_class(workspace, store, receiver, target_name)) {
 					return result;
 				}
 			}
