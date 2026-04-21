@@ -2825,8 +2825,8 @@ fn bool Parser.looks_like_lambda_params(Parser* self) {
 		if (self.at(SEMICOLON) && depth == 0) break; // statement separator
 
 		// Track nesting
-		if (self.at(LPAREN) || self.at(LSQUARE) || self.at(LANGLE)) { depth++; }
-		if (self.at(RPAREN) || self.at(RSQUARE) || self.at(RANGLE)) { depth--; }
+		if (self.at(LPAREN) || self.at(LSQUARE) || self.at(LANGLE) || self.at(LCURL)) { depth++; }
+		if (self.at(RPAREN) || self.at(RSQUARE) || self.at(RANGLE) || self.at(RCURL)) { depth--; }
 
 		// If we see a statement keyword at depth 0, this is not params
 		if (depth == 0 && is_statement_start(self.current.kind)) break;
