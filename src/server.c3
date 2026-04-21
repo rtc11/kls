@@ -4,6 +4,7 @@ import std::io;
 import std::encoding::json;
 import std::collections::object;
 import std::thread;
+import std::net;
 import kls::log;
 import kls::json_rpc;
 import kls::document;
@@ -37,6 +38,7 @@ import kls::lsp::diagnostics;
 import kls::lsp::progress;
 import kls::workspace;
 import kls::config;
+import kls::debug_socket;
 import kls::deps::classpath;
 import kls::deps::jar_index;
 import kls::deps::jdk_index;
@@ -67,6 +69,7 @@ struct Server {
 	DocumentStore documents;
 	WorkspaceIndex workspace;
 	ReindexState reindex;
+	DebugServer debug_server;
 }
 
 fn void Server.init(Server* self) {
@@ -95,19 +98,63 @@ fn void Server.run(Server* self) {
 
 	while (self.is_running) {
 		@pool() {
-			// #1: Gracefully handle read/parse failures instead of panicking
-			if (catch excuse = self.run_one_message()) {
-				if (excuse == json_rpc::UNEXPECTED_EOF) {
-					log::info("[kls] stdin closed, shutting down");
-					self.is_running = false;
-				} else {
-					log::err("[kls] Error processing message: %s", excuse);
+			if (self.debug_server.active) {
+				self.poll_loop_iteration();
+			} else {
+				// Before debug server: blocking stdin (pre-initialize)
+				if (catch excuse = self.run_one_message()) {
+					if (excuse == json_rpc::UNEXPECTED_EOF) {
+						log::info("[kls] stdin closed, shutting down");
+						self.is_running = false;
+					} else {
+						log::err("[kls] Error processing message: %s", excuse);
+					}
 				}
 			}
 
 			// Check if async reindex completed
 			self.check_reindex_complete();
 		};
+	}
+
+	// Cleanup debug server
+	self.debug_server.stop();
+}
+
+/**
+ * Poll stdin + debug socket with 50ms timeout.
+ * Handles LSP messages from neovim and debug queries from external tools.
+ */
+fn void Server.poll_loop_iteration(Server* self) {
+	NativeSocket stdin_sock = (NativeSocket)io::stdin().fd();
+	NativeSocket debug_sock = self.debug_server.native_socket();
+
+	Poll[2] polls;
+	polls[0].socket = stdin_sock;
+	polls[0].events = net::SUBSCRIBE_ANY_READ;
+	polls[0].revents = (PollEvent)0;
+	polls[1].socket = debug_sock;
+	polls[1].events = net::SUBSCRIBE_ANY_READ;
+	polls[1].revents = (PollEvent)0;
+
+	ulong ready = net::poll_ms(polls[..], 50) ?? 0;
+
+	// Check stdin for LSP messages
+	if (ready > 0 && ((ushort)polls[0].revents & (ushort)net::SUBSCRIBE_ANY_READ) != 0) {
+		if (catch excuse = self.run_one_message()) {
+			if (excuse == json_rpc::UNEXPECTED_EOF) {
+				log::info("[kls] stdin closed, shutting down");
+				self.is_running = false;
+				return;
+			} else {
+				log::err("[kls] Error processing message: %s", excuse);
+			}
+		}
+	}
+
+	// Check debug socket for incoming connections
+	if (ready > 0 && ((ushort)polls[1].revents & (ushort)net::SUBSCRIBE_ANY_READ) != 0) {
+		self.debug_server.accept_and_handle(&self.workspace);
 	}
 }
 
@@ -203,10 +250,14 @@ fn void Server.dispatch(Server* self, Object* msg) {
 			// Wire workspace into document store for cross-file type resolution
 			self.documents.workspace = &self.workspace;
 
+			// Start debug TCP server for external index queries
+			self.debug_server.start(self.workspace.root_path);
+
 		case "shutdown":
 			Object* result = lifecycle::handle_shutdown();
 			json_rpc::send_response(request_id, result);
 			self.is_shutdown = true;
+			self.debug_server.stop();
 
 		case "exit":
 			self.is_running = false;

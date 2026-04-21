@@ -17,3 +17,6 @@ Thumbs.db
 
 # OpenCode
 .opencode/
+
+# KLS debug server port file
+.kls-debug-port

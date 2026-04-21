@@ -9,6 +9,7 @@ import std::thread;
 import kls::log;
 import kls::json_rpc;
 import kls::workspace;
+import kls::kotlin::symbols;
 import kls::deps::classpath;
 import kls::lsp::progress;
 
@@ -16,6 +17,7 @@ import kls::lsp::progress;
 
 const String CMD_RUN_MAIN = "kotlin.runMain";
 const String CMD_RUN_TEST = "kotlin.runTest";
+const String CMD_QUERY_INDEX = "kotlin.queryIndex";
 
 /**
  * Handle workspace/executeCommand request.
@@ -41,6 +43,8 @@ fn Object*? handle_execute_command(WorkspaceIndex* workspace, Object* params) {
 			execute_run_main(workspace, args);
 		case CMD_RUN_TEST:
 			execute_run_test(workspace, args);
+		case CMD_QUERY_INDEX:
+			return execute_query_index(workspace, args);
 		default:
 			log::err("[kls] executeCommand: unknown command '%s'", command);
 			show_message(3, "Unknown command: ");
@@ -58,6 +62,7 @@ fn Object* build_execute_command_options() {
 	Object* commands = object::new_obj(tmem);
 	commands.push(object::new_string(CMD_RUN_MAIN, tmem));
 	commands.push(object::new_string(CMD_RUN_TEST, tmem));
+	commands.push(object::new_string(CMD_QUERY_INDEX, tmem));
 	opts.set("commands", commands);
 	return opts;
 }
@@ -179,6 +184,118 @@ fn void execute_run_test(WorkspaceIndex* workspace, Object* args) {
 
 		case NONE:
 			show_message(1, "No build system found — cannot run tests without Gradle or Maven");
+	}
+}
+
+// ── Query index ────────────────────────────────────────────────────
+
+/**
+ * Query the workspace index for debugging.
+ * No args: returns summary (counts + file list).
+ * args[0] = name: returns full symbol details for matching symbols.
+ */
+fn Object* execute_query_index(WorkspaceIndex* workspace, Object* args) {
+	String query = "";
+	if (args != null && args.get_len() >= 1) {
+		query = args.get_at(0).s;
+	}
+
+	Object* result = object::new_obj(tmem);
+	result.set("root_uri", workspace.root_uri);
+	result.set("root_path", workspace.root_path);
+	result.set("symbol_count", (int)workspace.symbols.len());
+
+	// Count files
+	int file_count = 0;
+	@pool() {
+		foreach (key : workspace.files.tkeys()) {
+			file_count++;
+		}
+	};
+	result.set("file_count", file_count);
+
+	if (query.len == 0) {
+		// Summary mode: list files
+		Object* files_arr = object::new_obj(tmem);
+		@pool() {
+			foreach (key : workspace.files.tkeys()) {
+				WorkspaceFile* wf = workspace.files.get_ref(key) ?? null;
+				if (wf == null) continue;
+				Object* f = object::new_obj(tmem);
+				f.set("uri", wf.uri);
+				f.set("package", wf.package_name);
+				if (wf.module_name.len > 0) {
+					f.set("module", wf.module_name);
+				}
+				f.set("symbol_count", (int)wf.symbol_count);
+				files_arr.push(f);
+			}
+		};
+		result.set("files", files_arr);
+	} else {
+		// Query mode: find symbols matching name
+		Object* matches = object::new_obj(tmem);
+
+		if (try list_ref = workspace.lookup_by_name(query)) {
+			for (usz i = 0; i < list_ref.len(); i++) {
+				WorkspaceSymbol* sym = workspace.get_symbol((*list_ref)[i]);
+				matches.push(build_symbol_json(sym));
+			}
+		}
+
+		// Also search member_cache for class members
+		if (try members = workspace.lookup_members(query)) {
+			Object* member_arr = object::new_obj(tmem);
+			for (usz i = 0; i < members.len(); i++) {
+				MemberDecl* m = &(*members)[i];
+				Object* mj = object::new_obj(tmem);
+				mj.set("name", m.name);
+				mj.set("type", m.type_text);
+				mj.set("uri", m.uri);
+				mj.set("line", (int)m.line);
+				mj.set("col", (int)m.col);
+				mj.set("param_count", (int)m.param_count);
+				member_arr.push(mj);
+			}
+			result.set("members", member_arr);
+		}
+
+		result.set("symbols", matches);
+	}
+
+	return result;
+}
+
+fn Object* build_symbol_json(WorkspaceSymbol* sym) {
+	Object* obj = object::new_obj(tmem);
+	obj.set("name", sym.name);
+	obj.set("uri", sym.uri);
+	obj.set("package", sym.package_name);
+	obj.set("kind", symbol_kind_label(sym.kind));
+	obj.set("line", (int)sym.line);
+	obj.set("col", (int)sym.col);
+	obj.set("is_private", sym.is_private);
+	if (sym.receiver.len > 0) {
+		obj.set("receiver", sym.receiver);
+	}
+	if (sym.supertype_count > 0) {
+		Object* supers = object::new_obj(tmem);
+		for (usz i = 0; i < sym.supertype_count; i++) {
+			supers.push(object::new_string(sym.supertypes[i], tmem));
+		}
+		obj.set("supertypes", supers);
+	}
+	return obj;
+}
+
+fn String symbol_kind_label(SymbolKind kind) {
+	switch (kind) {
+		case FUNCTION:  return "function";
+		case CLASS:     return "class";
+		case INTERFACE: return "interface";
+		case OBJECT:    return "object";
+		case PROPERTY:  return "property";
+		case TYPEALIAS: return "typealias";
 	}
 }
 
