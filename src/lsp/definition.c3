@@ -1,5 +1,38 @@
 module kls::lsp::definition;
 
+/*
+ * textDocument/definition handler — Kotlin go-to-definition.
+ *
+ * Architecture (post Tier-3 refactor):
+ *
+ *   handle_definition (dispatcher)
+ *     ├─ resolve_dot_member       — type-directed `recv.member` lookup
+ *     │                             (Kotlin spec §11 member access)
+ *     └─ resolve_bare_identifier  — 9-step lookup pipeline
+ *                                   (Kotlin spec §16.10 lexical scopes
+ *                                    + §16.30 imports)
+ *
+ * Spec ordering (resolve_bare_identifier):
+ *   1. Receiver-lambda implicit `this` member (§16.30)
+ *   2. Lexical scope walk: innermost → FILE (§16.10)
+ *   3. Extension function implicit `this` member (§16.30)
+ *   4. Text-based FQN dep lookup
+ *   5. Inherited supertype member (§16.10) — bound tighter than
+ *                                            cross-file workspace
+ *   6. Workspace index — same-package + explicit imports (§16.30)
+ *   7. Explicit-import dep lookup
+ *   8. Star-import dep lookup
+ *   9. Default-import dep lookup (§16.30 implicit imports)
+ *
+ * Helpers used elsewhere:
+ *   find_declaration_in_file      — scope walk + global fallback;
+ *                                   used by rename/references/highlight/
+ *                                   inlay_hints/signature_help/
+ *                                   call_hierarchy/linked_editing
+ *   find_declaration_in_scope_chain — strict scope walk only,
+ *                                     for spec-conformant go-to-def
+ */
+
 import std::io;
 import std::collections;
 import std::collections::object;

@@ -379,25 +379,31 @@ Target: Kotlin spec **1.9**. Parser handles:
 - Hard keywords: package, import, class, interface, fun, object, val, var, typealias, constructor, by, companion, init, this, super, typeof, where, if, else, when, try, catch, finally, for, do, while, throw, return, continue, break, as, is, in, out, dynamic
 - Soft keywords: abstract, annotation, by, catch, companion, constructor, crossinline, data, dynamic, enum, external, final, finally, get, import, infix, init, inline, inner, internal, lateinit, noinline, open, operator, out, override, private, protected, public, reified, sealed, suspend, tailrec, vararg, where, set, field, property, receiver, param, setparam, delegate, file, expect, actual, const
 
-## Phase 2 TODOs
+## Definition Resolver Architecture (post Tier-3)
 
-### Static-vs-instance member disambiguation for dep classes
+`handle_definition` is a thin dispatcher (`src/lsp/definition.c3:handle_definition`):
+- `resolve_dot_member` — type-directed `recv.member` (Kotlin spec §11)
+- `resolve_bare_identifier` — 9-step pipeline (Kotlin spec §16.10 + §16.30)
 
-Hover/definition/completion currently can't tell `UUID.randomUUID()` (class-ref → static) apart from `someUuid.randomUUID()` (instance call, illegal Kotlin). Both surface the same dep symbols because:
-1. `DepSymbol` (`src/deps/jar_index.c3:29`) has no `is_static` flag.
-2. `TypeRef` (`src/kotlin/types.c3:70`) has no flag distinguishing "class reference" from "instance value" — `UUID` the class and a `UUID` value both look like `{kind: SIMPLE, name: "UUID"}`.
+Spec ordering: receiver-lambda → scope walk → extension receiver → text-FQN dep → inherited supertype → workspace → explicit-import dep → star-import dep → default-import dep.
 
-Phase 1 (shipped): `describe_dep_member` in `src/lsp/hover.c3` filters by `class_name` with import-package preference + supertype walk, mirroring `find_dep_member_definition`. Resolves the reported `UUID.randomUUID()` no-docs bug. Mild false positive remains: hover on instance.staticMember surfaces the static (and vice versa).
+Two AST lookup helpers:
+- `find_declaration_in_file` — scope walk + global fallback. Used by rename/references/highlight/inlay_hints/signature_help/call_hierarchy/linked_editing where "find any binding of this name in this file" is correct semantics.
+- `find_declaration_in_scope_chain` — strict scope walk only. Used by `resolve_bare_identifier` for spec-conformant go-to-def. Cross-class lookup goes through workspace + dep paths instead of unscored AST scan.
 
-Phase 2 plan:
-1. Add `bool is_static` to `DepSymbol` (`src/deps/jar_index.c3`); set from `m.access_flags & ACC_STATIC` in `jar_index.c3:435`. Bump dep-index cache version (auto-reindex on load).
-2. Add class-ref discriminator to `TypeRef`: either new `TypeKind::CLASS_REF` or a `bool is_class_ref` flag.
-3. Mark TypeRef as class-ref in `resolve_name_expr_type` (`src/kotlin/types.c3:983`) when name resolves to class/interface/object via workspace OR `resolve_dep_name_by_import` (lines 1023–1038).
-4. In `describe_dep_member`, `find_dep_member_definition`, and `add_dot_completions`, filter dep methods by `is_static` according to the receiver's `is_class_ref`.
-5. Handle Kotlin companion-object semantics: Java statics are exposed via the `Companion` object in Kotlin; nested-class access via outer name; `@JvmStatic` on Kotlin members.
-6. Mirror in completion (`src/lsp/completion.c3:add_dot_completions`) and definition (`src/lsp/definition.c3:find_dep_member_definition`) so all three handlers stay consistent.
+## Static-vs-instance Member Disambiguation
 
-Tests: extend `test/cross_file_hover_test.c3` with positive (static-on-class-ref shows, instance-on-class-ref hidden) and negative (instance-on-instance shows, static-on-instance hidden) cases.
+DONE (Phase 0–2 of Tier-3 refactor):
+- `DepSymbol.is_static` (`src/deps/jar_index.c3`) — set from `ACC_STATIC` for Java methods/fields and Kotlin companion members.
+- `TypeRef.is_class_ref` (`src/kotlin/types.c3`) — set in `resolve_name_expr_type` (workspace branch) and `resolve_dep_name_by_import` (3 dep-import branches) for class/interface/object/companion references.
+- `is_member_accessible(sym, receiver_is_class_ref)` (`src/lsp/definition.c3:1316`) — class-ref receivers see only static members; instance receivers see all (strict instance-mode is future work).
+- Wired in `find_dep_member_definition` (definition) and `describe_dep_member` (hover) including the supertype walk and UNKNOWN-receiver fallback. Tests in `test/cross_file_hover_test.c3` cover static-on-class-ref shows, instance-on-class-ref hidden, static-on-instance allowed.
+
+NOT DONE (deferred):
+1. **`@JvmStatic` on Kotlin members** — would let Kotlin companion methods marked `@JvmStatic` resolve as Java statics on the outer class.
+2. **Strict instance mode** — currently `is_member_accessible` only filters when receiver is class-ref. Strict mode would also hide statics on instance receivers.
+3. **Completion dot-member dep path** — `add_dot_completions` (`src/lsp/completion.c3`) does not currently surface dep-class members at all (only stdlib + workspace + hardcoded type tables). When added, must wire `is_member_accessible`.
+4. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
 
 ## Key References
 

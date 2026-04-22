@@ -1495,16 +1495,17 @@ fn void definition_dot_member_via_explicit_import() @test {
 	};
 }
 
-// ── Global fallback prefers top-level declaration before cursor ─────
+// ── Scope walk prefers top-level over nested unrelated class ────────
 
-fn void global_fallback_prefers_top_level_before_cursor() @test {
+fn void scope_walk_prefers_top_level_over_nested_class() @test {
 	@pool() {
 		DocumentStore store;
 		store.init();
 		defer store.free();
 
 		// Two classes both have `process()`, cursor on `process()` at top level
-		// outside both classes. Global fallback should prefer top-level decl.
+		// outside both classes. Scope walk reaches FILE and finds the top-level
+		// declaration; the nested one in Foo is not in any enclosing scope.
 		String content =
 			"fun process() {}\nclass Foo {\n    fun process() {}\n}\nfun main() { process() }";
 		store.open("file:///test.kt", "kotlin", 1, content);
@@ -1518,20 +1519,20 @@ fn void global_fallback_prefers_top_level_before_cursor() @test {
 		Object* start = range.get("start")!!;
 		int line = start.get_int("line")!!;
 		// Should go to top-level fun process() at line 0, not the nested one at line 2
-		assert(line == 0, "global fallback should prefer top-level decl, got line %d", line);
+		assert(line == 0, "scope walk should prefer top-level decl, got line %d", line);
 	};
 }
 
-// ── Global fallback prefers enclosing scope ────────────────────────
+// ── Scope walk prefers innermost enclosing scope ────────────────────
 
-fn void global_fallback_prefers_declaration_before_use() @test {
+fn void scope_walk_prefers_innermost_enclosing_scope() @test {
 	@pool() {
 		DocumentStore store;
 		store.init();
 		defer store.free();
 
 		// `name` declared inside a class and at top level. Reference inside class
-		// should resolve to inner class member, not top-level.
+		// should resolve to inner class member via scope walk (Foo encloses cursor).
 		String content =
 			"val name = \"top\"\nclass Foo {\n    val name = \"inner\"\n    fun bar() { println(name) }\n}";
 		store.open("file:///test.kt", "kotlin", 1, content);
@@ -1544,7 +1545,7 @@ fn void global_fallback_prefers_declaration_before_use() @test {
 		Object* range = result.get("range")!!;
 		Object* start = range.get("start")!!;
 		int line = start.get_int("line")!!;
-		// Should go to class member `name` at line 2 (scope walk finds it)
+		// Should go to class member `name` at line 2 (scope walk finds it first)
 		assert(line == 2, "should resolve to inner scope decl, got line %d", line);
 	};
 }
