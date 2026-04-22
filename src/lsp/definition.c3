@@ -113,13 +113,122 @@ fn Object*? resolve_dot_member(ResolutionContext* ctx) {
 }
 
 /**
- * Handle textDocument/definition request.
- * Returns a Location JSON object pointing to the declaration of the
- * identifier under the cursor, or null if no definition is found.
+ * Resolve a bare-name reference (no dot prefix) to a definition.
  *
- * Uses the parser AST for scope-aware lookup: searches from the
- * innermost scope containing the cursor outward.
- * Falls back to workspace index for cross-file definitions.
+ * Implements the Kotlin spec §16.10/§16.30 lookup order for unqualified
+ * names. Each step short-circuits on success.
+ *
+ * Order (and Kotlin spec rule it implements):
+ *   1. Receiver-lambda implicit `this` member (§16.30, lambda receiver)
+ *      — gated by no-shadow (`is_declared_in_lambda_scope`)
+ *   2. Scope-walk over local + enclosing AST scopes (§16.10 inner→outer)
+ *   3. Extension-fn implicit `this` member (§16.30 extension receiver)
+ *   4. Text-based FQN dep lookup (must precede workspace to avoid
+ *      matching same-name workspace symbol in wrong package)
+ *   5. Inherited supertype member (§16.10 supertype scope) — moved
+ *      ABOVE workspace per spec; current-class supertype binds tighter
+ *      than another file's top-level same name.
+ *   6. Workspace index (cross-file user code, §16.30 same-package + imports)
+ *   7. Explicit-import dep lookup
+ *   8. Star-import dep lookup
+ *   9. Default-import dep lookup (§16.30 implicit imports)
+ *
+ * Skipped entirely when `ctx.is_dot_member`; dot-member dispatch handles
+ * those paths via `resolve_dot_member`.
+ *
+ * Returns NOT_FOUND_BY_IMPORT~ when the pipeline produces nothing; caller
+ * treats fault as "no definition found" (returns null to client).
+ */
+fn Object*? resolve_bare_identifier(ResolutionContext* ctx) {
+	ParseResult* pr = ctx.pr;
+	TypeInfo* ti = ctx.info;
+	Token tok = ctx.tok;
+	String target_name = ctx.target_name;
+	String uri = ctx.uri;
+	WorkspaceIndex* workspace = ctx.workspace;
+	DocumentStore* store = ctx.store;
+
+	// 1. Receiver lambda member navigation
+	// `with(receiver) { member }` / `apply { member }`: bare name may be
+	// a member of the lambda's receiver type. Gate on no-shadow.
+	if (!is_declared_in_lambda_scope(pr, target_name, tok.offset)) {
+		if (try result = find_receiver_lambda_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
+			log::debug("[def] bare: receiver-lambda member");
+			return result;
+		}
+	}
+
+	// 2. Scope-walk (local → outer → top-level same file)
+	if (try node = find_definition_in_ast(pr, target_name, tok.offset, ctx.is_call, ti)) {
+		log::debug("[def] bare: AST scope search");
+		return build_location_from_node(uri, node);
+	}
+
+	// 3. Extension function receiver member
+	if (try result = find_extension_receiver_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
+		log::debug("[def] bare: extension receiver member");
+		return result;
+	}
+
+	// 4. Text-based FQN dep lookup (e.g., org.apache.kafka.X)
+	if (workspace != null && workspace.dep_index.initialized) {
+		if (try result = find_definition_by_text_fqn(ctx.doc.content, tok, &workspace.dep_index)) {
+			log::debug("[def] bare: text-based FQN dep lookup");
+			return result;
+		}
+	}
+
+	// 5. Inherited supertype member — MOVED before workspace per spec.
+	// Class hierarchy binds tighter than unrelated workspace symbols.
+	if (workspace != null) {
+		if (try result = find_inherited_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
+			log::debug("[def] bare: inherited supertype member");
+			return result;
+		}
+	}
+
+	// 6. Cross-file workspace lookup
+	if (workspace != null) {
+		if (try result = find_definition_in_workspace(workspace, target_name, ctx.is_call, uri, pr)) {
+			log::debug("[def] bare: workspace index");
+			return result;
+		}
+	}
+
+	// 7. Explicit-import dep lookup
+	if (workspace != null) {
+		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, ctx.is_call, uri)) {
+			log::debug("[def] bare: explicit import dep");
+			return result;
+		}
+	}
+
+	// 8. Star-import dep lookup
+	if (workspace != null) {
+		if (try result = find_definition_by_star_import(pr, &workspace.dep_index, target_name, ctx.is_call, uri)) {
+			log::debug("[def] bare: star import dep");
+			return result;
+		}
+	}
+
+	// 9. Default-import dep lookup (Kotlin spec §16.30 implicit imports)
+	if (workspace != null) {
+		if (try result = find_definition_by_default_imports(&workspace.dep_index, target_name, ctx.is_call)) {
+			log::debug("[def] bare: default import dep");
+			return result;
+		}
+	}
+
+	return NOT_FOUND_BY_IMPORT~;
+}
+
+/**
+ * Handle textDocument/definition request.
+ *
+ * Dispatcher: routes to `resolve_dot_member` for member-access tokens
+ * and to `resolve_bare_identifier` for free names. The late dot-member
+ * retry handles cases where the AST didn't classify the token as a
+ * dot-member but text-based detection still applies (e.g., partial AST).
  */
 fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!;
@@ -138,138 +247,35 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 
 	log::debug("[def] target='%s' line=%d col=%d uri=%s", ctx.target_name, line, character, ctx.uri);
 
-	// Local aliases for readability; ctx is the source of truth.
-	Document* doc = ctx.doc;
-	ParseResult* pr = ctx.pr;
-	TypeInfo* ti = ctx.info;
-	Token tok = ctx.tok;
-	String target_name = ctx.target_name;
-	bool is_call = ctx.is_call;
-	bool is_dot_member = ctx.is_dot_member;
-
-	// ── Dot-member navigation (priority over bare-name resolution) ─
-	// If the token is a member of a DOT_EXPR (e.g., `nob.module`), the
-	// receiver's type determines the lookup target — Kotlin spec §16
-	// resolution is type-directed for member access. This MUST run before
-	// the bare-identifier scope-walk + global fallback, otherwise a
-	// same-named bare decl (e.g., a PARAM in an unrelated fn) can win the
-	// scoring race and return the wrong target.
-	if (is_dot_member && ti != null) {
+	// ── Dot-member dispatch ──────────────────────────────────────
+	// Member access (`receiver.member`) is type-directed. MUST run before
+	// bare-name resolution; otherwise a same-named bare decl in an
+	// unrelated scope can win the scoring race.
+	if (ctx.is_dot_member) {
 		if (try result = resolve_dot_member(&ctx)) {
-			log::debug("[def] found via dot-member navigation (early)");
+			log::debug("[def] dispatch: dot-member (early)");
 			return result;
 		}
+		// Fall through: dot-member resolution may have given up but the
+		// bare-name pipeline can still find scope-local matches (rare).
 	}
 
-	// ── Receiver lambda member navigation ────────────────────────
-	// If the cursor is inside a receiver lambda (e.g., Module.() -> Unit),
-	// and the name is NOT declared locally inside the lambda, it likely
-	// refers to a member of the receiver class. Check this BEFORE the
-	// global fallback to avoid matching same-named declarations in
-	// unrelated scopes. Kotlin priority: local-in-lambda > receiver > outer.
-	if (!is_declared_in_lambda_scope(pr, target_name, tok.offset)) {
-		if (try result = find_receiver_lambda_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
-			return result;
-		}
-	}
-
-	// Find definition using scope-aware AST search
-	if (try node = find_definition_in_ast(pr, target_name, tok.offset, is_call, ti)) {
-		log::debug("[def] found via AST scope search");
-		return build_location_from_node(uri, node);
-	}
-
-	// ── Extension function receiver member navigation ────────────
-	// If the cursor is inside an extension function (fun Receiver.name()),
-	// bare identifiers may refer to implicit `this` members of the receiver.
-	if (try result = find_extension_receiver_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
-		log::debug("[def] found via extension receiver member");
+	// ── Bare-identifier dispatch ─────────────────────────────────
+	if (try result = resolve_bare_identifier(&ctx)) {
 		return result;
 	}
 
-	// ── Dot-member navigation (late retry for non-DOT_EXPR cases) ─
-	// Cases where is_token_dot_member returned false but dot-member
-	// resolution is still applicable (e.g., text-based dot detection).
-	if (!is_dot_member && ti != null) {
+	// ── Late dot-member retry ────────────────────────────────────
+	// Catches text-based dot detection cases where AST classification
+	// missed the dot relationship.
+	if (!ctx.is_dot_member) {
 		if (try result = resolve_dot_member(&ctx)) {
-			log::debug("[def] found via dot-member navigation (late)");
+			log::debug("[def] dispatch: dot-member (late retry)");
 			return result;
 		}
 	}
 
-	// ── FQN text-based detection ────────────────────────────────
-	// If the token is preceded by a dot in the source text, it may be
-	// part of a fully-qualified name (e.g., org.apache.kafka.streams.StreamsConfig).
-	// Reconstruct the FQN from the source text and try dep lookup.
-	// This must run BEFORE workspace lookup to avoid matching a workspace
-	// symbol with the same name but different package.
-	if (workspace != null && workspace.dep_index.initialized) {
-		if (try result = find_definition_by_text_fqn(doc.content, tok, &workspace.dep_index)) {
-			log::debug("[def] found via text-based FQN dep lookup");
-			return result;
-		}
-	}
-
-	// ── Cross-file lookup via workspace index ────────────────────
-	// Workspace symbols take priority over dependency symbols, because
-	// the user's own code is the most relevant navigation target.
-	// Skip this for dot members (e.g., record.timestamp()) — the dot-member
-	// handler already searched the workspace by receiver type. Falling through
-	// here would match unrelated symbols with the same name.
-	if (workspace != null && !is_dot_member) {
-		if (try result = find_definition_in_workspace(workspace, target_name, is_call, uri, pr)) {
-			log::debug("[def] found via workspace index");
-			return result;
-		}
-	}
-
-	// ── Inheritance-aware member lookup ──────────────────────────
-	// If the cursor is inside a class body and the bare call/reference
-	// matches a member of a supertype, resolve it via the class hierarchy.
-	// This handles `createOppdrag110()` called from a class that extends
-	// the class defining that method — without requiring explicit `this.`.
-	if (workspace != null && !is_dot_member) {
-		if (try result = find_inherited_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
-			log::debug("[def] found via inherited member lookup");
-			return result;
-		}
-	}
-
-	// ── Import-aware dependency lookup ───────────────────────────
-	// If the file has an explicit import for this name (e.g., import com.example.Foo),
-	// try the dependency index, filtered by the import's package.
-	// Skip for dot members — the dot-member handler already tried deps by receiver type.
-	if (workspace != null && !is_dot_member) {
-		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
-			log::debug("[def] found via explicit import dep lookup");
-			return result;
-		}
-	}
-
-	// ── Star-import dependency lookup ────────────────────────────
-	// If the file has a wildcard import (e.g., import java.util.*),
-	// try the dependency index filtered by the star package.
-	// Returns nothing if ambiguous (multiple star packages match).
-	if (workspace != null && !is_dot_member) {
-		if (try result = find_definition_by_star_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
-			log::debug("[def] found via star import dep lookup");
-			return result;
-		}
-	}
-
-	// ── Default-import dependency lookup (Kotlin spec §16.30) ────
-	// Kotlin auto-imports kotlin.*, kotlin.collections.*, kotlin.io.*,
-	// kotlin.ranges.*, kotlin.sequences.*, kotlin.text.*,
-	// kotlin.annotation.*, kotlin.comparisons.* and (on JVM) java.lang.*.
-	// Resolves bare references like `println`, `listOf`, `String`, `UUID` (when java.lang).
-	if (workspace != null && !is_dot_member) {
-		if (try result = find_definition_by_default_imports(&workspace.dep_index, target_name, is_call)) {
-			log::debug("[def] found via default-import dep lookup");
-			return result;
-		}
-	}
-
-	log::debug("[def] no definition found for '%s'", target_name);
+	log::debug("[def] no definition found for '%s'", ctx.target_name);
 	return null;
 }
 
