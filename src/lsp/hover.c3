@@ -15,6 +15,7 @@ import kls::kotlin::types;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::javadoc;
+import kls::deps::member_resolver;
 import kls::lsp::definition;
 import kls::lsp::inlay_hints;
 
@@ -263,21 +264,8 @@ fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok, Wo
  * vice versa. Tracked in AGENTS.md.
  */
 fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type, ParseResult* pr = null, bool receiver_is_class_ref = false) {
-	DepSymbol*[16] all_matches;
-	usz total = dep_index.lookup_by_name(tok.text, &all_matches);
-
-	// Determine if the receiver type is itself a known dep class. Required
-	// guard for the class_name filter below — without this, a workspace type
-	// named "Foo" could falsely pull in dep methods from an unrelated class
-	// also named "Foo".
-	DepSymbol*[16] class_matches;
-	usz class_count = dep_index.lookup_by_name(receiver_type, &class_matches);
-	bool is_known_class = false;
-	DepSymbol* best_class = null;
-	String preferred_pkg = "";
-
 	// Resolve preferred package from explicit imports of the receiver name.
-	// Mirrors find_dep_member_definition's import-preference logic.
+	String preferred_pkg = "";
 	if (pr != null) {
 		ImportMap imports = workspace::build_import_map(pr);
 		for (usz i = 0; i < imports.import_count; i++) {
@@ -293,103 +281,15 @@ fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String rec
 		}
 	}
 
-	for (usz i = 0; i < class_count; i++) {
-		DepSymbolKind k = class_matches[i].kind;
-		if (k != DEP_CLASS && k != DEP_INTERFACE && k != DEP_ENUM &&
-			k != DEP_ANNOTATION && k != DEP_OBJECT) continue;
-		is_known_class = true;
-		if (preferred_pkg.len > 0 && class_matches[i].package_name == preferred_pkg) {
-			best_class = class_matches[i];
-			break;
-		}
-		if (best_class == null) best_class = class_matches[i];
-	}
-
-	if (total == 0 && !is_known_class) return NO_DESCRIPTION~;
-
-	// Collect matches that are compatible with the receiver type.
-	// De-dupe by symbol pointer so a symbol matching multiple checks is only added once.
+	// Shared resolver: matches via signature prefix / first param /
+	// declaring class, applies static-vs-class-ref filter, walks one
+	// level of supertypes, and reorders by preferred package.
 	DepSymbol*[16] filtered;
-	usz filtered_count = 0;
-
-	for (usz i = 0; i < total && filtered_count < 16; i++) {
-		DepSymbol* sym = all_matches[i];
-		bool matched = false;
-
-		// Check 1: instance method signature "fun ReceiverType.name(...)"
-		if (sig_has_receiver_prefix(sym.signature, receiver_type)) {
-			matched = true;
-		}
-
-		// Check 2: static extension function where receiver is first param
-		if (!matched) {
-			String first_param = extract_first_param_type(sym.signature);
-			if (first_param.len > 0 && receiver_type_matches(first_param, receiver_type)) {
-				matched = true;
-			}
-		}
-
-		// Check 3: declaring class matches receiver (Java static/instance methods).
-		// Strict equality on class_name; only valid when receiver is a known dep class.
-		// Package preference is applied by sorting matched symbols below.
-		if (!matched && is_known_class && sym.class_name.len > 0 &&
-			sym.class_name == receiver_type &&
-			(sym.kind == DEP_METHOD || sym.kind == DEP_FIELD)) {
-			matched = true;
-		}
-
-		// Static-vs-instance filter: class-ref receivers (e.g. UUID.randomUUID)
-		// only see static members; instance receivers (someUuid.foo) only see
-		// instance members. Checks 1+2 are Kotlin extension functions which are
-		// instance-callable only.
-		if (matched && receiver_is_class_ref && !sym.is_static) {
-			matched = false;
-		}
-
-		if (matched) {
-			filtered[filtered_count] = sym;
-			filtered_count++;
-		}
-	}
-
-	// Supertype walk: if no direct member match found via class_name and the
-	// receiver class has known supertypes (e.g. List → Iterable), search those.
-	// Mirrors find_dep_member_definition's supertype walk. Only one level deep
-	// to limit broadening.
-	if (filtered_count == 0 && best_class != null) {
-		for (usz s = 0; s < best_class.supertype_count && filtered_count < 16; s++) {
-			String super_name = best_class.supertypes[s];
-			if (super_name.len == 0) continue;
-
-			DepSymbol*[16] super_matches;
-			usz super_count = dep_index.lookup_by_name(tok.text, &super_matches);
-			for (usz i = 0; i < super_count && filtered_count < 16; i++) {
-				DepSymbol* sym = super_matches[i];
-				if (sym.class_name == super_name &&
-					(sym.kind == DEP_METHOD || sym.kind == DEP_FIELD)) {
-					if (receiver_is_class_ref && !sym.is_static) continue;
-					filtered[filtered_count] = sym;
-					filtered_count++;
-				}
-			}
-			if (filtered_count > 0) break;
-		}
-	}
+	usz filtered_count = member_resolver::find_dep_class_members(
+		dep_index, receiver_type, tok.text, receiver_is_class_ref,
+		preferred_pkg, filtered[..]);
 
 	if (filtered_count == 0) return NO_DESCRIPTION~;
-
-	// Reorder: prefer entries whose package matches preferred_pkg (from imports).
-	// Stable selection — first matching package wins, others kept in original order.
-	if (preferred_pkg.len > 0) {
-		for (usz i = 0; i < filtered_count; i++) {
-			if (filtered[i].package_name == preferred_pkg && i > 0) {
-				DepSymbol* preferred = filtered[i];
-				for (usz j = i; j > 0; j--) filtered[j] = filtered[j - 1];
-				filtered[0] = preferred;
-				break;
-			}
-		}
-	}
 
 	DString ds;
 	ds.tinit();
@@ -420,129 +320,6 @@ fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String rec
 	}
 
 	return ds.str_view();
-}
-
-/**
- * Check if a signature starts with "fun ReceiverType.name(..." pattern.
- * E.g. sig="fun ArrayList.get(Int): Any", receiver="ArrayList" -> true
- */
-fn bool sig_has_receiver_prefix(String sig, String receiver_type) {
-	// Skip "fun " prefix
-	if (sig.len < 5 || sig[:4] != "fun ") return false;
-	String after_fun = sig[4..];
-
-	// Look for "ReceiverType." at the start
-	if (after_fun.len <= receiver_type.len) return false;
-
-	// Check if it starts with the receiver type name followed by '.'
-	if (after_fun[:receiver_type.len] == receiver_type &&
-		after_fun[receiver_type.len] == '.') {
-		return true;
-	}
-
-	return false;
-}
-
-/**
- * Extract the base type name from a signature's first parameter.
- * For "fun getOrNull(Array<Any>, Int): Any" -> "Array"
- * For "fun getOrNull(List, Int): Any" -> "List"
- * Returns empty string if no parameters or cannot parse.
- */
-fn String extract_first_param_type(String sig) {
-	// Find opening '('
-	usz paren = 0;
-	while (paren < sig.len && sig[paren] != '(') {
-		paren++;
-	}
-	if (paren >= sig.len) return "";
-	paren++; // skip '('
-
-	// Skip whitespace
-	while (paren < sig.len && sig[paren] == ' ') paren++;
-
-	if (paren >= sig.len || sig[paren] == ')') return "";
-
-	// Read the first parameter type (up to ',', ')', '<', or ' ')
-	usz start = paren;
-	usz end = start;
-	while (end < sig.len) {
-		char c = sig[end];
-		if (c == ',' || c == ')' || c == '<') break;
-		end++;
-	}
-
-	if (end <= start) return "";
-
-	// Trim trailing whitespace
-	while (end > start && sig[end - 1] == ' ') end--;
-
-	return sig[start..end - 1];
-}
-
-/**
- * Check if a parameter type is compatible with the receiver type.
- * Handles base type name matching:
- *   "Array" matches receiver "Array" (for Array<String> -> getOrNull(Array<Any>, ...))
- *   "List" matches receiver "List", "MutableList", "ArrayList"
- *   "CharSequence" matches receiver "String"
- *   "Iterable" matches receiver "List", "Set", "Collection", etc.
- *   "Any" matches any receiver type.
- */
-fn bool receiver_type_matches(String param_type, String receiver_type) {
-	// Exact match
-	if (param_type == receiver_type) return true;
-
-	// "Any" or "Object" matches everything
-	if (param_type == "Any" || param_type == "Object") return true;
-
-	// Array types: "Array" matches "Array"
-	if (param_type == "Array" && receiver_type == "Array") return true;
-
-	// Collection hierarchy
-	if (param_type == "Iterable" || param_type == "Collection") {
-		if (receiver_type == "List" || receiver_type == "MutableList" ||
-			receiver_type == "Set" || receiver_type == "MutableSet" ||
-			receiver_type == "Collection" || receiver_type == "ArrayList" ||
-			receiver_type == "HashSet" || receiver_type == "LinkedHashSet" ||
-			receiver_type == "Iterable" || receiver_type == "Sequence") {
-			return true;
-		}
-	}
-
-	if (param_type == "List") {
-		if (receiver_type == "List" || receiver_type == "MutableList" ||
-			receiver_type == "ArrayList") {
-			return true;
-		}
-	}
-
-	if (param_type == "Set") {
-		if (receiver_type == "Set" || receiver_type == "MutableSet" ||
-			receiver_type == "HashSet" || receiver_type == "LinkedHashSet") {
-			return true;
-		}
-	}
-
-	if (param_type == "Map") {
-		if (receiver_type == "Map" || receiver_type == "MutableMap" ||
-			receiver_type == "HashMap" || receiver_type == "LinkedHashMap") {
-			return true;
-		}
-	}
-
-	// CharSequence matches String
-	if (param_type == "CharSequence") {
-		if (receiver_type == "String" || receiver_type == "StringBuilder" ||
-			receiver_type == "CharSequence") {
-			return true;
-		}
-	}
-
-	// Comparable
-	if (param_type == "Comparable") return true;
-
-	return false;
 }
 
 /**
@@ -587,7 +364,7 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 				}
 				if (recv_name.len > 0) {
 					// Bare NAME_EXPR matching a known dep class name → class-ref access
-					bool is_class_ref = definition::is_dep_class_name(&workspace.dep_index, recv_name);
+					bool is_class_ref = member_resolver::is_dep_class_name(&workspace.dep_index, recv_name);
 					if (try desc = describe_dep_member(&workspace.dep_index, tok, recv_name, pr, is_class_ref)) {
 						return desc;
 					}

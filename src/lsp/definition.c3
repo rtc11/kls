@@ -47,6 +47,7 @@ import kls::kotlin::symbols;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::deps::source_nav;
+import kls::deps::member_resolver;
 import kls::log;
 
 /**
@@ -958,7 +959,7 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					// If recv_name resolves to a known dep class/object/etc., the
 					// receiver is a class reference (Static.member). Otherwise treat
 					// as instance (permissive).
-					bool recv_is_class_ref = is_dep_class_name(&workspace.dep_index, recv_name);
+					bool recv_is_class_ref = member_resolver::is_dep_class_name(&workspace.dep_index, recv_name);
 					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr, recv_is_class_ref);
 					if (dep_result != null) return dep_result;
 				}
@@ -1316,163 +1317,48 @@ fn Object* build_location_from_member(MemberDecl* m) {
 // ── Dependency member definition lookup ───────────────────────────
 
 /**
- * Look up a dot-member in the dependency index. First verifies that
- * the receiver name matches a known class/interface/enum, then searches
- * for a matching method or field with that class_name.
+ * Look up a dot-member in the dependency index.
  *
- * This handles JDK classes (System.nanoTime, Files.readAllBytes, etc.)
- * and any other dependency class whose members are indexed.
+ * Delegates to `kls::deps::member_resolver::find_dep_class_members`,
+ * which is shared with hover. See that module for the matching
+ * pipeline (signature prefix → first param → declaring class →
+ * supertype walk → static-vs-class-ref filter → package preference).
+ *
+ * Returns the first candidate as a Location, or null when nothing
+ * matches.
  */
-/**
- * Kotlin spec §11/§16: filter dep members by receiver shape.
- *
- *   - `ClassName.member` (receiver is class reference) — only static members
- *     reachable: Java statics, Kotlin companion-object members, `const val`
- *     at top level. Instance members must be accessed through an instance.
- *
- *   - `instance.member` (receiver is a value) — instance members and
- *     extensions reachable. Companion-object members are NOT reachable
- *     via an instance in Kotlin (unlike Java statics through instances).
- *
- * For a value reference `instance.companionMember` we still want to be
- * forgiving today because:
- *   1. Many tests/users rely on the JVM-style instance-of-static lookup.
- *   2. Kotlin compiler reports an error but IDEs typically still resolve
- *      the symbol so the user can navigate.
- *
- * Phase 2 keeps the instance-side permissive (skip filter when
- * `receiver_is_class_ref == false`); the strict class-ref side is the
- * actual fix for Bug 2-style false positives like `nob.module {` matching
- * an unrelated PARAM. When `receiver_is_class_ref == true` we require the
- * dep symbol to be `is_static`. (`@JvmStatic` deferred — no current test.)
- */
-fn bool is_member_accessible(DepSymbol* sym, bool receiver_is_class_ref) {
-	if (sym == null) return false;
-	if (receiver_is_class_ref) {
-		return sym.is_static;
-	}
-	// Instance receiver — accept anything for now (strict mode is future work).
-	return true;
-}
-
-/**
- * Heuristic: does `name` resolve to a class/interface/enum/object/annotation
- * in the dep index? Used in the UNKNOWN-receiver fallback path of
- * `find_dot_member_definition` to decide whether `Name.member` is a static
- * (class-ref) access or an instance access.
- *
- * Cheap: one lookup_by_name + scan of up to 16 matches.
- */
-fn bool is_dep_class_name(DependencyIndex* dep_index, String name) {
-	if (dep_index == null || !dep_index.initialized || name.len == 0) return false;
-	DepSymbol*[16] matches;
-	usz count = dep_index.lookup_by_name(name, &matches);
-	for (usz i = 0; i < count; i++) {
-		switch (matches[i].kind) {
-			case DEP_CLASS:
-			case DEP_INTERFACE:
-			case DEP_ENUM:
-			case DEP_OBJECT:
-			case DEP_ANNOTATION:
-				return true;
-			default:
-				continue;
-		}
-	}
-	return false;
-}
-
 fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name, ParseResult* pr = null, bool receiver_is_class_ref = false) {
-	// First verify the class exists in the dep index
-	DepSymbol*[16] class_matches;
-	usz class_count = dep_index.lookup_by_name(class_name, &class_matches);
-	bool is_known_class = false;
-
-	// If we have AST, use imports to prefer the correct class when multiple exist
-	String preferred_pkg = "";
-	if (pr != null) {
-		ImportMap imports = workspace::build_import_map(pr);
-		for (usz i = 0; i < imports.import_count; i++) {
-			if (imports.import_names[i] == class_name && !imports.is_star[i]) {
-				// Extract package from full import path: "com.example.Record" -> "com.example"
-				String path = imports.import_paths[i];
-				usz last_dot = 0;
-				for (usz j = 0; j < path.len; j++) {
-					if (path[j] == '.') last_dot = j;
-				}
-				if (last_dot > 0) preferred_pkg = path[:last_dot];
-				break;
-			}
-		}
-	}
-
-	// Find the class, preferring imported package
-	DepSymbol* best_class = null;
-	for (usz i = 0; i < class_count; i++) {
-		if (class_matches[i].kind != DEP_CLASS && class_matches[i].kind != DEP_INTERFACE &&
-			class_matches[i].kind != DEP_ENUM && class_matches[i].kind != DEP_ANNOTATION &&
-			class_matches[i].kind != DEP_OBJECT) continue;
-		is_known_class = true;
-		if (preferred_pkg.len > 0 && class_matches[i].package_name == preferred_pkg) {
-			best_class = class_matches[i];
-			break;
-		}
-		if (best_class == null) best_class = class_matches[i];
-	}
-	if (!is_known_class) {
-		return null;
-	}
-
-	// Use the best class's package to filter members
-	String target_class = class_name;
-	String target_pkg = best_class != null ? best_class.package_name : "";
-
-	// Look up the member by name, filter by class_name and prefer matching package
-	DepSymbol*[32] member_matches;
-	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
-
-	DepSymbol* best = null;
-	for (usz i = 0; i < member_count; i++) {
-		if (member_matches[i].class_name != target_class) continue;
-		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
-		if (!is_member_accessible(member_matches[i], receiver_is_class_ref)) continue;
-		if (target_pkg.len > 0 && member_matches[i].package_name == target_pkg) {
-			best = member_matches[i];
-			break;
-		}
-		if (best == null) best = member_matches[i];
-	}
-
-	if (best == null) {
-		// Walk supertypes to find extension functions indexed under parent types.
-		// E.g. List.toSet() -> toSet is indexed under Iterable (the receiver type).
-		if (best_class != null) {
-			for (usz s = 0; s < jar_index::MAX_DEP_SUPERTYPES; s++) {
-				if (best_class.supertypes[s].len == 0) break;
-				Object* super_result = find_dep_member_in_class(dep_index, best_class.supertypes[s], member_name);
-				if (super_result != null) return super_result;
-			}
-		}
-		return null;
-	}
-
-	return source_nav::resolve_dep_definition(best);
+	String preferred_pkg = resolve_preferred_package(pr, class_name);
+	DepSymbol*[16] candidates;
+	usz count = member_resolver::find_dep_class_members(
+		dep_index, class_name, member_name, receiver_is_class_ref,
+		preferred_pkg, candidates[..]);
+	if (count == 0) return null;
+	return source_nav::resolve_dep_definition(candidates[0]);
 }
 
 /**
- * Look up a member by class_name in the dep index without verifying class existence.
- * Used for supertype walk where we already know the hierarchy is valid.
+ * Resolve the preferred package for `class_name` from the file's
+ * explicit imports. Returns "" when no AST or no matching import.
+ *
+ * Lives in definition.c3 (not member_resolver) to avoid a
+ * deps→workspace import cycle. Hover has the same logic inlined.
  */
-fn Object* find_dep_member_in_class(DependencyIndex* dep_index, String class_name, String member_name) {
-	DepSymbol*[32] member_matches;
-	usz member_count = dep_index.lookup_by_name(member_name, &member_matches);
-
-	for (usz i = 0; i < member_count; i++) {
-		if (member_matches[i].class_name != class_name) continue;
-		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
-		return source_nav::resolve_dep_definition(member_matches[i]);
+fn String resolve_preferred_package(ParseResult* pr, String class_name) {
+	if (pr == null) return "";
+	ImportMap imports = workspace::build_import_map(pr);
+	for (usz i = 0; i < imports.import_count; i++) {
+		if (imports.import_names[i] == class_name && !imports.is_star[i]) {
+			String path = imports.import_paths[i];
+			usz last_dot = 0;
+			for (usz j = 0; j < path.len; j++) {
+				if (path[j] == '.') last_dot = j;
+			}
+			if (last_dot > 0) return path[:last_dot];
+			return "";
+		}
 	}
-	return null;
+	return "";
 }
 
 /**
