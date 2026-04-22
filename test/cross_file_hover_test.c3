@@ -4,6 +4,7 @@ import std::collections::object;
 import kls::document;
 import kls::lsp::hover;
 import kls::workspace;
+import kls::deps::jar_index;
 
 // ── Helper ─────────────────────────────────────────────────────────
 
@@ -354,5 +355,121 @@ fn void cross_file_hover_lambda_param_class_generic_substitution() @test {
 		String value = get_hover_value(result);
 		assert(value.contains("reply: StatusReply"),
 			"expected 'reply: StatusReply' in hover, got: '%s'", value);
+	};
+}
+
+// ── Dep-aware dot-member hover (Java static methods) ──────────────
+
+fn void hover_dep_static_method_via_class_ref() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index "UUID" class and its static factory "randomUUID"
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"randomUUID", "fun randomUUID(): UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0);
+
+		store.workspace = &ws;
+
+		String content = "import java.util.UUID\nfun main() {\n    val u = UUID.randomUUID()\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "randomUUID" — line 2, "    val u = UUID.randomUUID()", col 21
+		Object* params = make_params("file:///test.kt", 2, 21);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		assert(result != null, "expected hover result for UUID.randomUUID");
+		String value = get_hover_value(result);
+		assert(value.contains("fun randomUUID"),
+			"expected 'fun randomUUID' in hover, got: '%s'", value);
+	};
+}
+
+fn void hover_dep_method_unknown_receiver_no_false_positive() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index a dep method on UUID — but receiver in code is a non-dep type.
+		// The class_name guard should prevent matching this method.
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"randomUUID", "fun randomUUID(): UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0);
+
+		// "MyType" is not a known dep class, and "randomUUID" is not its member.
+		String content = "class MyType { fun foo() {} }\nfun main() {\n    val x: MyType = MyType()\n    x.randomUUID\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "randomUUID" in "x.randomUUID" at line 3, col 6
+		Object* params = make_params("file:///test.kt", 3, 6);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		// Either no hover, or hover that does NOT contain the dep signature.
+		if (result != null) {
+			String value = get_hover_value(result);
+			assert(!value.contains("fun randomUUID(): UUID"),
+				"unexpected dep symbol in hover for unrelated receiver: '%s'", value);
+		}
+	};
+}
+
+fn void hover_dep_method_package_preference() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Two classes named "Date" in different packages, both with a "getTime" method.
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"Date", "class Date", "java.util", "Date", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"Date", "class Date", "java.sql", "Date", "/fake/java.sql.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"getTime", "fun Date.getTime(): Long /* util */", "java.util", "Date", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"getTime", "fun Date.getTime(): Long /* sql */", "java.sql", "Date", "/fake/java.sql.jmod",
+			DEP_METHOD, null, 0);
+
+		store.workspace = &ws;
+
+		// File explicitly imports java.sql.Date, so hover should prefer the sql one first.
+		String content = "import java.sql.Date\nfun main(d: Date) {\n    d.getTime()\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "getTime" at line 2, "    d.getTime()", col 7
+		Object* params = make_params("file:///test.kt", 2, 7);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		assert(result != null, "expected hover result");
+		String value = get_hover_value(result);
+		// Both signatures may appear, but the sql one should come first.
+		usz sql_pos = (usz)-1;
+		usz util_pos = (usz)-1;
+		for (usz i = 0; i + 4 < value.len; i++) {
+			if (value[i:4] == "/* s" && sql_pos == (usz)-1) sql_pos = i;
+			if (value[i:4] == "/* u" && util_pos == (usz)-1) util_pos = i;
+		}
+		assert(sql_pos != (usz)-1, "expected sql Date.getTime in hover, got: '%s'", value);
+		if (util_pos != (usz)-1) {
+			assert(sql_pos < util_pos, "expected sql variant before util variant, got: '%s'", value);
+		}
 	};
 }

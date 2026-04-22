@@ -208,40 +208,145 @@ fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok, Wo
  * Look up a member name in the dependency index, filtering to only show
  * overloads whose receiver type is compatible with the given type.
  *
- * Kotlin extension functions compile to JVM static methods where the
- * receiver becomes the first parameter. For instance methods, the
- * signature has the class name as prefix (e.g. "fun ArrayList.get(...)").
- * This function checks both patterns to find the best match.
+ * Three matching strategies, in order:
+ *
+ * 1. Kotlin instance/extension method: signature has form "fun ReceiverType.name(...)"
+ *    (Kt-class members and Kotlin extension functions with metadata).
+ *
+ * 2. Kotlin extension via Kt-facade fallback: receiver becomes the first parameter
+ *    on the JVM (e.g., "fun listOf(Iterable<T>, ...)").
+ *
+ * 3. Java method (static or instance) on the receiver class: DepSymbol.class_name
+ *    matches receiver type. Verified by checking the receiver class actually exists
+ *    in the dep index, with package preference from explicit imports, and a one-level
+ *    supertype walk if no direct member match is found. Mirrors the logic used by
+ *    find_dep_member_definition in src/lsp/definition.c3 to keep hover and
+ *    go-to-definition consistent.
+ *
+ * Phase 2 TODO: distinguish static vs instance members of Java classes via a new
+ * DepSymbol.is_static flag and a TypeRef class-reference flag, so that hover on
+ * `UUID.randomUUID()` (class ref → static) doesn't surface instance methods and
+ * vice versa. Tracked in AGENTS.md.
  */
-fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type) {
+fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type, ParseResult* pr = null) {
 	DepSymbol*[16] all_matches;
 	usz total = dep_index.lookup_by_name(tok.text, &all_matches);
-	if (total == 0) return NO_DESCRIPTION~;
 
-	// Collect matches that are compatible with the receiver type
+	// Determine if the receiver type is itself a known dep class. Required
+	// guard for the class_name filter below — without this, a workspace type
+	// named "Foo" could falsely pull in dep methods from an unrelated class
+	// also named "Foo".
+	DepSymbol*[16] class_matches;
+	usz class_count = dep_index.lookup_by_name(receiver_type, &class_matches);
+	bool is_known_class = false;
+	DepSymbol* best_class = null;
+	String preferred_pkg = "";
+
+	// Resolve preferred package from explicit imports of the receiver name.
+	// Mirrors find_dep_member_definition's import-preference logic.
+	if (pr != null) {
+		ImportMap imports = workspace::build_import_map(pr);
+		for (usz i = 0; i < imports.import_count; i++) {
+			if (imports.import_names[i] == receiver_type && !imports.is_star[i]) {
+				String path = imports.import_paths[i];
+				usz last_dot = 0;
+				for (usz j = 0; j < path.len; j++) {
+					if (path[j] == '.') last_dot = j;
+				}
+				if (last_dot > 0) preferred_pkg = path[:last_dot];
+				break;
+			}
+		}
+	}
+
+	for (usz i = 0; i < class_count; i++) {
+		DepSymbolKind k = class_matches[i].kind;
+		if (k != DEP_CLASS && k != DEP_INTERFACE && k != DEP_ENUM &&
+			k != DEP_ANNOTATION && k != DEP_OBJECT) continue;
+		is_known_class = true;
+		if (preferred_pkg.len > 0 && class_matches[i].package_name == preferred_pkg) {
+			best_class = class_matches[i];
+			break;
+		}
+		if (best_class == null) best_class = class_matches[i];
+	}
+
+	if (total == 0 && !is_known_class) return NO_DESCRIPTION~;
+
+	// Collect matches that are compatible with the receiver type.
+	// De-dupe by symbol pointer so a symbol matching multiple checks is only added once.
 	DepSymbol*[16] filtered;
 	usz filtered_count = 0;
 
 	for (usz i = 0; i < total && filtered_count < 16; i++) {
 		DepSymbol* sym = all_matches[i];
+		bool matched = false;
 
 		// Check 1: instance method signature "fun ReceiverType.name(...)"
 		if (sig_has_receiver_prefix(sym.signature, receiver_type)) {
-			filtered[filtered_count] = sym;
-			filtered_count++;
-			continue;
+			matched = true;
 		}
 
 		// Check 2: static extension function where receiver is first param
-		String first_param = extract_first_param_type(sym.signature);
-		if (first_param.len > 0 && receiver_type_matches(first_param, receiver_type)) {
+		if (!matched) {
+			String first_param = extract_first_param_type(sym.signature);
+			if (first_param.len > 0 && receiver_type_matches(first_param, receiver_type)) {
+				matched = true;
+			}
+		}
+
+		// Check 3: declaring class matches receiver (Java static/instance methods).
+		// Strict equality on class_name; only valid when receiver is a known dep class.
+		// Package preference is applied by sorting matched symbols below.
+		if (!matched && is_known_class && sym.class_name.len > 0 &&
+			sym.class_name == receiver_type &&
+			(sym.kind == DEP_METHOD || sym.kind == DEP_FIELD)) {
+			matched = true;
+		}
+
+		if (matched) {
 			filtered[filtered_count] = sym;
 			filtered_count++;
-			continue;
+		}
+	}
+
+	// Supertype walk: if no direct member match found via class_name and the
+	// receiver class has known supertypes (e.g. List → Iterable), search those.
+	// Mirrors find_dep_member_definition's supertype walk. Only one level deep
+	// to limit broadening.
+	if (filtered_count == 0 && best_class != null) {
+		for (usz s = 0; s < best_class.supertype_count && filtered_count < 16; s++) {
+			String super_name = best_class.supertypes[s];
+			if (super_name.len == 0) continue;
+
+			DepSymbol*[16] super_matches;
+			usz super_count = dep_index.lookup_by_name(tok.text, &super_matches);
+			for (usz i = 0; i < super_count && filtered_count < 16; i++) {
+				DepSymbol* sym = super_matches[i];
+				if (sym.class_name == super_name &&
+					(sym.kind == DEP_METHOD || sym.kind == DEP_FIELD)) {
+					filtered[filtered_count] = sym;
+					filtered_count++;
+				}
+			}
+			if (filtered_count > 0) break;
 		}
 	}
 
 	if (filtered_count == 0) return NO_DESCRIPTION~;
+
+	// Reorder: prefer entries whose package matches preferred_pkg (from imports).
+	// Stable selection — first matching package wins, others kept in original order.
+	if (preferred_pkg.len > 0) {
+		for (usz i = 0; i < filtered_count; i++) {
+			if (filtered[i].package_name == preferred_pkg && i > 0) {
+				DepSymbol* preferred = filtered[i];
+				for (usz j = i; j > 0; j--) filtered[j] = filtered[j - 1];
+				filtered[0] = preferred;
+				break;
+			}
+		}
+	}
 
 	DString ds;
 	ds.tinit();
@@ -467,8 +572,9 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 		// Check dependency index, filtering by receiver type.
 		// Kotlin extension functions compile to static methods where the
 		// receiver becomes the first parameter, so we match against that.
+		// Java methods (instance + static) are filtered by declaring class.
 		if (workspace != null && workspace.dep_index.initialized) {
-			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name)) {
+			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name, pr)) {
 				return desc;
 			}
 		}
