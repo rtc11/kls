@@ -1842,3 +1842,105 @@ class Config {
 		// Returning null is acceptable (dep source unavailable)
 	};
 }
+
+// ── Regression: companion-object call must not crash ───────────────
+// Repro: Nob.new(args) where Nob has `companion object { fun new(...) }`
+// Previously crashed with SIGSEGV because pick_best_overload returned
+// a raw null AstNode* that propagated as a successful Optional with
+// null payload, then handle_definition dereferenced it.
+fn void definition_companion_object_call_no_crash() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`fun main(args: Array<String>) {
+    val nob = Nob.new(args)
+}
+class Nob {
+    companion object {
+        fun new(args: Array<String>): Nob = Nob()
+    }
+}`;
+		store.open("file:///nob.kt", "kotlin", 1, content);
+
+		// Cursor on "new" in `Nob.new(args)` at line 1, col 19
+		Object* params = make_params("file:///nob.kt", 1, 19);
+
+		// Must not crash. Result may resolve to companion `fun new` or
+		// return null — both are acceptable; the regression is that the
+		// server used to segfault.
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		if (result != null) {
+			Object* range = result.get("range")!!;
+			Object* start = range.get("start")!!;
+			int line = start.get_int("line")!!;
+			// fun new is on line 5 (0-indexed) of content
+			assert(line == 5, "expected line 5 for fun new, got %d", line);
+		}
+	};
+}
+
+// ── Regression: dot-member must beat unrelated PARAM with same name ──
+// Repro: `nob.module { ... }` where:
+//   - `nob` is a value of type `Nob`
+//   - class `Nob` has `fun module(block: Module.() -> Unit)` (the target)
+//   - some other unrelated fn `fun other_fn(module: Foo)` has a PARAM
+//     also named `module`
+//
+// Before fix: find_definition_in_ast ran first, its global fallback
+// scored the unrelated PARAM higher than the class member (because the
+// class doesn't enclose the cursor) and returned the wrong target.
+//
+// After fix: dot-member resolution runs FIRST when token is a DOT_EXPR
+// member, uses TypeInfo to resolve receiver `nob: Nob`, and finds the
+// class member directly — no scoring race.
+fn void definition_dot_member_beats_unrelated_param() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`fun main(args: Array<String>) {
+    val nob = Nob.new(args)
+    val example = nob.module {
+        src("./foo.kt")
+    }
+}
+class Nob {
+    fun module(block: Module.() -> Unit) {}
+    companion object { fun new(args: Array<String>): Nob = Nob() }
+}
+class Module {
+    fun src(path: String) {}
+}
+fun other_fn(module: String) {
+    println(module)
+}`;
+		store.open("file:///nob.kt", "kotlin", 1, content);
+
+		// Cursor on `module` in `nob.module {` — line 2, col 22
+		Object* params = make_params("file:///nob.kt", 2, 22);
+
+		// Verify token text is correct first
+		Document* doc = store.get("file:///nob.kt") ?? null;
+		assert(doc != null, "doc should exist");
+		if (try tok = hover::find_token_at_position(doc.content, 2, 22)) {
+			assert(tok.text == "module", "expected token 'module' at 2:22, got '%s'", tok.text);
+		} else {
+			assert(false, "no token found at line 2, col 22");
+		}
+
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected definition result, got null");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = (int)start.get_int("line")!!;
+		// Class Nob's `fun module` is on line 7 (0-indexed). The unrelated
+		// PARAM `module` of `other_fn` is on line 13 — must NOT match.
+		assert(line == 7, "expected line 7 (Nob.module), got line %d (likely matched unrelated PARAM)", line);
+	};
+}

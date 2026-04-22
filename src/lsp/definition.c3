@@ -17,6 +17,102 @@ import kls::deps::source_nav;
 import kls::log;
 
 /**
+ * Bundle of inputs needed by every definition sub-resolver.
+ *
+ * Built once at the top of `handle_definition` (and during the late
+ * dot-member retry); passed to all helpers so they don't have to
+ * re-derive offsets, re-tokenize, or re-fetch ParseResult / TypeInfo.
+ *
+ * Lifetime: temp-allocator scoped — valid for one definition request
+ * only. Fields point into the document store / workspace; do NOT
+ * persist beyond the request.
+ *
+ * Mirrors Kotlin spec §16 resolution inputs:
+ *   - `tok` / `target_name`  → the unresolved name reference
+ *   - `pr` / `info`          → AST + types (semantic context)
+ *   - `is_call`              → call vs property reference
+ *   - `is_dot_member`        → member-access vs free reference
+ *   - `workspace`            → cross-file + dep index access
+ *   - `uri` / `doc`          → for fallback locations and source text
+ */
+struct ResolutionContext {
+	DocumentStore* store;
+	WorkspaceIndex* workspace;
+	Document* doc;
+	String uri;
+	ParseResult* pr;
+	TypeInfo* info;
+	Token tok;
+	String target_name;
+	uint cursor_offset;
+	bool is_call;
+	bool is_dot_member;
+}
+
+/**
+ * Build a ResolutionContext from raw LSP request inputs.
+ *
+ * Returns the context wrapped in Optional. Fault on any prerequisite
+ * miss (no doc, no token, non-identifier token, no AST). Caller
+ * should treat fault as "no definition" and return null.
+ */
+fn ResolutionContext? build_resolution_context(DocumentStore* store, WorkspaceIndex* workspace,
+		String uri, uint line, uint character) {
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) return NOT_FOUND_BY_IMPORT~;
+
+	Token tok;
+	if (try t = hover::find_token_at_position(doc.content, line, character)) {
+		tok = t;
+	} else {
+		return NOT_FOUND_BY_IMPORT~;
+	}
+
+	if (tok.kind != IDENTIFIER) return NOT_FOUND_BY_IMPORT~;
+
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) return NOT_FOUND_BY_IMPORT~;
+
+	TypeInfo* info = store.get_types(uri) ?? null;
+
+	bool is_call = is_call_context_ast(pr, tok.offset) || is_call_context(doc.content, tok);
+	bool is_dot_member = is_token_dot_member(pr, tok);
+
+	return (ResolutionContext){
+		.store = store,
+		.workspace = workspace,
+		.doc = doc,
+		.uri = uri,
+		.pr = pr,
+		.info = info,
+		.tok = tok,
+		.target_name = tok.text,
+		.cursor_offset = tok.offset,
+		.is_call = is_call,
+		.is_dot_member = is_dot_member,
+	};
+}
+
+/**
+ * Resolve a dot-member access (`receiver.member`) to a definition.
+ *
+ * Spec-aligned wrapper around `find_dot_member_definition`: thin for now,
+ * but central to Phase 2's split — `handle_definition` dispatches here
+ * for member access and to `resolve_bare_identifier` for free names.
+ *
+ * Class-ref vs instance filtering happens inside via `is_member_accessible`
+ * (gated by `TypeRef.is_class_ref` flag from P0.3 + `DepSymbol.is_static`
+ * from P0.2).
+ *
+ * Returns NOT_DOT_MEMBER~ when no dot-member resolution applies; caller
+ * should treat as "not handled here".
+ */
+fn Object*? resolve_dot_member(ResolutionContext* ctx) {
+	if (ctx.info == null) return NOT_DOT_MEMBER~;
+	return find_dot_member_definition(ctx.pr, ctx.info, ctx.store, ctx.workspace, ctx.tok, ctx.uri);
+}
+
+/**
  * Handle textDocument/definition request.
  * Returns a Location JSON object pointing to the declaration of the
  * identifier under the cursor, or null if no definition is found.
@@ -33,38 +129,37 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	uint line = (uint)pos.get_int("line")!;
 	uint character = (uint)pos.get_int("character")!;
 
-	Document* doc = store.get(uri) ?? null;
-	if (doc == null) {
-		return null;
-	}
-
-	// Find the token at cursor
-	Token tok;
-	if (try t = hover::find_token_at_position(doc.content, line, character)) {
-		tok = t;
+	ResolutionContext ctx;
+	if (try c = build_resolution_context(store, workspace, uri, line, character)) {
+		ctx = c;
 	} else {
 		return null;
 	}
 
-	// Only navigate to definitions of identifiers
-	if (tok.kind != IDENTIFIER) {
-		return null;
+	log::debug("[def] target='%s' line=%d col=%d uri=%s", ctx.target_name, line, character, ctx.uri);
+
+	// Local aliases for readability; ctx is the source of truth.
+	Document* doc = ctx.doc;
+	ParseResult* pr = ctx.pr;
+	TypeInfo* ti = ctx.info;
+	Token tok = ctx.tok;
+	String target_name = ctx.target_name;
+	bool is_call = ctx.is_call;
+	bool is_dot_member = ctx.is_dot_member;
+
+	// ── Dot-member navigation (priority over bare-name resolution) ─
+	// If the token is a member of a DOT_EXPR (e.g., `nob.module`), the
+	// receiver's type determines the lookup target — Kotlin spec §16
+	// resolution is type-directed for member access. This MUST run before
+	// the bare-identifier scope-walk + global fallback, otherwise a
+	// same-named bare decl (e.g., a PARAM in an unrelated fn) can win the
+	// scoring race and return the wrong target.
+	if (is_dot_member && ti != null) {
+		if (try result = resolve_dot_member(&ctx)) {
+			log::debug("[def] found via dot-member navigation (early)");
+			return result;
+		}
 	}
-
-	String target_name = tok.text;
-	log::debug("[def] target='%s' line=%d col=%d uri=%s", target_name, line, character, uri);
-
-	// Get cached AST (parses lazily if needed)
-	ParseResult* pr = store.get_ast(uri) ?? null;
-	if (pr == null) {
-		return null;
-	}
-
-	// Get type info for overload disambiguation
-	TypeInfo* ti = store.get_types(uri) ?? null;
-
-	// Detect call context: prefer AST-based detection, fall back to lexer
-	bool is_call = is_call_context_ast(pr, tok.offset) || is_call_context(doc.content, tok);
 
 	// ── Receiver lambda member navigation ────────────────────────
 	// If the cursor is inside a receiver lambda (e.g., Module.() -> Unit),
@@ -92,13 +187,12 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 		return result;
 	}
 
-	// ── Dot-member navigation ────────────────────────────────────
-	// If the token is a member of a DOT_EXPR, resolve the receiver type
-	// and search for the member declaration in the receiver class.
-	bool is_dot_member = is_token_dot_member(pr, tok);
-	if (ti != null) {
-		if (try result = find_dot_member_definition(pr, ti, store, workspace, tok, uri)) {
-			log::debug("[def] found via dot-member navigation");
+	// ── Dot-member navigation (late retry for non-DOT_EXPR cases) ─
+	// Cases where is_token_dot_member returned false but dot-member
+	// resolution is still applicable (e.g., text-based dot detection).
+	if (!is_dot_member && ti != null) {
+		if (try result = resolve_dot_member(&ctx)) {
+			log::debug("[def] found via dot-member navigation (late)");
 			return result;
 		}
 	}
@@ -159,6 +253,18 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	if (workspace != null && !is_dot_member) {
 		if (try result = find_definition_by_star_import(pr, &workspace.dep_index, target_name, is_call, uri)) {
 			log::debug("[def] found via star import dep lookup");
+			return result;
+		}
+	}
+
+	// ── Default-import dependency lookup (Kotlin spec §16.30) ────
+	// Kotlin auto-imports kotlin.*, kotlin.collections.*, kotlin.io.*,
+	// kotlin.ranges.*, kotlin.sequences.*, kotlin.text.*,
+	// kotlin.annotation.*, kotlin.comparisons.* and (on JVM) java.lang.*.
+	// Resolves bare references like `println`, `listOf`, `String`, `UUID` (when java.lang).
+	if (workspace != null && !is_dot_member) {
+		if (try result = find_definition_by_default_imports(&workspace.dep_index, target_name, is_call)) {
+			log::debug("[def] found via default-import dep lookup");
 			return result;
 		}
 	}
@@ -233,6 +339,8 @@ fn usz find_call_arg_types(ParseResult* pr, TypeInfo* ti, String target_name, ui
  */
 fn AstNode* pick_best_overload(ParseResult* pr, AstNode*[] candidates, uint[] candidate_indices, usz count, int call_arg_count, String[] arg_types = {}, String[] named_args = {}) {
 	if (count == 0) return null;
+	// Defensive: caller-supplied slice may have null entries if uninitialized.
+	if (candidates[0] == null) return null;
 	if (count == 1 || call_arg_count < 0) return candidates[0];
 
 	// Collect candidates with matching param count
@@ -375,6 +483,14 @@ fn int score_named_args(ParseResult* pr, uint fun_idx, String[] named_args) {
  * count matches the call's argument count.
  */
 fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
+	AstNode* node = find_definition_in_ast_impl(pr, target_name, cursor_offset, is_call, ti)!;
+	// Treat null payload as not-found so callers' `try` branches don't
+	// receive a null pointer (would segfault on dereference).
+	if (node == null) return ast::NOT_FOUND~;
+	return node;
+}
+
+fn AstNode*? find_definition_in_ast_impl(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
 	if (pr.node_count == 0) return ast::NOT_FOUND~;
 
 	// If this is a call, find the argument count and types for overload resolution
@@ -441,7 +557,8 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 		}
 
 		if (is_call && func_count > 0) {
-			return pick_best_overload(pr, func_candidates[:func_count], func_indices[:func_count], func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
+			AstNode* picked = pick_best_overload(pr, func_candidates[:func_count], func_indices[:func_count], func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
+			if (picked != null) return picked;
 		}
 		if (first_match != null) {
 			return first_match;
@@ -528,7 +645,9 @@ fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cu
 					best_func_count++;
 				}
 			}
-			return pick_best_overload(pr, best_funcs[:best_func_count], best_func_indices[:best_func_count], best_func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
+			AstNode* picked2 = pick_best_overload(pr, best_funcs[:best_func_count], best_func_indices[:best_func_count], best_func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
+			if (picked2 != null) return picked2;
+			if (best_match != null) return best_match;
 		}
 		if (best_match != null) {
 			return best_match;
@@ -757,7 +876,11 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					}
 				}
 				if (recv_name.len > 0) {
-					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr);
+					// If recv_name resolves to a known dep class/object/etc., the
+					// receiver is a class reference (Static.member). Otherwise treat
+					// as instance (permissive).
+					bool recv_is_class_ref = is_dep_class_name(&workspace.dep_index, recv_name);
+					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr, recv_is_class_ref);
 					if (dep_result != null) return dep_result;
 				}
 
@@ -827,7 +950,7 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 
 		// Search dependency index by receiver type name
 		if (workspace != null && workspace.dep_index.initialized) {
-			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr);
+			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr, receiver_type.is_class_ref);
 			if (dep_result != null) return dep_result;
 		}
 
@@ -1121,7 +1244,66 @@ fn Object* build_location_from_member(MemberDecl* m) {
  * This handles JDK classes (System.nanoTime, Files.readAllBytes, etc.)
  * and any other dependency class whose members are indexed.
  */
-fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name, ParseResult* pr = null) {
+/**
+ * Kotlin spec §11/§16: filter dep members by receiver shape.
+ *
+ *   - `ClassName.member` (receiver is class reference) — only static members
+ *     reachable: Java statics, Kotlin companion-object members, `const val`
+ *     at top level. Instance members must be accessed through an instance.
+ *
+ *   - `instance.member` (receiver is a value) — instance members and
+ *     extensions reachable. Companion-object members are NOT reachable
+ *     via an instance in Kotlin (unlike Java statics through instances).
+ *
+ * For a value reference `instance.companionMember` we still want to be
+ * forgiving today because:
+ *   1. Many tests/users rely on the JVM-style instance-of-static lookup.
+ *   2. Kotlin compiler reports an error but IDEs typically still resolve
+ *      the symbol so the user can navigate.
+ *
+ * Phase 2 keeps the instance-side permissive (skip filter when
+ * `receiver_is_class_ref == false`); the strict class-ref side is the
+ * actual fix for Bug 2-style false positives like `nob.module {` matching
+ * an unrelated PARAM. When `receiver_is_class_ref == true` we require the
+ * dep symbol to be `is_static`. (`@JvmStatic` deferred — no current test.)
+ */
+fn bool is_member_accessible(DepSymbol* sym, bool receiver_is_class_ref) {
+	if (sym == null) return false;
+	if (receiver_is_class_ref) {
+		return sym.is_static;
+	}
+	// Instance receiver — accept anything for now (strict mode is future work).
+	return true;
+}
+
+/**
+ * Heuristic: does `name` resolve to a class/interface/enum/object/annotation
+ * in the dep index? Used in the UNKNOWN-receiver fallback path of
+ * `find_dot_member_definition` to decide whether `Name.member` is a static
+ * (class-ref) access or an instance access.
+ *
+ * Cheap: one lookup_by_name + scan of up to 16 matches.
+ */
+fn bool is_dep_class_name(DependencyIndex* dep_index, String name) {
+	if (dep_index == null || !dep_index.initialized || name.len == 0) return false;
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(name, &matches);
+	for (usz i = 0; i < count; i++) {
+		switch (matches[i].kind) {
+			case DEP_CLASS:
+			case DEP_INTERFACE:
+			case DEP_ENUM:
+			case DEP_OBJECT:
+			case DEP_ANNOTATION:
+				return true;
+			default:
+				continue;
+		}
+	}
+	return false;
+}
+
+fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name, ParseResult* pr = null, bool receiver_is_class_ref = false) {
 	// First verify the class exists in the dep index
 	DepSymbol*[16] class_matches;
 	usz class_count = dep_index.lookup_by_name(class_name, &class_matches);
@@ -1174,6 +1356,7 @@ fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_n
 	for (usz i = 0; i < member_count; i++) {
 		if (member_matches[i].class_name != target_class) continue;
 		if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
+		if (!is_member_accessible(member_matches[i], receiver_is_class_ref)) continue;
 		if (target_pkg.len > 0 && member_matches[i].package_name == target_pkg) {
 			best = member_matches[i];
 			break;
@@ -2255,6 +2438,47 @@ fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep
 	if (try loc = find_import_statement_location(pr, best_star_path, current_uri)) {
 		return loc;
 	}
+
+	return NOT_FOUND_BY_IMPORT~;
+}
+
+/**
+ * Find definition via Kotlin default imports (spec §16.30).
+ * Resolves bare names like `println`, `listOf`, `String`, `UUID` that come
+ * from auto-imported packages without any explicit import statement.
+ *
+ * Auto-imported packages: kotlin, kotlin.annotation, kotlin.collections,
+ * kotlin.comparisons, kotlin.io, kotlin.ranges, kotlin.sequences,
+ * kotlin.text, and (Kotlin/JVM) java.lang.
+ *
+ * Returns NOT_FOUND_BY_IMPORT~ when no match or ambiguous (multiple
+ * default packages match the same name).
+ */
+fn Object*? find_definition_by_default_imports(DependencyIndex* dep_index, String target_name, bool is_call) {
+	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
+
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(target_name, &matches);
+	if (count == 0) return NOT_FOUND_BY_IMPORT~;
+
+	DepSymbol* best = null;
+	for (usz i = 0; i < count; i++) {
+		if (!workspace::is_auto_imported_package(matches[i].package_name)) continue;
+		if (best == null) {
+			best = matches[i];
+			continue;
+		}
+		// Prefer same package; if different default packages match, ambiguous
+		if (best.package_name != matches[i].package_name) {
+			log::debug("[def] default-import ambiguous for '%s': %s vs %s",
+				target_name, best.package_name, matches[i].package_name);
+			return NOT_FOUND_BY_IMPORT~;
+		}
+	}
+	if (best == null) return NOT_FOUND_BY_IMPORT~;
+
+	Object* result = source_nav::resolve_dep_definition(best);
+	if (result != null) return result;
 
 	return NOT_FOUND_BY_IMPORT~;
 }

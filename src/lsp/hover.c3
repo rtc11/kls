@@ -563,7 +563,27 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 			}
 		}
 
-		if (receiver_type.kind == UNKNOWN) return NO_DESCRIPTION~;
+		if (receiver_type.kind == UNKNOWN) {
+			// Fallback: if the receiver is a bare NAME_EXPR matching a known
+			// dep class (e.g. java.lang.System without explicit import), look
+			// up the member directly via that class name. Mirrors the JDK
+			// fallback in find_dep_member_definition.
+			if (workspace != null && workspace.dep_index.initialized) {
+				String recv_name = "";
+				for (uint j = 0; j < pr.node_count; j++) {
+					if (pr.nodes[j].parent == dot_idx && pr.nodes[j].kind == NAME_EXPR) {
+						recv_name = pr.nodes[j].name;
+						break;
+					}
+				}
+				if (recv_name.len > 0) {
+					if (try desc = describe_dep_member(&workspace.dep_index, tok, recv_name, pr)) {
+						return desc;
+					}
+				}
+			}
+			return NO_DESCRIPTION~;
+		}
 
 		// Look up this member in the receiver type's member table
 		MemberInfo[128] members;
