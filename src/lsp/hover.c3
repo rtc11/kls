@@ -58,6 +58,24 @@ fn Object*? handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object
 				found_description = true;
 			}
 		}
+		// Skip top-level stdlib/workspace lookup if the token is the member
+		// name of a DOT_EXPR (e.g. `foo.println`) — those route through
+		// describe_dot_member inside describe_identifier_from_ast.
+		bool is_dot_member = is_dot_expr_member(pr, tok);
+		// Stdlib lookup: fast in-memory match for kotlin.io.println, listOf, etc.
+		if (!found_description && !is_dot_member) {
+			if (try desc = describe_identifier_from_stdlib(tok)) {
+				description = desc;
+				found_description = true;
+			}
+		}
+		// Cross-file workspace lookup
+		if (!found_description && !is_dot_member && workspace != null) {
+			if (try desc = describe_identifier_from_workspace(workspace, store, tok, uri)) {
+				description = desc;
+				found_description = true;
+			}
+		}
 		// Cross-file fallback: reuse definition resolution to find the single
 		// correct target, then build hover docs for that one symbol only.
 		// This ensures hover and go-to-definition always agree.
@@ -103,6 +121,22 @@ fn Object*? handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object
 	result.set("range", range);
 
 	return result;
+}
+
+/**
+ * Returns true if the given token is the member name of a DOT_EXPR
+ * (e.g. the `println` in `foo.println`). Used to skip top-level
+ * stdlib/workspace lookups when the identifier is dotted access.
+ */
+fn bool is_dot_expr_member(ParseResult* pr, Token tok) {
+	if (pr == null) return false;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != DOT_EXPR) continue;
+		if (n.name != tok.text) continue;
+		if (n.name_line == tok.line && n.name_col == tok.col) return true;
+	}
+	return false;
 }
 
 /**

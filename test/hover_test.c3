@@ -655,3 +655,86 @@ fn void hover_kdoc_through_modifiers_and_annotation() @test {
 		assert(value.contains("Mutable implementation"), "expected KDoc through annotation+modifier, got: '%s'", value);
 	};
 }
+
+// ── Stdlib hover (println, listOf, etc.) ──────────────────────────
+
+fn void hover_println_shows_stdlib_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, `fun main() { println("hi") }`);
+		// "println" at col 13 in "fun main() { println("hi") }"
+		Object* params = make_hover_params("file:///test.kt", 0, 13);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("fun println"), "expected 'fun println' signature, got: '%s'", value);
+		assert(value.contains("kotlin.io"), "expected 'kotlin.io' package, got: '%s'", value);
+		assert(!value.contains("Identifier:"), "should not fall back to 'Identifier:', got: '%s'", value);
+	};
+}
+
+fn void hover_listof_shows_stdlib_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		store.open("file:///test.kt", "kotlin", 1, "fun main() { val x = listOf(1, 2) }");
+		// "listOf" at col 21
+		Object* params = make_hover_params("file:///test.kt", 0, 21);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("listOf"), "expected 'listOf' in signature, got: '%s'", value);
+		assert(!value.contains("Identifier:"), "should not fall back to 'Identifier:', got: '%s'", value);
+	};
+}
+
+fn void hover_local_shadows_stdlib() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Local fun println shadows stdlib — should show local signature
+		store.open("file:///test.kt", "kotlin", 1, "fun println(x: Int): Boolean {}");
+		// "println" at col 4
+		Object* params = make_hover_params("file:///test.kt", 0, 4);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("Boolean"), "expected local return type 'Boolean', got: '%s'", value);
+		assert(!value.contains("kotlin.io"), "should not show stdlib package for shadowed name, got: '%s'", value);
+	};
+}
+
+fn void hover_dot_member_skips_top_level_stdlib() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `foo.println` — member access, NOT top-level stdlib println.
+		// Should not surface kotlin.io.println as the hover answer.
+		store.open("file:///test.kt", "kotlin", 1, "fun main() { val foo = 1; foo.println }");
+		// "println" at col 30 in "fun main() { val foo = 1; foo.println }"
+		Object* params = make_hover_params("file:///test.kt", 0, 30);
+		// Result may be a fault, null, or non-null but must NOT show top-level stdlib println
+		if (try r = hover::handle_hover(&store, null, params)) {
+			if (r != null) {
+				Object* contents = r.get("contents")!!;
+				String value = contents.get_string("value")!!;
+				assert(!value.contains("kotlin.io"), "should not show top-level stdlib for dot member, got: '%s'", value);
+			}
+		}
+	};
+}
