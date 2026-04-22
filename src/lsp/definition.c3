@@ -158,8 +158,10 @@ fn Object*? resolve_bare_identifier(ResolutionContext* ctx) {
 		}
 	}
 
-	// 2. Scope-walk (local → outer → top-level same file)
-	if (try node = find_definition_in_ast(pr, target_name, tok.offset, ctx.is_call, ti)) {
+	// 2. Scope-walk (local → outer → top-level same file).
+	// Strict: no global fallback. Members of unrelated classes/objects
+	// are reached via the workspace path (step 6) which is spec-conformant.
+	if (try node = find_declaration_in_scope_chain(pr, target_name, tok.offset, ctx.is_call, ti)) {
 		log::debug("[def] bare: AST scope search");
 		return build_location_from_node(uri, node);
 	}
@@ -488,15 +490,41 @@ fn int score_named_args(ParseResult* pr, uint fun_idx, String[] named_args) {
  * When multiple overloads match, prefers the one whose parameter
  * count matches the call's argument count.
  */
-fn AstNode*? find_definition_in_ast(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
-	AstNode* node = find_definition_in_ast_impl(pr, target_name, cursor_offset, is_call, ti)!;
-	// Treat null payload as not-found so callers' `try` branches don't
-	// receive a null pointer (would segfault on dereference).
+/**
+ * Find a declaration in `pr` matching `target_name` at `cursor_offset`.
+ *
+ * Two-stage lookup used by features that need to anchor an identifier
+ * to its declaration node within the same file (rename, references,
+ * highlight, inlay hints, signature help, call hierarchy):
+ *
+ *   1. Scope-walk: innermost scope outward to FILE.
+ *   2. Global fallback: scored search across the whole AST (matches
+ *      members of unrelated classes/objects too).
+ *
+ * The global fallback is intentional for these features — they need
+ * to find every binding of an identifier in the file. For
+ * spec-conformant go-to-definition use `find_declaration_in_scope_chain`
+ * instead and resolve unfound names via the workspace/dep paths.
+ */
+fn AstNode*? find_declaration_in_file(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
+	// Stage 1: scope-walk
+	if (try node = find_declaration_in_scope_chain(pr, target_name, cursor_offset, is_call, ti)) {
+		return node;
+	}
+	// Stage 2: global fallback
+	AstNode* node = find_definition_in_ast_global_fallback(pr, target_name, cursor_offset, is_call, ti)!;
 	if (node == null) return ast::NOT_FOUND~;
 	return node;
 }
 
-fn AstNode*? find_definition_in_ast_impl(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
+/**
+ * Scope-walk only: search innermost scope outward to FILE.
+ *
+ * Returns NOT_FOUND if no enclosing scope contains a matching
+ * declaration. Does NOT search unrelated classes/objects — for
+ * spec-conformant go-to-definition resolution.
+ */
+fn AstNode*? find_declaration_in_scope_chain(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
 	if (pr.node_count == 0) return ast::NOT_FOUND~;
 
 	// If this is a call, find the argument count and types for overload resolution
@@ -577,87 +605,99 @@ fn AstNode*? find_definition_in_ast_impl(ParseResult* pr, String target_name, ui
 		current = scope.parent;
 	}
 
-	// ── Global fallback ───────────────────────────────────────────
-	// The scope-walk didn't find a match. This happens when the
-	// identifier refers to a member of a class/object that doesn't
-	// contain the cursor (e.g. `nob.module { }` or `Nob.new(args)`).
-	// Search ALL declarations in the entire AST, but prefer:
-	// 1. Declarations in enclosing scopes (closest to cursor)
-	// 2. Declarations before the cursor (declaration-before-use)
-	// 3. Top-level declarations over nested ones in unrelated scopes
-	{
-		AstNode* best_match = null;
-		int best_score = -1;
-		AstNode*[16] func_candidates;
-		uint[16] func_indices;
-		int[16] func_scores;
-		usz func_count = 0;
+	// Scope-walk exhausted with no match. Return NOT_FOUND; callers
+	// needing the global fallback (rename/references/highlight/...)
+	// invoke `find_declaration_in_file` which chains the fallback.
+	return ast::NOT_FOUND~;
+}
 
-		for (uint i = 0; i < pr.node_count; i++) {
-			AstNode* n = &pr.nodes[i];
-			if (!is_definition_target(n.kind)) continue;
-			if (n.name != target_name) continue;
+/**
+ * Global fallback: scored search across the whole AST. Used by
+ * `find_declaration_in_file` after the scope-walk fails. Not used
+ * by spec-conformant go-to-definition.
+ */
+fn AstNode*? find_definition_in_ast_global_fallback(ParseResult* pr, String target_name, uint cursor_offset, bool is_call, TypeInfo* ti = null) {
+	if (pr.node_count == 0) return ast::NOT_FOUND~;
 
-			// Score: higher = better match
-			// +8: top-level (parent is FILE node 0)
-			// +4: in an enclosing scope (ancestor contains cursor)
-			// +2: declared before cursor
-			// -2: nested inside a class/object that doesn't enclose cursor
-			//     (penalize but don't exclude — document_highlight needs these)
-			int score = 0;
-			if (n.parent == 0 || n.parent == ast::NO_PARENT) {
-				score += 8;
-			}
-			if (n.start_offset < cursor_offset) {
-				score += 2;
-			}
-			// Check if the declaration's parent scope encloses cursor
-			if (n.parent < pr.node_count && n.parent != 0) {
-				AstNode* parent = &pr.nodes[n.parent];
-				if (cursor_offset >= parent.start_offset && cursor_offset < parent.end_offset) {
-					score += 4;
-				}
-			}
-			// Penalize declarations nested in non-enclosing classes
-			if (is_nested_in_non_enclosing_class(pr, i, cursor_offset)) {
-				score -= 2;
-			}
+	int call_arg_count = -1;
+	String[16] call_arg_types;
+	usz call_arg_type_count = 0;
+	String[16] call_named_args;
+	usz call_named_arg_count = 0;
+	if (is_call) {
+		call_arg_count = find_call_arg_count(pr, target_name, cursor_offset);
+		call_arg_type_count = find_call_arg_types(pr, ti, target_name, cursor_offset, call_arg_types[..]);
+		call_named_arg_count = find_call_named_args(pr, target_name, cursor_offset, call_named_args[..]);
+	}
 
-			if (score > best_score) {
-				best_score = score;
-				best_match = n;
-			}
-			if (n.kind == FUN_DECL && func_count < 16) {
-				func_candidates[func_count] = n;
-				func_indices[func_count] = i;
-				func_scores[func_count] = score;
-				func_count++;
+	AstNode* best_match = null;
+	int best_score = -1;
+	AstNode*[16] func_candidates;
+	uint[16] func_indices;
+	int[16] func_scores;
+	usz func_count = 0;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!is_definition_target(n.kind)) continue;
+		if (n.name != target_name) continue;
+
+		// Score: higher = better match
+		// +8: top-level (parent is FILE node 0)
+		// +4: in an enclosing scope (ancestor contains cursor)
+		// +2: declared before cursor
+		// -2: nested inside a class/object that doesn't enclose cursor
+		//     (penalize but don't exclude — document_highlight needs these)
+		int score = 0;
+		if (n.parent == 0 || n.parent == ast::NO_PARENT) {
+			score += 8;
+		}
+		if (n.start_offset < cursor_offset) {
+			score += 2;
+		}
+		if (n.parent < pr.node_count && n.parent != 0) {
+			AstNode* parent = &pr.nodes[n.parent];
+			if (cursor_offset >= parent.start_offset && cursor_offset < parent.end_offset) {
+				score += 4;
 			}
 		}
+		if (is_nested_in_non_enclosing_class(pr, i, cursor_offset)) {
+			score -= 2;
+		}
 
-		if (is_call && func_count > 0) {
-			// Filter func_candidates to those with best score, then pick by overload
-			int max_func_score = -1;
-			for (usz fi = 0; fi < func_count; fi++) {
-				if (func_scores[fi] > max_func_score) max_func_score = func_scores[fi];
-			}
-			AstNode*[16] best_funcs;
-			uint[16] best_func_indices;
-			usz best_func_count = 0;
-			for (usz fi = 0; fi < func_count; fi++) {
-				if (func_scores[fi] == max_func_score && best_func_count < 16) {
-					best_funcs[best_func_count] = func_candidates[fi];
-					best_func_indices[best_func_count] = func_indices[fi];
-					best_func_count++;
-				}
-			}
-			AstNode* picked2 = pick_best_overload(pr, best_funcs[:best_func_count], best_func_indices[:best_func_count], best_func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
-			if (picked2 != null) return picked2;
-			if (best_match != null) return best_match;
+		if (score > best_score) {
+			best_score = score;
+			best_match = n;
 		}
-		if (best_match != null) {
-			return best_match;
+		if (n.kind == FUN_DECL && func_count < 16) {
+			func_candidates[func_count] = n;
+			func_indices[func_count] = i;
+			func_scores[func_count] = score;
+			func_count++;
 		}
+	}
+
+	if (is_call && func_count > 0) {
+		int max_func_score = -1;
+		for (usz fi = 0; fi < func_count; fi++) {
+			if (func_scores[fi] > max_func_score) max_func_score = func_scores[fi];
+		}
+		AstNode*[16] best_funcs;
+		uint[16] best_func_indices;
+		usz best_func_count = 0;
+		for (usz fi = 0; fi < func_count; fi++) {
+			if (func_scores[fi] == max_func_score && best_func_count < 16) {
+				best_funcs[best_func_count] = func_candidates[fi];
+				best_func_indices[best_func_count] = func_indices[fi];
+				best_func_count++;
+			}
+		}
+		AstNode* picked2 = pick_best_overload(pr, best_funcs[:best_func_count], best_func_indices[:best_func_count], best_func_count, call_arg_count, call_arg_types[:call_arg_type_count], call_named_args[:call_named_arg_count]);
+		if (picked2 != null) return picked2;
+		if (best_match != null) return best_match;
+	}
+	if (best_match != null) {
+		return best_match;
 	}
 
 	return ast::NOT_FOUND~;

@@ -145,7 +145,7 @@ fn AstNode*? find_called_declaration(ParseResult* pr, AstNode* call_node) {
 	if (name.len == 0) return ast::NOT_FOUND~;
 
 	// Use scope-aware definition lookup (is_call = true prefers FUN_DECL)
-	return definition::find_definition_in_ast(pr, name, call_node.name_offset, true);
+	return definition::find_declaration_in_file(pr, name, call_node.name_offset, true);
 }
 
 /**

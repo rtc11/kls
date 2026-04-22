@@ -46,7 +46,7 @@ fn Object*? handle_linked_editing_range(DocumentStore* store, Object* params) {
 	// Resolve cursor's identifier to its declaration
 	uint decl_offset = uint.max;
 	if (pr != null) {
-		if (try decl_node = definition::find_definition_in_ast(pr, target_name, tok.offset, false)) {
+		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, false)) {
 			decl_offset = decl_node.name_offset;
 		}
 		if (decl_offset == uint.max && references::is_declaration_name(pr, tok.offset)) {
@@ -68,7 +68,7 @@ fn Object*? handle_linked_editing_range(DocumentStore* store, Object* params) {
 		if (pr != null && decl_offset != uint.max) {
 			if (t.offset == decl_offset) {
 				// Declaration itself — include
-			} else if (try candidate = definition::find_definition_in_ast(pr, target_name, t.offset, false)) {
+			} else if (try candidate = definition::find_declaration_in_file(pr, target_name, t.offset, false)) {
 				if (candidate.name_offset != decl_offset) continue;
 			} else {
 				continue;

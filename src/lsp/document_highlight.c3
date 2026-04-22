@@ -57,7 +57,7 @@ fn Object*? handle_document_highlight(DocumentStore* store, Object* params) {
 	// Resolve cursor's identifier to its declaration (scope-aware)
 	uint decl_offset = uint.max; // sentinel = no resolution
 	if (pr != null) {
-		if (try decl_node = definition::find_definition_in_ast(pr, target_name, tok.offset, false)) {
+		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, false)) {
 			decl_offset = decl_node.name_offset;
 		}
 		// If cursor IS on a declaration, use that declaration's offset
@@ -97,7 +97,7 @@ fn Object*? handle_document_highlight(DocumentStore* store, Object* params) {
 				continue;
 			}
 			// Check if this token resolves to same declaration
-			if (try candidate_decl = definition::find_definition_in_ast(pr, target_name, t.offset, false)) {
+			if (try candidate_decl = definition::find_declaration_in_file(pr, target_name, t.offset, false)) {
 				if (candidate_decl.name_offset != decl_offset) continue;
 			} else {
 				continue;

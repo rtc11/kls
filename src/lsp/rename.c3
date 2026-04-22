@@ -132,7 +132,7 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 	bool is_top_level = true;
 
 	if (pr != null) {
-		if (try decl_node = definition::find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
+		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, is_call)) {
 			decl_idx = ast::node_index(pr, decl_node);
 			has_decl = true;
 			// A declaration is top-level if its parent is the FILE node (index 0)
@@ -182,7 +182,7 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 /**
  * Collect TextEdit objects for identifiers that resolve to a specific
  * declaration in the AST. For each matching IDENTIFIER token, verifies
- * that definition::find_definition_in_ast resolves it to the same
+ * that definition::find_declaration_in_file resolves it to the same
  * declaration node (decl_idx). This correctly handles shadowing:
  * if an inner scope redeclares the same name, its references won't
  * resolve to the outer declaration and will be excluded.
@@ -232,9 +232,9 @@ fn Object* collect_scoped_edits(String content, ParseResult* pr, usz decl_idx, S
 
 		// Verify this token resolves to our target declaration.
 		// This handles shadowing: if an inner scope declares the same
-		// name, find_definition_in_ast will resolve to the inner one
+		// name, find_declaration_in_file will resolve to the inner one
 		// instead, and the index won't match.
-		if (try found = definition::find_definition_in_ast(pr, target_name, t.offset, is_call)) {
+		if (try found = definition::find_declaration_in_file(pr, target_name, t.offset, is_call)) {
 			uint found_idx = ast::node_index(pr, found);
 			if (found_idx != decl_idx) continue;  // different declaration (shadowed)
 		}

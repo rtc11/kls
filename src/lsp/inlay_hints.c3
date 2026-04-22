@@ -97,7 +97,7 @@ fn void collect_parameter_hints(Object* hints, ParseResult* pr, String content, 
 
 		// Resolve the called declaration
 		AstNode* decl;
-		if (try d = definition::find_definition_in_ast(pr, node.name, node.name_offset, true)) {
+		if (try d = definition::find_declaration_in_file(pr, node.name, node.name_offset, true)) {
 			decl = d;
 		} else {
 			continue;
@@ -399,7 +399,7 @@ fn String? infer_type_from_initializer(ParseResult* pr, TypeInfo* ti, uint prop_
 					return init_expr.name;
 				}
 				// Function call: look up the FUN_DECL's return type
-				if (try decl = definition::find_definition_in_ast(pr, init_expr.name, init_expr.name_offset, true)) {
+				if (try decl = definition::find_declaration_in_file(pr, init_expr.name, init_expr.name_offset, true)) {
 					if (decl.type_text.len > 0) {
 						return decl.type_text;
 					}
@@ -409,7 +409,7 @@ fn String? infer_type_from_initializer(ParseResult* pr, TypeInfo* ti, uint prop_
 		case NAME_EXPR:
 			// Variable reference: look up declaration's type
 			if (init_expr.name.len > 0) {
-				if (try decl = definition::find_definition_in_ast(pr, init_expr.name, init_expr.name_offset, false)) {
+				if (try decl = definition::find_declaration_in_file(pr, init_expr.name, init_expr.name_offset, false)) {
 					if (decl.type_text.len > 0) {
 						return decl.type_text;
 					}
@@ -511,7 +511,7 @@ fn String? infer_dot_expr_type(ParseResult* pr, TypeInfo* ti, uint idx, AstNode*
 
 	// Check if the DOT_EXPR's right-side name resolves to a known decl
 	if (node.name.len > 0) {
-		if (try decl = definition::find_definition_in_ast(pr, node.name, node.name_offset, false)) {
+		if (try decl = definition::find_declaration_in_file(pr, node.name, node.name_offset, false)) {
 			if (decl.type_text.len > 0) return decl.type_text;
 		}
 	}
@@ -765,14 +765,14 @@ fn String? infer_expr_type_string(ParseResult* pr, TypeInfo* ti, uint idx, AstNo
 			if (node.name.len > 0) {
 				char first = node.name[0];
 				if (first >= 'A' && first <= 'Z') return node.name;
-				if (try decl = definition::find_definition_in_ast(pr, node.name, node.name_offset, true)) {
+				if (try decl = definition::find_declaration_in_file(pr, node.name, node.name_offset, true)) {
 					if (decl.type_text.len > 0) return decl.type_text;
 				}
 			}
 
 		case NAME_EXPR:
 			if (node.name.len > 0) {
-				if (try decl = definition::find_definition_in_ast(pr, node.name, node.name_offset, false)) {
+				if (try decl = definition::find_declaration_in_file(pr, node.name, node.name_offset, false)) {
 					if (decl.type_text.len > 0) return decl.type_text;
 				}
 			}
@@ -1274,7 +1274,7 @@ fn String resolve_lambda_callee_param_type(ParseResult* pr, TypeInfo* ti,
 	WorkspaceIndex* workspace, String current_uri, uint call_idx, String method_name) {
 	// 1. In-file AST lookup
 	uint name_offset = pr.nodes[call_idx].name_offset;
-	if (try decl = definition::find_definition_in_ast(pr, method_name, name_offset, true, ti)) {
+	if (try decl = definition::find_declaration_in_file(pr, method_name, name_offset, true, ti)) {
 		if (decl.kind == FUN_DECL) {
 			// Last PARAM whose type_text looks like a function type
 			uint decl_idx = ast::node_index(pr, decl);

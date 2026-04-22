@@ -1889,7 +1889,7 @@ class Nob {
 //   - some other unrelated fn `fun other_fn(module: Foo)` has a PARAM
 //     also named `module`
 //
-// Before fix: find_definition_in_ast ran first, its global fallback
+// Before fix: find_declaration_in_file ran first, its global fallback
 // scored the unrelated PARAM higher than the class member (because the
 // class doesn't enclose the cursor) and returned the wrong target.
 //

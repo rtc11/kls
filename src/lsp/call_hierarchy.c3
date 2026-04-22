@@ -63,7 +63,7 @@ fn Object*? handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Obje
 	if (fun_node == null) {
 		bool is_call = definition::is_call_context(doc.content, tok) ||
 			definition::is_call_context_ast(pr, tok.offset);
-		if (try node = definition::find_definition_in_ast(pr, target_name, tok.offset, is_call)) {
+		if (try node = definition::find_declaration_in_file(pr, target_name, tok.offset, is_call)) {
 			if (node.kind == FUN_DECL || node.kind == CONSTRUCTOR_DECL) {
 				fun_node = node;
 			}
@@ -461,7 +461,7 @@ fn void collect_outgoing_from_function(Object* result, ParseResult* pr, uint fun
 		AstNode* target_node = null;
 		String target_uri = uri;
 
-		if (try node = definition::find_definition_in_ast(pr, callee_name, n.name_offset, true)) {
+		if (try node = definition::find_declaration_in_file(pr, callee_name, n.name_offset, true)) {
 			if (node.kind == FUN_DECL || node.kind == CONSTRUCTOR_DECL) {
 				target_node = node;
 			}
