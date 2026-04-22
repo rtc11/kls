@@ -28,13 +28,15 @@ fn void offset_second_line_col() @test {
 }
 
 fn void offset_past_end_line() @test {
+	// Per LSP spec: line past end clamps to end of content
 	long off = hover::position_to_offset("abc", 5, 0);
-	assert(off == -1, "expected -1 for line past end");
+	assert(off == 3, "expected 3 (clamped), got %d", (int)off);
 }
 
 fn void offset_past_end_col() @test {
+	// Per LSP spec: char past line length clamps to line length
 	long off = hover::position_to_offset("abc", 0, 100);
-	assert(off == -1, "expected -1 for col past end");
+	assert(off == 3, "expected 3 (clamped), got %d", (int)off);
 }
 
 // ── find_token_at_position ─────────────────────────────────────────

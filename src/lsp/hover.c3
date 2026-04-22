@@ -1395,7 +1395,7 @@ fn String? extract_param_doc(String doc_text, String param_name) {
 
 /**
  * Convert an LSP position (line, character) to a byte offset in the source.
- * Returns the byte offset, or -1 if the position is past the end.
+ * Per LSP spec, line/char past end clamp to end of line/content.
  * Delegates to the canonical implementation in document.c3.
  */
 fn long position_to_offset(String content, uint line, uint character) {

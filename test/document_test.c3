@@ -2,6 +2,7 @@ module kls::document_test;
 
 import kls::document;
 import kls::kotlin::ast;
+import std::io;
 
 fn void open_and_get() @test {
 	DocumentStore store;
@@ -228,13 +229,27 @@ fn void byte_offset_second_line_col() @test {
 }
 
 fn void byte_offset_past_end_line() @test {
+	// Per LSP spec: line past end clamps to end of content
 	long off = document::position_to_byte_offset("abc", 5, 0);
-	assert(off == -1, "expected -1 for line past end");
+	assert(off == 3, "expected 3 (end of content), got %d", (int)off);
 }
 
 fn void byte_offset_past_end_col() @test {
+	// Per LSP spec: char past line length clamps to line length
 	long off = document::position_to_byte_offset("abc", 0, 100);
-	assert(off == -1, "expected -1 for col past end");
+	assert(off == 3, "expected 3 (clamped to line end), got %d", (int)off);
+}
+
+fn void byte_offset_past_end_col_midfile() @test {
+	// Char past line length on a non-last line clamps to that line's end (before \n)
+	long off = document::position_to_byte_offset("abc\ndef\nghi", 1, 999);
+	assert(off == 7, "expected 7 (end of line 1, before \\n), got %d", (int)off);
+}
+
+fn void byte_offset_line_past_end_with_char() @test {
+	// Both line and char past end -> end of content
+	long off = document::position_to_byte_offset("abc\ndef", 99, 50);
+	assert(off == 7, "expected 7 (end of content), got %d", (int)off);
 }
 
 fn void byte_offset_end_of_content() @test {
@@ -442,6 +457,148 @@ fn void incremental_clamped_offsets() @test {
 	if (try doc = store.get("file:///test.kt")) {
 		assert(doc.content == "aXY",
 			"expected 'aXY', got '%s'", doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+// ── Helper: apply edit by LSP position (mimics what sync.c3 does) ─
+
+fn void apply_lsp_edit(DocumentStore* store, String uri, int version,
+		uint start_line, uint start_char, uint end_line, uint end_char, String text) {
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) return;
+	long s_off = document::position_to_byte_offset(doc.content, start_line, start_char);
+	long e_off = document::position_to_byte_offset(doc.content, end_line, end_char);
+	uint s = s_off >= 0 ? (uint)s_off : (uint)doc.content.len;
+	uint e = e_off >= 0 ? (uint)e_off : (uint)doc.content.len;
+	store.apply_change(uri, version, s, e, text);
+}
+
+fn void dump_content(String label, String content) {
+	io::printf("[%s] (len=%d) ", label, content.len);
+	for (usz i = 0; i < content.len; i++) {
+		char c = content[i];
+		if (c == '\n') {
+			io::print("\\n");
+		} else {
+			io::printf("%c", c);
+		}
+	}
+	io::printn("");
+}
+
+// ── Repro: typing /** */ above class via LSP-style incremental edits ─
+
+// Simulates user typing a KDoc block above class App char-by-char as Neovim
+// would via incremental sync. Final content should match expected.
+fn void incremental_kdoc_above_class_pattern_a() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+
+	String initial = "package org.example\n\nimport java.util.UUID\n\nclass App {\n    val uuid = UUID.randomUUID()\n}\n";
+
+	store.open("file:///App.kt", "kotlin", 1, initial);
+
+	// Press 'o' on line 3: open a new line below. Nvim sends:
+	//   range: (3,0)..(3,0), text: "\n"
+	apply_lsp_edit(&store, "file:///App.kt", 2, 3, 0, 3, 0, "\n");
+
+	// Type '/' on the new line 4 col 0:
+	//   range: (4,0)..(4,0), text: "/"
+	apply_lsp_edit(&store, "file:///App.kt", 3, 4, 0, 4, 0, "/");
+
+	// Type '*' at (4,1):
+	apply_lsp_edit(&store, "file:///App.kt", 4, 4, 1, 4, 1, "*");
+
+	// Type '*' at (4,2):
+	apply_lsp_edit(&store, "file:///App.kt", 5, 4, 2, 4, 2, "*");
+
+	// Press Enter at (4,3) — nvim auto-indents and may insert " * " on next line.
+	// Simplest: just inserts "\n":
+	apply_lsp_edit(&store, "file:///App.kt", 6, 4, 3, 4, 3, "\n");
+
+	// Type ' ' at (5,0):
+	apply_lsp_edit(&store, "file:///App.kt", 7, 5, 0, 5, 0, " ");
+
+	// Type '*' at (5,1):
+	apply_lsp_edit(&store, "file:///App.kt", 8, 5, 1, 5, 1, "*");
+
+	// Type '/' at (5,2):
+	apply_lsp_edit(&store, "file:///App.kt", 9, 5, 2, 5, 2, "/");
+
+	String expected = "package org.example\n\nimport java.util.UUID\n\n/**\n */\nclass App {\n    val uuid = UUID.randomUUID()\n}\n";
+
+	if (try doc = store.get("file:///App.kt")) {
+		assert(doc.content == expected,
+			"content mismatch:\nexpected:\n%s\ngot:\n%s", expected, doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+// Pattern B: nvim sends range edits where end_line > start_line (replacing
+// across newline). E.g. when pressing Enter on a line, nvim may send
+// (line, col)..(line+1, 0) with text "\n<indent>" which replaces the
+// pre-existing line break + indentation. Models the worst case.
+fn void incremental_kdoc_above_class_pattern_b() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+
+	String initial = "package org.example\n\nimport java.util.UUID\n\nclass App {\n    val uuid = UUID.randomUUID()\n}\n";
+	store.open("file:///App.kt", "kotlin", 1, initial);
+
+	// 'o' on line 3 -> insert "\n" at (3,0)
+	apply_lsp_edit(&store, "file:///App.kt", 2, 3, 0, 3, 0, "\n");
+	// type "/**" on line 4
+	apply_lsp_edit(&store, "file:///App.kt", 3, 4, 0, 4, 0, "/");
+	apply_lsp_edit(&store, "file:///App.kt", 4, 4, 1, 4, 1, "*");
+	apply_lsp_edit(&store, "file:///App.kt", 5, 4, 2, 4, 2, "*");
+	// Press Enter — nvim sends multi-line edit (4,3)..(4,3) with text "\n":
+	apply_lsp_edit(&store, "file:///App.kt", 6, 4, 3, 4, 3, "\n");
+	// type " */" on line 5
+	apply_lsp_edit(&store, "file:///App.kt", 7, 5, 0, 5, 0, " ");
+	apply_lsp_edit(&store, "file:///App.kt", 8, 5, 1, 5, 1, "*");
+	apply_lsp_edit(&store, "file:///App.kt", 9, 5, 2, 5, 2, "/");
+
+	String expected = "package org.example\n\nimport java.util.UUID\n\n/**\n */\nclass App {\n    val uuid = UUID.randomUUID()\n}\n";
+
+	if (try doc = store.get("file:///App.kt")) {
+		assert(doc.content == expected,
+			"PATTERN B content mismatch:\nexpected:\n%s\ngot:\n%s", expected, doc.content);
+	} else {
+		assert(false, "document not found");
+	}
+}
+
+// Pattern C: nvim with autoindent — typing /** + Enter triggers nvim to insert
+// " * " automatically, sent as text in the same edit as "\n".
+fn void incremental_kdoc_above_class_pattern_c() @test {
+	DocumentStore store;
+	store.init();
+	defer store.free();
+
+	String initial = "package org.example\n\nimport java.util.UUID\n\nclass App {\n    val uuid = UUID.randomUUID()\n}\n";
+	store.open("file:///App.kt", "kotlin", 1, initial);
+
+	// 'o' on line 3 -> insert "\n" at (3,0)
+	apply_lsp_edit(&store, "file:///App.kt", 2, 3, 0, 3, 0, "\n");
+	// type "/**" on line 4
+	apply_lsp_edit(&store, "file:///App.kt", 3, 4, 0, 4, 0, "/");
+	apply_lsp_edit(&store, "file:///App.kt", 4, 4, 1, 4, 1, "*");
+	apply_lsp_edit(&store, "file:///App.kt", 5, 4, 2, 4, 2, "*");
+	// Enter — nvim inserts "\n " (newline + 1 space, autoindent for KDoc):
+	apply_lsp_edit(&store, "file:///App.kt", 6, 4, 3, 4, 3, "\n ");	// Type "* " on line 5 (column 1 since space already inserted by autoindent):
+	apply_lsp_edit(&store, "file:///App.kt", 7, 5, 1, 5, 1, "*");
+	apply_lsp_edit(&store, "file:///App.kt", 8, 5, 2, 5, 2, "/");
+
+	String expected = "package org.example\n\nimport java.util.UUID\n\n/**\n */\nclass App {\n    val uuid = UUID.randomUUID()\n}\n";
+
+	if (try doc = store.get("file:///App.kt")) {
+		assert(doc.content == expected,
+			"PATTERN C content mismatch:\nexpected:\n%s\ngot:\n%s", expected, doc.content);
 	} else {
 		assert(false, "document not found");
 	}

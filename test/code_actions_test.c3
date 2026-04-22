@@ -175,7 +175,12 @@ fn void valid_code_no_actions() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* diags = build_test_diagnostics(content);
+		// Cursor-style empty selection (no extract refactor offered)
 		Object* params = make_code_action_params("file:///test.kt", diags);
+		Object* range = params.get("range")!!;
+		Object* end_pos = range.get("end")!!;
+		end_pos.set("line", 0);
+		end_pos.set("character", 0);
 		Object* result = code_actions::handle_code_action(&store, null, params)!!;
 
 		assert(result.is_indexable());

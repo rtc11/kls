@@ -33,8 +33,10 @@ fn void? handle_did_open(DocumentStore* store, WorkspaceIndex* workspace, Object
  *   - Incremental: { range: { start, end }, text: "..." }
  *   - Full:        { text: "..." }  (no range field)
  *
- * When multiple incremental changes arrive, they must be applied in
- * reverse order so that earlier byte offsets remain valid.
+ * Per LSP 3.17 spec: changes apply in array order, each referring to the
+ * document state AFTER all prior changes in the same notification have
+ * been applied. We resolve each range's positions against the current
+ * (mutated) doc.content right before applying it.
  */
 fn void? handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!;
@@ -47,9 +49,9 @@ fn void? handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Obje
 	sz change_count = changes.get_len();
 	if (change_count == 0) return;
 
-	// Apply changes in reverse order for incremental edits.
+	// Apply changes in array order (LSP spec: each refers to state after prior).
 	// If any change lacks a range, it's a full-content replacement.
-	for (sz i = change_count - 1; i >= 0; i--) {
+	for (sz i = 0; i < change_count; i++) {
 		Object* change = changes.get_at(i);
 		String text = change.get_string("text")!;
 
@@ -69,12 +71,17 @@ fn void? handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Obje
 			long s_off = document::position_to_byte_offset(doc.content, start_line, start_char);
 			long e_off = document::position_to_byte_offset(doc.content, end_line, end_char);
 
-			// If either position is invalid, clamp to end of content
+			// position_to_byte_offset clamps per LSP spec, but be defensive
 			uint s = s_off >= 0 ? (uint)s_off : (uint)doc.content.len;
 			uint e = e_off >= 0 ? (uint)e_off : (uint)doc.content.len;
+			if (e < s) e = s;
+
+			log::debug("[didChange] v=%d range=(%d,%d)..(%d,%d) bytes=%d..%d text_len=%d",
+				version, start_line, start_char, end_line, end_char, s, e, text.len);
 
 			store.apply_change(uri, version, s, e, text);
 		} else {
+			log::debug("[didChange] v=%d FULL text_len=%d", version, text.len);
 			// Full-content replacement (no range)
 			store.update(uri, version, text);
 		}
@@ -83,6 +90,7 @@ fn void? handle_did_change(DocumentStore* store, WorkspaceIndex* workspace, Obje
 	log::debug("[kls] Document changed: %s (v=%d)", uri, version);
 	Document* doc = store.get(uri) ?? null;
 	if (doc != null) {
+		log::debug("[didChange] resulting content len=%d", doc.content.len);
 		workspace.index_file(uri, doc.content);
 	}
 	diagnostics::publish_diagnostics(store, uri, workspace);

@@ -322,7 +322,17 @@ fn void rebase_slice(String* s, String old_content, String new_content,
 
 /**
  * Convert an LSP position (0-based line, 0-based character) to a byte
- * offset in the source string. Returns -1 if the position is past the end.
+ * offset in the source string.
+ *
+ * Per LSP 3.17 spec:
+ *   "If the character value is greater than the line length it defaults
+ *    back to the line length."
+ *   "If a line number is greater than the number of lines in a document,
+ *    it defaults back to the number of lines in the document."
+ *
+ * Returns -1 only if `content` is null/empty AND line > 0. For valid line
+ * numbers, character is always clamped to line length (so insertions at
+ * end-of-line work correctly even when clients send (line, 9999)).
  *
  * This is the canonical implementation used by both incremental sync and
  * all LSP feature handlers (hover, completion, signature help, etc.).
@@ -331,7 +341,7 @@ fn long position_to_byte_offset(String content, uint line, uint character) {
 	uint current_line = 0;
 	usz i = 0;
 
-	// Skip to the target line
+	// Skip to start of target line
 	while (i < content.len && current_line < line) {
 		if (content[i] == '\n') {
 			current_line++;
@@ -340,14 +350,18 @@ fn long position_to_byte_offset(String content, uint line, uint character) {
 	}
 
 	if (current_line < line) {
-		return -1; // Line is past end of content
+		// Line past end of content -- clamp to end of content (LSP spec)
+		return (long)content.len;
 	}
 
-	// Add character offset
-	usz offset = i + (usz)character;
-	if (offset > content.len) {
-		return -1;
+	// Add character offset, clamped to end-of-line (or end-of-content on last line)
+	usz line_end = i;
+	while (line_end < content.len && content[line_end] != '\n') {
+		line_end++;
 	}
+
+	usz offset = i + (usz)character;
+	if (offset > line_end) offset = line_end;
 
 	return (long)offset;
 }
