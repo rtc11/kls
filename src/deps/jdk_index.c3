@@ -406,7 +406,7 @@ fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_
 		classfile::method_descriptor_to_kotlin(m.descriptor, &msig);
 
 		jar_index::add_dep_symbol(idx, m.name, msig.str_view(), pkg, simple_name, jmod_path, DEP_METHOD,
-			null, 0, jar_path_interned: true);
+			null, 0, jar_path_interned: true, is_static: is_static);
 	}
 
 	// Add public fields as symbols
@@ -421,10 +421,11 @@ fn void add_jdk_class_symbol(DependencyIndex* idx, ClassInfo* info, String jmod_
 		fsig.tinit();
 
 		bool is_final = (f.access_flags & classfile::ACC_FINAL) != 0;
+		bool is_field_static = (f.access_flags & classfile::ACC_STATIC) != 0;
 		fsig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
 		classfile::descriptor_to_kotlin_type(f.descriptor, &fsig);
 
 		jar_index::add_dep_symbol(idx, f.name, fsig.str_view(), pkg, simple_name, jmod_path, DEP_FIELD,
-			null, 0, jar_path_interned: true);
+			null, 0, jar_path_interned: true, is_static: is_field_static);
 	}
 }

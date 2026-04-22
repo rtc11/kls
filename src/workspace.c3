@@ -47,6 +47,8 @@ struct MemberDecl {
 	String[MAX_PARAMS] param_types;   // heap-copied parameter type texts
 	usz type_param_count;             // number of generic type parameters (for classes/funs)
 	String[8] type_param_names;       // heap-copied type-parameter names (e.g. ["K", "V"])
+	bool from_companion;              // true when this member lives in a companion object of the cached class
+	bool is_nested_type;              // true when this member is itself a nested CLASS/INTERFACE/OBJECT decl
 }
 
 // ── Workspace file entry ───────────────────────────────────────────
@@ -308,6 +310,7 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 									.col = comp_child.name_col,
 									.name_len = comp_child.name_len,
 									.param_count = 0,
+									.from_companion = true,
 								};
 								uint comp_fun_idx = ast::node_index(pr, comp_child);
 								for (uint p = 0; p < pr.node_count && cm.param_count < MAX_PARAMS; p++) {
@@ -330,6 +333,7 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 									.col = comp_child.name_col,
 									.name_len = comp_child.name_len,
 									.param_count = 0,
+									.from_companion = true,
 								};
 								cvalid = true;
 							default:
@@ -397,6 +401,7 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 							.col = child.name_col,
 							.name_len = child.name_len,
 							.param_count = 0,
+							.is_nested_type = true,
 						};
 						// Collect class type parameters (e.g. <K, V>)
 						uint c_idx = ast::node_index(pr, child);
@@ -604,6 +609,7 @@ fn void WorkspaceIndex.index_nested_members(WorkspaceIndex* self, ParseResult* p
 						.col = m_node.name_col,
 						.name_len = m_node.name_len,
 						.param_count = 0,
+						.is_nested_type = true,
 					};
 					valid = true;
 				case PARAM:
@@ -1380,7 +1386,8 @@ fn bool is_auto_imported_package(String package_name) {
 		package_name == "kotlin.io" ||
 		package_name == "kotlin.ranges" ||
 		package_name == "kotlin.sequences" ||
-		package_name == "kotlin.text";
+		package_name == "kotlin.text" ||
+		package_name == "java.lang";  // Kotlin/JVM auto-imports java.lang.*
 }
 
 /**

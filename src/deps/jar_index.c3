@@ -34,6 +34,7 @@ struct DepSymbol {
 	String jar_path;       // path to JAR; interned (shared) when indexed via index_jar
 	DepSymbolKind kind;
 	bool jar_path_shared;  // true = jar_path is interned, don't free per-symbol
+	bool is_static;        // true for JVM static members (java statics, kotlin companion members, kotlin const val)
 	String[MAX_DEP_SUPERTYPES] supertypes;  // heap-copied simple supertype names
 	usz supertype_count;
 }
@@ -475,7 +476,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		}
 
 		add_dep_symbol(idx, m.name, sig.str_view(), pkg, effective_class, jar_path, DEP_METHOD,
-			null, 0, jar_path_interned: true);
+			null, 0, jar_path_interned: true, is_static: is_static || is_companion);
 
 		// For extension functions, also index under receiver type name
 		if (km_fn != null && km_fn.has_receiver_type) {
@@ -483,14 +484,14 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 				km, km_fn.receiver_type.class_name_id, info.metadata_d2[..], info.metadata_d2_len);
 			if (recv_type_name.len > 0 && recv_type_name != effective_class) {
 				add_dep_symbol(idx, m.name, sig.str_view(), pkg, recv_type_name, jar_path, DEP_METHOD,
-					null, 0, jar_path_interned: true);
+					null, 0, jar_path_interned: true, is_static: is_static || is_companion);
 			}
 		} else if (is_static && simple_name.len > 2 && simple_name[simple_name.len - 2..] == "Kt") {
 			// Fallback: JVM descriptor heuristic for Kt facade classes without metadata
 			String receiver_name = classfile::descriptor_first_param_class(m.descriptor);
 			if (receiver_name.len > 0 && receiver_name != simple_name) {
 				add_dep_symbol(idx, m.name, sig.str_view(), pkg, receiver_name, jar_path, DEP_METHOD,
-					null, 0, jar_path_interned: true);
+					null, 0, jar_path_interned: true, is_static: true);
 			}
 		}
 
@@ -509,7 +510,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			prop_sig.appendf("val %s", prop_name);
 			classfile::method_descriptor_to_kotlin(m.descriptor, &prop_sig);
 			add_dep_symbol(idx, prop_name, prop_sig.str_view(), pkg, effective_class, jar_path, DEP_FIELD,
-				null, 0, jar_path_interned: true);
+				null, 0, jar_path_interned: true, is_static: is_static || is_companion);
 		}
 	}
 
@@ -527,6 +528,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		}
 
 		bool is_final = (f.access_flags & classfile::ACC_FINAL) != 0;
+		bool is_field_static = (f.access_flags & classfile::ACC_STATIC) != 0;
 
 		if (km_prop != null && km_prop.has_return_type) {
 			sig.appendf("%s %s: ", is_final ? "val" : "var", f.name);
@@ -539,7 +541,7 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 		}
 
 		add_dep_symbol(idx, f.name, sig.str_view(), pkg, effective_class, jar_path, DEP_FIELD,
-			null, 0, jar_path_interned: true);
+			null, 0, jar_path_interned: true, is_static: is_field_static || is_companion);
 	}
 }
 
@@ -574,7 +576,7 @@ fn KmProperty* find_km_property(KmClass* km, String field_name, String[] d2, usz
 fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		String package_name, String class_name, String jar_path, DepSymbolKind kind,
 		String[MAX_DEP_SUPERTYPES]* supertypes, usz supertype_count,
-		bool jar_path_interned = false) {
+		bool jar_path_interned = false, bool is_static = false) {
 
 	// Pre-allocate symbol data outside the lock (heap alloc is thread-safe)
 	DepSymbol sym = {
@@ -585,6 +587,7 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 		.jar_path = jar_path_interned ? jar_path : jar_path.copy(mem),
 		.kind = kind,
 		.jar_path_shared = jar_path_interned,
+		.is_static = is_static,
 		.supertype_count = supertype_count,
 	};
 
@@ -681,6 +684,7 @@ fn void DependencyIndex.copy_symbols_from_jar(DependencyIndex* self, DependencyI
 			.jar_path = interned,
 			.kind = src.kind,
 			.jar_path_shared = true,
+			.is_static = src.is_static,
 			.supertype_count = src.supertype_count,
 		};
 		for (usz s = 0; s < src.supertype_count; s++) {
