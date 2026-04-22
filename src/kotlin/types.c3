@@ -73,6 +73,7 @@ struct TypeRef {
 	String full_text;         // original text (for display): "List<Int>?"
 	bool nullable;
 	bool is_suspend;          // for function types: suspend (...) -> T
+	bool is_class_ref;        // true when this TypeRef refers to a class/object/interface itself (e.g. `UUID` in `UUID.randomUUID()`), not an instance value
 
 	// For GENERIC: simple type argument names
 	usz type_arg_count;
@@ -571,25 +572,25 @@ fn void resolve_declaration_types(ParseResult* pr, TypeInfo* info) {
 
 			case CLASS_DECL:
 				if (node.name.len > 0) {
-					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name, .is_class_ref = true };
 					info.has_type[i] = true;
 				}
 
 			case INTERFACE_DECL:
 				if (node.name.len > 0) {
-					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name, .is_class_ref = true };
 					info.has_type[i] = true;
 				}
 
 			case OBJECT_DECL:
 				if (node.name.len > 0) {
-					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name, .is_class_ref = true };
 					info.has_type[i] = true;
 				}
 
 			case COMPANION_OBJECT_DECL:
 				if (node.name.len > 0) {
-					info.node_types[i] = { .kind = SIMPLE, .name = node.name };
+					info.node_types[i] = { .kind = SIMPLE, .name = node.name, .is_class_ref = true };
 					info.has_type[i] = true;
 				}
 
@@ -1026,7 +1027,7 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
 				if (sym.kind == symbols::SymbolKind.CLASS || sym.kind == symbols::SymbolKind.INTERFACE ||
 				    sym.kind == symbols::SymbolKind.OBJECT) {
-					return { .kind = SIMPLE, .name = sym.name };
+					return { .kind = SIMPLE, .name = sym.name, .is_class_ref = true };
 				}
 			}
 		}
@@ -2852,7 +2853,7 @@ fn TypeRef resolve_dep_name_by_import(DependencyIndex* dep_index, ParseResult* p
 
 			if (matches[i].kind == DEP_CLASS || matches[i].kind == DEP_INTERFACE ||
 				matches[i].kind == DEP_ENUM || matches[i].kind == DEP_OBJECT) {
-				return { .kind = SIMPLE, .name = name };
+				return { .kind = SIMPLE, .name = name, .is_class_ref = true };
 			}
 			if (matches[i].kind == DEP_METHOD) {
 				return extract_dep_return_type(matches[i]);
@@ -2868,11 +2869,24 @@ fn TypeRef resolve_dep_name_by_import(DependencyIndex* dep_index, ParseResult* p
 
 			if (matches[i].kind == DEP_CLASS || matches[i].kind == DEP_INTERFACE ||
 				matches[i].kind == DEP_ENUM || matches[i].kind == DEP_OBJECT) {
-				return { .kind = SIMPLE, .name = name };
+				return { .kind = SIMPLE, .name = name, .is_class_ref = true };
 			}
 			if (matches[i].kind == DEP_METHOD) {
 				return extract_dep_return_type(matches[i]);
 			}
+		}
+	}
+
+	// Auto-imported packages (kotlin.*, kotlin.collections.*, java.lang.*, ...)
+	// resolve without explicit import — mirrors Kotlin/JVM compiler behavior.
+	for (usz i = 0; i < count; i++) {
+		if (!workspace::is_auto_imported_package(matches[i].package_name)) continue;
+		if (matches[i].kind == DEP_CLASS || matches[i].kind == DEP_INTERFACE ||
+			matches[i].kind == DEP_ENUM || matches[i].kind == DEP_OBJECT) {
+			return { .kind = SIMPLE, .name = name, .is_class_ref = true };
+		}
+		if (matches[i].kind == DEP_METHOD) {
+			return extract_dep_return_type(matches[i]);
 		}
 	}
 
