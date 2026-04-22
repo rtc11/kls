@@ -376,7 +376,7 @@ fn void hover_dep_static_method_via_class_ref() @test {
 			DEP_CLASS, null, 0);
 		jar_index::add_dep_symbol(&ws.dep_index,
 			"randomUUID", "fun randomUUID(): UUID", "java.util", "UUID", "/fake/java.base.jmod",
-			DEP_METHOD, null, 0);
+			DEP_METHOD, null, 0, false, true);
 
 		store.workspace = &ws;
 
@@ -471,5 +471,82 @@ fn void hover_dep_method_package_preference() @test {
 		if (util_pos != (usz)-1) {
 			assert(sql_pos < util_pos, "expected sql variant before util variant, got: '%s'", value);
 		}
+	};
+}
+
+// Static-vs-instance filtering: hover on instance member via class-ref
+// receiver (e.g. `UUID.toString` where toString is an instance method)
+// must not surface the instance method.
+fn void hover_dep_instance_method_hidden_on_class_ref() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index UUID class + an instance method "instanceOnly" (is_static=false).
+		// Use a name not present in built-in Any/Object so the only resolution
+		// path is via the dep index (where the static/instance filter applies).
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"instanceOnly", "fun instanceOnly(): String", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0, false, false);
+
+		store.workspace = &ws;
+
+		// `UUID.instanceOnly` — class-ref receiver. Instance method must be hidden.
+		String content = "import java.util.UUID\nfun main() {\n    val s = UUID.instanceOnly\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor on "instanceOnly" at line 2, col 19
+		Object* params = make_params("file:///test.kt", 2, 19);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		// Either no hover, or hover that does NOT contain the instance signature.
+		if (result != null) {
+			String value = get_hover_value(result);
+			assert(!value.contains("fun instanceOnly(): String"),
+				"unexpected instance method on class-ref receiver: '%s'", value);
+		}
+	};
+}
+
+// Static-vs-instance filtering: hover on static member via instance
+// receiver (e.g. `someUuid.randomUUID` where randomUUID is static)
+// is currently allowed (instance-receiver strict mode is future work).
+// This test pins down current behavior so the matrix is documented.
+fn void hover_dep_static_method_visible_on_instance_receiver() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"randomUUID", "fun randomUUID(): UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0, false, true);
+
+		store.workspace = &ws;
+
+		// `u.randomUUID` — instance receiver. Static method visible (not strict).
+		String content = "import java.util.UUID\nfun main(u: UUID) {\n    u.randomUUID\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 2, 7);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		assert(result != null, "expected hover result");
+		String value = get_hover_value(result);
+		assert(value.contains("fun randomUUID"),
+			"expected static method visible on instance receiver, got: '%s'", value);
 	};
 }

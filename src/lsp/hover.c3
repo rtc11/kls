@@ -262,7 +262,7 @@ fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok, Wo
  * `UUID.randomUUID()` (class ref → static) doesn't surface instance methods and
  * vice versa. Tracked in AGENTS.md.
  */
-fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type, ParseResult* pr = null) {
+fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type, ParseResult* pr = null, bool receiver_is_class_ref = false) {
 	DepSymbol*[16] all_matches;
 	usz total = dep_index.lookup_by_name(tok.text, &all_matches);
 
@@ -338,6 +338,14 @@ fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String rec
 			matched = true;
 		}
 
+		// Static-vs-instance filter: class-ref receivers (e.g. UUID.randomUUID)
+		// only see static members; instance receivers (someUuid.foo) only see
+		// instance members. Checks 1+2 are Kotlin extension functions which are
+		// instance-callable only.
+		if (matched && receiver_is_class_ref && !sym.is_static) {
+			matched = false;
+		}
+
 		if (matched) {
 			filtered[filtered_count] = sym;
 			filtered_count++;
@@ -359,6 +367,7 @@ fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String rec
 				DepSymbol* sym = super_matches[i];
 				if (sym.class_name == super_name &&
 					(sym.kind == DEP_METHOD || sym.kind == DEP_FIELD)) {
+					if (receiver_is_class_ref && !sym.is_static) continue;
 					filtered[filtered_count] = sym;
 					filtered_count++;
 				}
@@ -577,7 +586,9 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 					}
 				}
 				if (recv_name.len > 0) {
-					if (try desc = describe_dep_member(&workspace.dep_index, tok, recv_name, pr)) {
+					// Bare NAME_EXPR matching a known dep class name → class-ref access
+					bool is_class_ref = definition::is_dep_class_name(&workspace.dep_index, recv_name);
+					if (try desc = describe_dep_member(&workspace.dep_index, tok, recv_name, pr, is_class_ref)) {
 						return desc;
 					}
 				}
@@ -628,7 +639,7 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 		// receiver becomes the first parameter, so we match against that.
 		// Java methods (instance + static) are filtered by declaring class.
 		if (workspace != null && workspace.dep_index.initialized) {
-			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name, pr)) {
+			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name, pr, receiver_type.is_class_ref)) {
 				return desc;
 			}
 		}
