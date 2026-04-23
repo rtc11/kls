@@ -1040,3 +1040,50 @@ fn void dot_completion_dep_class_inherited_member_via_supertype() @test {
 		assert(found_clear, "expected 'clear' inherited from AbstractList supertype");
 	};
 }
+
+// Built-in type-table filtering: class-ref receivers should not get
+// scope functions (let/apply/run/...) or Any-derived members from the
+// hardcoded type tables, since those are instance-only.
+fn void dot_completion_class_ref_no_scope_functions_from_type_tables() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+
+		store.workspace = &ws;
+
+		// Class-ref receiver: completion should not surface let/apply etc.
+		// from the hardcoded type-table path. (Other paths like the
+		// doc-wide identifier scan and stdlib top-level path may still
+		// surface these names — this test asserts the type-table emitted
+		// items, identified by signature shape, are absent.)
+		String content = "import java.util.UUID\nfun main() {\n    UUID.\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 2, 9);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		// types::lookup_members emits scope-function items with detail "R",
+		// "T", "T?" — the generic return types from `fun <T, R> T.let(...)`.
+		// Verify no item label "let" carries that distinctive detail.
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label != "let" && label != "apply" && label != "also") continue;
+			String detail = item.get_string("detail") ?? "";
+			assert(detail != "R" && detail != "T",
+				"class-ref receiver should not get scope-function '%s' from type tables, got detail: '%s'", label, detail);
+		}
+	};
+}

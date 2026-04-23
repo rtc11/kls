@@ -551,3 +551,40 @@ fn void hover_dep_static_method_hidden_on_instance_receiver() @test {
 		}
 	};
 }
+
+// Built-in type-table filtering: hardcoded type tables in
+// `kls::kotlin::types` model instance members only (toString, hashCode,
+// equals, let, apply, ...). On a class-ref receiver these are wrong —
+// `UUID.toString` is not a valid expression. Verify the type-table
+// path returns nothing for class-ref so dep statics aren't shadowed by
+// inherited Any methods.
+fn void hover_class_ref_does_not_leak_any_toString() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+
+		store.workspace = &ws;
+
+		// Class-ref receiver: `UUID.toString` is not valid in Kotlin source.
+		// Built-in type tables must NOT surface the inherited Any::toString.
+		String content = "import java.util.UUID\nfun main() {\n    UUID.toString\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 2, 11);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		if (result != null) {
+			String value = get_hover_value(result);
+			assert(!value.contains("fun toString(): String"),
+				"class-ref receiver should not surface inherited Any::toString from type tables, got: '%s'", value);
+		}
+	};
+}

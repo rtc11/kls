@@ -3795,9 +3795,15 @@ struct MemberInfo {
 /**
  * Look up members available on a type.
  * Fills out_buf with member info and returns count.
+ *
+ * When `receiver_is_class_ref` is true (e.g. `UUID.` referencing the
+ * class itself, not an instance), returns 0 — the hardcoded type tables
+ * model instance members only. Real static members come from the dep
+ * index path and stdlib companion lookups.
  */
-fn usz lookup_members(TypeRef* type_ref, MemberInfo[] out_buf) {
+fn usz lookup_members(TypeRef* type_ref, MemberInfo[] out_buf, bool receiver_is_class_ref = false) {
 	if (type_ref.kind == UNKNOWN || out_buf.len == 0) return 0;
+	if (receiver_is_class_ref) return 0;
 
 	String type_name = type_ref.name;
 	usz count = 0;

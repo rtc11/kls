@@ -374,8 +374,9 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 		}
 
 		// Look up this member in the receiver type's member table
+		// (instance-only — class-ref receivers fall through to dep path).
 		MemberInfo[128] members;
-		usz count = types::lookup_members(&receiver_type, members[..]);
+		usz count = types::lookup_members(&receiver_type, members[..], receiver_type.is_class_ref);
 
 		for (usz m = 0; m < count; m++) {
 			if (members[m].name == tok.text) {

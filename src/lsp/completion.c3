@@ -906,8 +906,9 @@ fn void add_dot_completions(Object* items, DocumentStore* store, WorkspaceIndex*
 	if (receiver_type.kind == UNKNOWN) return;
 
 	// Look up members for this type from the hardcoded type tables
+	// (instance-only — class-ref receivers fall through to dep path).
 	MemberInfo[128] members;
-	usz member_count = types::lookup_members(&receiver_type, members[..]);
+	usz member_count = types::lookup_members(&receiver_type, members[..], receiver_type.is_class_ref);
 
 	for (usz i = 0; i < member_count; i++) {
 		MemberInfo* m = &members[i];

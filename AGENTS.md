@@ -399,10 +399,10 @@ DONE (Phase 0–2 of Tier-3 refactor):
 - `is_member_accessible(sym, receiver_is_class_ref)` (`src/deps/member_resolver.c3`) — strict mode: class-ref receivers see only static members; instance receivers see only non-static members.
 - Wired in `find_dep_member_definition` (definition), `describe_dep_member` (hover) and `add_dep_class_member_completions` (completion) including the supertype walk and UNKNOWN-receiver fallback. Tests in `test/cross_file_hover_test.c3` and `test/cross_file_completion_test.c3` cover static-on-class-ref shows, instance-on-class-ref hidden, static-on-instance hidden (strict), inherited members via supertype.
 - `DependencyIndex.class_index` (`src/deps/jar_index.c3`) — class_name → METHOD/FIELD indices; backs `lookup_members_by_class` for O(class members) completion lookup.
+- `types::lookup_members(type_ref, buf, receiver_is_class_ref = false)` (`src/kotlin/types.c3`) — early-return 0 when class-ref. Hardcoded type tables model instance members only (toString/hashCode/equals + scope funcs let/apply/...). Class-ref receivers fall through to dep path for real statics. Wired in `add_dot_completions` (`src/lsp/completion.c3`) and `describe_dot_member` (`src/lsp/hover.c3`).
 
 NOT DONE (deferred):
 1. **`@JvmStatic` / Java-interop semantic effect** — currently displayed cosmetically in `build_signature` (`@JvmStatic`/`@JvmField`/`@JvmOverloads`/`@JvmName` shown in hover). No resolution semantics: workspace already exposes companion members via `from_companion`, deps already get the synthetic static method from kotlinc-emitted bytecode. KLS does not serve Java callers, so no further effect needed.
-2. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
 
 ## Key References
 
