@@ -942,12 +942,11 @@ fn void dot_completion_dep_class_instance_member() @test {
 	};
 }
 
-fn void dot_completion_dep_class_static_hidden_on_instance_in_strict_mode_NA() @test {
-	// Documentation test: strict instance mode is NOT yet implemented.
-	// is_member_accessible currently allows statics on instance receivers
-	// (only filters when receiver is class-ref). So `instance.STATIC_MEMBER`
-	// will surface in completion until strict mode lands. This test
-	// codifies current behaviour.
+fn void dot_completion_dep_class_static_hidden_on_instance_strict_mode() @test {
+	// Strict mode: instance receivers should not see static dep members
+	// from the dep-class member path. (Other completion sources, e.g. the
+	// doc-wide identifier scan, may still surface the name independently —
+	// this test only asserts the dep-member-path detail format does not appear.)
 	@pool() {
 		DocumentStore store;
 		store.init();
@@ -966,27 +965,30 @@ fn void dot_completion_dep_class_static_hidden_on_instance_in_strict_mode_NA() @
 
 		store.workspace = &ws;
 
-		String content = "import java.util.UUID\nfun main() {\n    val u: UUID = UUID.randomUUID()\n    u.\n}";
+		// Cursor on "u." line. The "UUID.randomUUID()" earlier in the doc
+		// would otherwise be picked up by the doc-wide identifier scan, so
+		// we omit that initializer to isolate the dep-member-path behaviour.
+		String content = "import java.util.UUID\nfun main(u: UUID) {\n    u.\n}";
 		store.open("file:///test.kt", "kotlin", 1, content);
 
-		Object* params = make_params("file:///test.kt", 3, 6);
+		Object* params = make_params("file:///test.kt", 2, 6);
 		Object* result = completion::handle_completion(&store, &ws, params)!!;
 
 		assert(result != null, "expected completion result");
 		Object* items = result.get("items")!!;
 
-		// Currently allowed (no strict instance filter); when strict mode lands,
-		// flip the assertion.
-		bool found = false;
+		// Dep-member-path emits items with `data.source = "dep"`.
+		// Verify no such item carries label `randomUUID`.
 		for (usz i = 0; i < items.get_len(); i++) {
 			Object* item = items.get_at(i);
 			String label = item.get_string("label")!!;
-			if (label == "randomUUID") {
-				found = true;
-				break;
-			}
+			if (label != "randomUUID") continue;
+			Object* data = item.get("data") ?? null;
+			if (data == null) continue;
+			String source = data.get_string("source") ?? "";
+			assert(source != "dep",
+				"dep-member path should hide static 'randomUUID' on instance receiver under strict mode");
 		}
-		assert(found, "current behaviour: static surfaces on instance receiver (strict instance mode pending)");
 	};
 }
 

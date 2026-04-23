@@ -396,14 +396,13 @@ Two AST lookup helpers:
 DONE (Phase 0–2 of Tier-3 refactor):
 - `DepSymbol.is_static` (`src/deps/jar_index.c3`) — set from `ACC_STATIC` for Java methods/fields and Kotlin companion members.
 - `TypeRef.is_class_ref` (`src/kotlin/types.c3`) — set in `resolve_name_expr_type` (workspace branch) and `resolve_dep_name_by_import` (3 dep-import branches) for class/interface/object/companion references.
-- `is_member_accessible(sym, receiver_is_class_ref)` (`src/deps/member_resolver.c3`) — class-ref receivers see only static members; instance receivers see all (strict instance-mode is future work).
-- Wired in `find_dep_member_definition` (definition), `describe_dep_member` (hover) and `add_dep_class_member_completions` (completion) including the supertype walk and UNKNOWN-receiver fallback. Tests in `test/cross_file_hover_test.c3` and `test/cross_file_completion_test.c3` cover static-on-class-ref shows, instance-on-class-ref hidden, static-on-instance allowed, inherited members via supertype.
+- `is_member_accessible(sym, receiver_is_class_ref)` (`src/deps/member_resolver.c3`) — strict mode: class-ref receivers see only static members; instance receivers see only non-static members.
+- Wired in `find_dep_member_definition` (definition), `describe_dep_member` (hover) and `add_dep_class_member_completions` (completion) including the supertype walk and UNKNOWN-receiver fallback. Tests in `test/cross_file_hover_test.c3` and `test/cross_file_completion_test.c3` cover static-on-class-ref shows, instance-on-class-ref hidden, static-on-instance hidden (strict), inherited members via supertype.
 - `DependencyIndex.class_index` (`src/deps/jar_index.c3`) — class_name → METHOD/FIELD indices; backs `lookup_members_by_class` for O(class members) completion lookup.
 
 NOT DONE (deferred):
 1. **`@JvmStatic` / Java-interop semantic effect** — currently displayed cosmetically in `build_signature` (`@JvmStatic`/`@JvmField`/`@JvmOverloads`/`@JvmName` shown in hover). No resolution semantics: workspace already exposes companion members via `from_companion`, deps already get the synthetic static method from kotlinc-emitted bytecode. KLS does not serve Java callers, so no further effect needed.
-2. **Strict instance mode** — currently `is_member_accessible` only filters when receiver is class-ref. Strict mode would also hide statics on instance receivers.
-3. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
+2. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
 
 ## Key References
 

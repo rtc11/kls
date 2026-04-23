@@ -515,11 +515,10 @@ fn void hover_dep_instance_method_hidden_on_class_ref() @test {
 	};
 }
 
-// Static-vs-instance filtering: hover on static member via instance
-// receiver (e.g. `someUuid.randomUUID` where randomUUID is static)
-// is currently allowed (instance-receiver strict mode is future work).
-// This test pins down current behavior so the matrix is documented.
-fn void hover_dep_static_method_visible_on_instance_receiver() @test {
+// Static-vs-instance filtering: hover on a static member via instance
+// receiver (e.g. `someUuid.randomUUID` where randomUUID is static) is
+// blocked under strict mode. Java semantics: statics belong to the class.
+fn void hover_dep_static_method_hidden_on_instance_receiver() @test {
 	@pool() {
 		DocumentStore store;
 		store.init();
@@ -538,15 +537,17 @@ fn void hover_dep_static_method_visible_on_instance_receiver() @test {
 
 		store.workspace = &ws;
 
-		// `u.randomUUID` — instance receiver. Static method visible (not strict).
+		// `u.randomUUID` — instance receiver. Static method should NOT be visible.
 		String content = "import java.util.UUID\nfun main(u: UUID) {\n    u.randomUUID\n}";
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 2, 7);
 		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
-		assert(result != null, "expected hover result");
-		String value = get_hover_value(result);
-		assert(value.contains("fun randomUUID"),
-			"expected static method visible on instance receiver, got: '%s'", value);
+		// Either no hover, or hover that does NOT contain the dep static signature.
+		if (result != null) {
+			String value = get_hover_value(result);
+			assert(!value.contains("fun randomUUID(): UUID"),
+				"static method should be hidden on instance receiver under strict mode, got: '%s'", value);
+		}
 	};
 }

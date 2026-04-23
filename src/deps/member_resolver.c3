@@ -27,16 +27,22 @@ import kls::deps::jar_index;
 // ── Static-vs-instance accessibility filter ──────────────────────
 
 /**
- * Class-ref receivers (e.g. `UUID.randomUUID`) only see static
- * members. Instance receivers see all members (strict instance mode
- * — i.e. hide statics on instance receivers — is future work).
+ * Strict accessibility filter for `receiver.member` access:
+ *   - class-ref receiver (e.g. `UUID.randomUUID`)  → only static members
+ *   - instance receiver (e.g. `someUuid.toString`) → only non-static members
+ *
+ * Both directions enforced. Callers must supply an accurate
+ * `receiver_is_class_ref` (currently driven by `TypeRef.is_class_ref`,
+ * set by the type resolver in `kls::kotlin::types`). When the
+ * discriminator is unknown (no type info), callers fall through the
+ * UNKNOWN-receiver path which bypasses this filter.
  */
 fn bool is_member_accessible(DepSymbol* sym, bool receiver_is_class_ref) {
 	if (sym == null) return false;
 	if (receiver_is_class_ref) {
 		return sym.is_static;
 	}
-	return true;
+	return !sym.is_static;
 }
 
 /**
