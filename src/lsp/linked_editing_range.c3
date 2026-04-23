@@ -6,8 +6,10 @@ import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::kotlin::types;
 import kls::lsp::definition;
 import kls::lsp::references;
+import kls::workspace;
 
 /**
  * Handle textDocument/linkedEditingRange request.
@@ -17,7 +19,7 @@ import kls::lsp::references;
  *
  * Only applies to IDENTIFIER tokens. Returns null for keywords or non-identifiers.
  */
-fn Object*? handle_linked_editing_range(DocumentStore* store, Object* params) {
+fn Object*? handle_linked_editing_range(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!;
 	String uri = td.get_string("uri")!;
 
@@ -40,21 +42,50 @@ fn Object*? handle_linked_editing_range(DocumentStore* store, Object* params) {
 
 	String target_name = tok.text;
 
-	// Use AST for scope-aware binding resolution
+	// Use AST + types for binding-aware filtering
 	ParseResult* pr = store.get_ast(uri) ?? null;
+	TypeInfo* ti = store.get_types(uri) ?? null;
 
-	// Resolve cursor's identifier to its declaration
-	uint decl_offset = uint.max;
+	bool is_call = false;
 	if (pr != null) {
-		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, false)) {
-			decl_offset = decl_node.name_offset;
-		}
-		if (decl_offset == uint.max && references::is_declaration_name(pr, tok.offset)) {
-			decl_offset = tok.offset;
+		is_call = definition::is_call_context_ast(pr, tok.offset) || definition::is_call_context(doc.content, tok);
+	}
+
+	// Resolve cursor's identifier via the unified binding adapter.
+	TokenTarget target = definition::NO_TARGET;
+	if (pr != null) {
+		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
+		if (target.kind == TargetKind.NONE && references::is_declaration_name(pr, tok.offset)) {
+			target = (TokenTarget){
+				.kind = TargetKind.IN_FILE,
+				.uri = uri,
+				.name_offset = tok.offset,
+			};
 		}
 	}
 
-	// Collect matching IDENTIFIER tokens that resolve to same declaration
+	// For decoded line/col targets (sourced from dot-member resolver), prepare
+	// alternative comparison.
+	bool target_is_encoded = false;
+	uint enc_line = 0;
+	uint enc_col = 0;
+	if (pr != null && target.kind == TargetKind.IN_FILE) {
+		bool is_byte_offset = false;
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.name_offset == target.name_offset && n.name == target_name && ast::is_declaration(n.kind)) {
+				is_byte_offset = true;
+				break;
+			}
+		}
+		if (!is_byte_offset) {
+			target_is_encoded = true;
+			enc_line = target.name_offset >> 16;
+			enc_col = target.name_offset & 0xFFFF;
+		}
+	}
+
+	// Collect matching IDENTIFIER tokens that bind to the same target
 	Object* ranges = object::new_obj(tmem); // JSON array
 
 	Lexer lex = lexer::init(doc.content);
@@ -64,15 +95,17 @@ fn Object*? handle_linked_editing_range(DocumentStore* store, Object* params) {
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
 
-		// Scope-aware filtering via binding resolution
-		if (pr != null && decl_offset != uint.max) {
-			if (t.offset == decl_offset) {
-				// Declaration itself — include
-			} else if (try candidate = definition::find_declaration_in_file(pr, target_name, t.offset, false)) {
-				if (candidate.name_offset != decl_offset) continue;
-			} else {
-				continue;
+		if (pr != null && target.kind == TargetKind.IN_FILE) {
+			bool is_decl_site = (!target_is_encoded && t.offset == target.name_offset)
+				|| (target_is_encoded && t.line == enc_line && t.col == enc_col);
+			if (!is_decl_site) {
+				if (!definition::token_binds_to_target(target, pr, ti, workspace, store, uri, target_name, t.offset, is_call)) {
+					continue;
+				}
 			}
+		} else if (pr != null && target.kind == TargetKind.CROSS_FILE) {
+			TokenTarget cand = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, t.offset, is_call);
+			if (cand.kind != TargetKind.CROSS_FILE || cand.uri != target.uri) continue;
 		} else if (pr != null) {
 			// Fallback: enclosing scope comparison
 			uint cursor_scope = find_enclosing_scope(pr, tok.offset);

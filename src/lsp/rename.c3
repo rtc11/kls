@@ -10,6 +10,7 @@ import kls::lsp::definition;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::kotlin::types;
 import kls::workspace;
 
 /**
@@ -115,8 +116,9 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 	// If the new name is the same as the old name, nothing to do
 	if (target_name == new_name) return null;
 
-	// Get cached AST for scope-aware rename
+	// Get cached AST + types for scope-aware rename
 	ParseResult* pr = store.get_ast(uri) ?? null;
+	TypeInfo* ti = store.get_types(uri) ?? null;
 
 	// Detect call context for accurate definition resolution
 	bool is_call = false;
@@ -124,19 +126,48 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 		is_call = definition::is_call_context_ast(pr, tok.offset) || definition::is_call_context(doc.content, tok);
 	}
 
-	// ── Resolve the declaration this identifier refers to ────────
-	// This uses the scope-aware lookup from definition.c3:
-	// finds the innermost scope, walks outward to find the declaration.
+	// ── Resolve the cursor's binding via the unified adapter ─────
+	// Handles dot-member, qualified callable-ref (`Type::member`), and
+	// bare-name scope walk uniformly. CROSS_FILE result tells us the
+	// declaration lives outside this file → top-level for rename
+	// purposes.
+	TokenTarget target = definition::NO_TARGET;
 	uint decl_idx = 0;
 	bool has_decl = false;
 	bool is_top_level = true;
 
 	if (pr != null) {
-		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, is_call)) {
-			decl_idx = ast::node_index(pr, decl_node);
-			has_decl = true;
-			// A declaration is top-level if its parent is the FILE node (index 0)
-			is_top_level = (decl_node.parent == 0);
+		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
+		if (target.kind == TargetKind.IN_FILE) {
+			// Try to recover the AstNode from raw byte offset (when the
+			// target came from scope walk). When it came from the dot-
+			// member resolver, name_offset is encoded line/col — find
+			// the matching AST node by line/col instead.
+			has_decl = recover_decl_idx(pr, target_name, target.name_offset, &decl_idx);
+			if (has_decl) {
+				is_top_level = is_externally_visible_decl(pr, decl_idx);
+			} else {
+				// Encoded line/col: search by name + line/col
+				uint enc = target.name_offset;
+				uint t_line = enc >> 16;
+				uint t_col = enc & 0xFFFF;
+				for (uint i = 0; i < pr.node_count; i++) {
+					AstNode* n = &pr.nodes[i];
+					if (!ast::is_declaration(n.kind)) continue;
+					if (n.name != target_name) continue;
+					if (n.name_line != t_line || n.name_col != t_col) continue;
+					decl_idx = i;
+					has_decl = true;
+					is_top_level = is_externally_visible_decl(pr, i);
+					break;
+				}
+			}
+		} else if (target.kind == TargetKind.CROSS_FILE) {
+			// Declaration in another file — treat as top-level so the
+			// cross-file scan runs. has_decl stays false; current file
+			// uses adapter-based per-token verification instead of
+			// scope restriction.
+			is_top_level = true;
 		}
 	}
 
@@ -146,11 +177,13 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 
 	// ── Current file edits ──────────────────────────────────────
 	Object* edits;
-	if (has_decl && pr != null) {
-		// Scope-aware: only rename tokens that resolve to the same declaration
-		edits = collect_scoped_edits(doc.content, pr, decl_idx, target_name, new_name, is_call);
+	if (target.kind != TargetKind.NONE && pr != null) {
+		// Adapter-based: any token whose binding equals `target` gets renamed.
+		// Subsumes both same-file scope-aware and callable-ref/dot-member.
+		edits = collect_target_edits(doc.content, pr, ti, workspace, store, uri,
+			target, target_name, new_name, is_call, has_decl, decl_idx);
 	} else {
-		// No AST or no declaration found: fall back to name-based rename
+		// No AST or no resolution: fall back to name-based rename.
 		edits = collect_edits_in_file(doc.content, target_name, new_name);
 	}
 	if (edits.get_len() > 0) {
@@ -180,28 +213,117 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 // ── Scope-aware file scanning ─────────────────────────────────────
 
 /**
- * Collect TextEdit objects for identifiers that resolve to a specific
- * declaration in the AST. For each matching IDENTIFIER token, verifies
- * that definition::find_declaration_in_file resolves it to the same
- * declaration node (decl_idx). This correctly handles shadowing:
- * if an inner scope redeclares the same name, its references won't
- * resolve to the outer declaration and will be excluded.
+ * Recover the AST node index of a declaration whose name identifier
+ * starts at `byte_offset`. Returns true on success and writes the index
+ * into `*out_idx`. Used when the rename target was sourced from a
+ * scope-walk lookup (raw byte offset).
  */
-fn Object* collect_scoped_edits(String content, ParseResult* pr, usz decl_idx, String target_name, String new_name, bool is_call) {
+fn bool recover_decl_idx(ParseResult* pr, String target_name, uint byte_offset, uint* out_idx) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind)) continue;
+		if (n.name != target_name) continue;
+		if (n.name_offset != byte_offset) continue;
+		*out_idx = i;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Returns true when the declaration at `decl_idx` is potentially
+ * referenceable from outside the current file. Top-level (parent==0)
+ * decls qualify, as do members of class/interface/object/companion
+ * bodies (callable as `Type.member` or via `Type::member`). Locals
+ * (decl inside a function body, block, or lambda) do not.
+ */
+fn bool is_externally_visible_decl(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return false;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.parent == 0 || decl.parent == ast::NO_PARENT) return true;
+	AstNode* parent = &pr.nodes[decl.parent];
+	switch (parent.kind) {
+		case CLASS_DECL:
+		case INTERFACE_DECL:
+		case OBJECT_DECL:
+		case COMPANION_OBJECT_DECL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Collect TextEdit objects for tokens that bind to `target` in the
+ * current file. Each candidate IDENTIFIER token (matching name) is
+ * passed through `definition::token_binds_to_target` for verification.
+ *
+ * For IN_FILE targets with a recovered AstNode (`has_decl == true`):
+ *   - non-top-level decls restrict scanning to the declaration's
+ *     enclosing scope range (avoids per-token resolver cost on
+ *     unrelated tokens).
+ *   - the declaration site itself is matched by raw byte offset.
+ *
+ * For IN_FILE targets sourced from the dot-member resolver (no AstNode
+ * recovered, name_offset is encoded line/col): the declaration site is
+ * matched by line/col equality with the candidate token.
+ *
+ * For CROSS_FILE targets: every same-name candidate is verified against
+ * the foreign URI; declaration site is in another file (not in this
+ * scan).
+ */
+fn Object* collect_target_edits(String content, ParseResult* pr, TypeInfo* ti,
+		WorkspaceIndex* workspace, DocumentStore* store, String current_uri,
+		TokenTarget target, String target_name, String new_name, bool is_call,
+		bool has_decl, uint decl_idx) {
 	Object* edits = object::new_obj(tmem);  // JSON array
 
-	AstNode* decl = &pr.nodes[decl_idx];
-	uint scope_idx = decl.parent;
-
-	// For non-top-level declarations, restrict scanning to the scope range
-	// to avoid unnecessary definition lookups on unrelated tokens.
+	// Optional scope restriction for in-file local decls.
+	// Only restrict when the declaration is truly local — i.e., its parent
+	// is a function body, block, or lambda. Members of classes/objects/
+	// interfaces/companion objects are accessible anywhere via member
+	// access (incl. callable refs `Type::member`); restricting them to
+	// the class body would skip valid call sites.
+	bool restrict_to_scope = false;
 	uint scope_start = 0;
 	uint scope_end = 0;
-	bool restrict_to_scope = (scope_idx != 0);
-	if (restrict_to_scope) {
-		AstNode* scope = &pr.nodes[scope_idx];
-		scope_start = scope.start_offset;
-		scope_end = scope.end_offset;
+	if (has_decl) {
+		AstNode* decl = &pr.nodes[decl_idx];
+		uint scope_idx = decl.parent;
+		if (scope_idx != 0) {
+			AstNode* scope = &pr.nodes[scope_idx];
+			NodeKind sk = scope.kind;
+			bool is_class_like_body =
+				sk == CLASS_DECL ||
+				sk == INTERFACE_DECL ||
+				sk == OBJECT_DECL ||
+				sk == COMPANION_OBJECT_DECL;
+			if (!is_class_like_body) {
+				scope_start = scope.start_offset;
+				scope_end = scope.end_offset;
+				restrict_to_scope = true;
+			}
+		}
+	}
+
+	// Encoded line/col path: when target.name_offset is encoded, decode for
+	// declaration-site comparison by token line/col. We always compute the
+	// declaration's line/col when an AstNode is known (whether discovered
+	// by raw byte offset or by encoded line/col), so the lexer pass can
+	// match the decl site by line/col regardless of the recovery path.
+	bool target_is_in_file = (target.kind == TargetKind.IN_FILE);
+	uint enc_line = 0;
+	uint enc_col = 0;
+	uint decl_byte_offset = uint.max;
+	if (target_is_in_file) {
+		if (has_decl) {
+			enc_line = pr.nodes[decl_idx].name_line;
+			enc_col = pr.nodes[decl_idx].name_col;
+			decl_byte_offset = pr.nodes[decl_idx].name_offset;
+		} else {
+			enc_line = target.name_offset >> 16;
+			enc_col = target.name_offset & 0xFFFF;
+		}
 	}
 
 	Lexer lex = lexer::init(content);
@@ -210,13 +332,10 @@ fn Object* collect_scoped_edits(String content, ParseResult* pr, usz decl_idx, S
 		Token t = lex.next();
 		if (t.kind == EOF) break;
 
-		// Enter skip mode when we see a package or import keyword
 		if (t.kind == KW_PACKAGE || t.kind == KW_IMPORT) {
 			in_package_or_import = true;
 			continue;
 		}
-
-		// While inside a package/import path, skip path segments
 		if (in_package_or_import) {
 			if (t.kind == IDENTIFIER || t.kind == DOT || t.kind == MULT) continue;
 			in_package_or_import = false;
@@ -225,18 +344,30 @@ fn Object* collect_scoped_edits(String content, ParseResult* pr, usz decl_idx, S
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
 
-		// For local declarations, skip tokens outside the scope range
+		// Local decl: skip tokens outside the scope range.
 		if (restrict_to_scope) {
 			if (t.offset < scope_start || t.offset >= scope_end) continue;
 		}
 
-		// Verify this token resolves to our target declaration.
-		// This handles shadowing: if an inner scope declares the same
-		// name, find_declaration_in_file will resolve to the inner one
-		// instead, and the index won't match.
-		if (try found = definition::find_declaration_in_file(pr, target_name, t.offset, is_call)) {
-			uint found_idx = ast::node_index(pr, found);
-			if (found_idx != decl_idx) continue;  // different declaration (shadowed)
+		// Same-file declaration site: include directly.
+		if (target_is_in_file) {
+			if (decl_byte_offset != uint.max && t.offset == decl_byte_offset) {
+				Object* edit = build_text_edit(t, new_name);
+				edits.push(edit);
+				continue;
+			}
+			if (t.line == enc_line && t.col == enc_col) {
+				Object* edit = build_text_edit(t, new_name);
+				edits.push(edit);
+				continue;
+			}
+		}
+
+		// Verify per-token binding. Skip tokens that resolve elsewhere
+		// (handles shadowing + name collisions).
+		if (!definition::token_binds_to_target(target, pr, ti, workspace, store,
+				current_uri, target_name, t.offset, is_call)) {
+			continue;
 		}
 
 		Object* edit = build_text_edit(t, new_name);

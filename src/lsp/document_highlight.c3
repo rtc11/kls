@@ -7,7 +7,9 @@ import kls::lsp::references;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::kotlin::types;
 import kls::lsp::definition;
+import kls::workspace;
 
 // DocumentHighlightKind (LSP 3.17)
 const int TEXT  = 1;
@@ -23,7 +25,7 @@ const int WRITE = 3;
  * then classifies each as Write (declaration sites) or Read (usage sites)
  * using the AST.
  */
-fn Object*? handle_document_highlight(DocumentStore* store, Object* params) {
+fn Object*? handle_document_highlight(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!;
 	String uri = td.get_string("uri")!;
 
@@ -51,18 +53,48 @@ fn Object*? handle_document_highlight(DocumentStore* store, Object* params) {
 
 	String target_name = tok.text;
 
-	// Get cached AST for scope-aware filtering and declaration classification
+	// Get cached AST + types for scope-aware filtering and decl classification
 	ParseResult* pr = store.get_ast(uri) ?? null;
+	TypeInfo* ti = store.get_types(uri) ?? null;
 
-	// Resolve cursor's identifier to its declaration (scope-aware)
-	uint decl_offset = uint.max; // sentinel = no resolution
+	// Resolve cursor's identifier via the unified binding adapter.
+	// Handles dot-member, qualified callable-ref, and bare-name uniformly.
+	bool is_call = false;
 	if (pr != null) {
-		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, false)) {
-			decl_offset = decl_node.name_offset;
+		is_call = definition::is_call_context_ast(pr, tok.offset) || definition::is_call_context(doc.content, tok);
+	}
+	TokenTarget target = definition::NO_TARGET;
+	if (pr != null) {
+		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
+		if (target.kind == TargetKind.NONE && references::is_declaration_name(pr, tok.offset)) {
+			target = (TokenTarget){
+				.kind = TargetKind.IN_FILE,
+				.uri = uri,
+				.name_offset = tok.offset,
+			};
 		}
-		// If cursor IS on a declaration, use that declaration's offset
-		if (decl_offset == uint.max && references::is_declaration_name(pr, tok.offset)) {
-			decl_offset = tok.offset;
+	}
+
+	// For decoded-line/col targets (sourced from dot-member resolver),
+	// we need the encoded comparison value.
+	bool target_is_encoded = false;
+	uint enc_line = 0;
+	uint enc_col = 0;
+	if (target.kind == TargetKind.IN_FILE) {
+		// Heuristic: if name_offset doesn't match any AST decl byte_offset,
+		// it's encoded line/col.
+		bool is_byte_offset = false;
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.name_offset == target.name_offset && n.name == target_name && ast::is_declaration(n.kind)) {
+				is_byte_offset = true;
+				break;
+			}
+		}
+		if (!is_byte_offset) {
+			target_is_encoded = true;
+			enc_line = target.name_offset >> 16;
+			enc_col = target.name_offset & 0xFFFF;
 		}
 	}
 
@@ -88,20 +120,26 @@ fn Object*? handle_document_highlight(DocumentStore* store, Object* params) {
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
 
-		// Scope-aware filtering when AST available
-		if (pr != null && decl_offset != uint.max) {
-			if (t.offset == decl_offset) {
-				// Declaration itself
+		// Adapter-based scope filter when AST + target available.
+		if (pr != null && target.kind == TargetKind.IN_FILE) {
+			// Same-file declaration site
+			if (!target_is_encoded && t.offset == target.name_offset) {
 				Object* highlight = build_highlight(t, WRITE);
 				highlights.push(highlight);
 				continue;
 			}
-			// Check if this token resolves to same declaration
-			if (try candidate_decl = definition::find_declaration_in_file(pr, target_name, t.offset, false)) {
-				if (candidate_decl.name_offset != decl_offset) continue;
-			} else {
+			if (target_is_encoded && t.line == enc_line && t.col == enc_col) {
+				Object* highlight = build_highlight(t, WRITE);
+				highlights.push(highlight);
 				continue;
 			}
+			if (!definition::token_binds_to_target(target, pr, ti, workspace, store, uri, target_name, t.offset, is_call)) {
+				continue;
+			}
+		} else if (pr != null && target.kind == TargetKind.CROSS_FILE) {
+			// Verify candidate also points cross-file to the same URI.
+			TokenTarget cand = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, t.offset, is_call);
+			if (cand.kind != TargetKind.CROSS_FILE || cand.uri != target.uri) continue;
 		}
 
 		// Classify: declaration names are Write, everything else is Read

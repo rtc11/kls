@@ -9,6 +9,7 @@ import kls::lsp::hover;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import kls::kotlin::types;
 import kls::lsp::definition;
 import kls::workspace;
 
@@ -58,18 +59,29 @@ fn Object*? handle_references(DocumentStore* store, WorkspaceIndex* workspace, O
 
 	String target_name = tok.text;
 
-	// Get cached AST for scope-aware filtering
+	// Get cached AST + types for scope-aware filtering
 	ParseResult* pr = store.get_ast(uri) ?? null;
+	TypeInfo* ti = store.get_types(uri) ?? null;
 
-	// Resolve cursor's identifier to its declaration (scope-aware)
-	uint decl_offset = uint.max; // sentinel = no resolution
+	// Resolve cursor's identifier to a stable target identity. Handles
+	// dot-member, qualified callable-ref (`Type::member`), and bare-name
+	// scope walk. CROSS_FILE targets fall back to name-based scope filter
+	// (declaration not in this file → can't compare per-token offsets).
+	bool is_call = false;
 	if (pr != null) {
-		if (try decl_node = definition::find_declaration_in_file(pr, target_name, tok.offset, false)) {
-			decl_offset = decl_node.name_offset;
-		}
-		// If cursor IS on a declaration, use that declaration's offset
-		if (decl_offset == uint.max && is_declaration_name(pr, tok.offset)) {
-			decl_offset = tok.offset;
+		is_call = definition::is_call_context_ast(pr, tok.offset) || definition::is_call_context(doc.content, tok);
+	}
+	TokenTarget target = definition::NO_TARGET;
+	if (pr != null) {
+		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
+		// If cursor IS on a declaration and resolution failed, treat
+		// the declaration site itself as the target.
+		if (target.kind == TargetKind.NONE && is_declaration_name(pr, tok.offset)) {
+			target = (TokenTarget){
+				.kind = TargetKind.IN_FILE,
+				.uri = uri,
+				.name_offset = tok.offset,
+			};
 		}
 	}
 
@@ -106,24 +118,26 @@ fn Object*? handle_references(DocumentStore* store, WorkspaceIndex* workspace, O
 			}
 		}
 
-		// Scope-aware filtering: if we resolved the cursor's declaration,
-		// only include tokens that resolve to the same declaration
-		if (pr != null && decl_offset != uint.max) {
-			// Check if this token IS the declaration
-			if (t.offset == decl_offset) {
-				// This is the declaration itself — include if includeDeclaration
+		// Scope-aware filtering: when target is in this file, verify each
+		// candidate token resolves to the same target. CROSS_FILE targets
+		// skip per-token verification (current file shouldn't have decl);
+		// matches by name only — same as the existing fallback.
+		if (pr != null && target.kind == TargetKind.IN_FILE) {
+			// Cursor's own declaration site (raw byte offset path)
+			if (t.offset == target.name_offset) {
 				if (include_declaration) {
 					Object* location = build_location(uri, t);
 					locations.push(location);
 				}
 				continue;
 			}
-			// Check if this token resolves to the same declaration
-			if (try candidate_decl = definition::find_declaration_in_file(pr, target_name, t.offset, false)) {
-				if (candidate_decl.name_offset != decl_offset) continue; // different binding
-			} else {
-				continue; // can't resolve — skip
+			if (!definition::token_binds_to_target(target, pr, ti, workspace, store, uri, target_name, t.offset, is_call)) {
+				continue;
 			}
+		} else if (pr != null && target.kind == TargetKind.CROSS_FILE) {
+			// Verify candidate also resolves cross-file to the same URI.
+			TokenTarget cand = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, t.offset, is_call);
+			if (cand.kind != TargetKind.CROSS_FILE || cand.uri != target.uri) continue;
 		}
 
 		// Build Location for this occurrence

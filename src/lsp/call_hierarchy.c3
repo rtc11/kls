@@ -315,7 +315,12 @@ fn void collect_incoming_from_ast(Object* result, ParseResult* pr, String target
 
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
-		if (n.kind != CALL_EXPR) continue;
+		// Treat CALL_EXPR and qualified callable refs (`Type::name`) as
+		// calls. Skip bare `::name` (no receiver — covered by CALL_EXPR
+		// usages elsewhere) and `Type::class` (class literal).
+		bool is_call = (n.kind == CALL_EXPR);
+		bool is_cref = (n.kind == CALLABLE_REF_EXPR && n.name_len > 0 && n.name != "class" && definition::callable_ref_has_receiver(pr, i));
+		if (!is_call && !is_cref) continue;
 		if (n.name != target_name) continue;
 
 		// Find enclosing function
@@ -444,7 +449,9 @@ fn void collect_outgoing_from_function(Object* result, ParseResult* pr, uint fun
 
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
-		if (n.kind != CALL_EXPR) continue;
+		bool is_call = (n.kind == CALL_EXPR);
+		bool is_cref = (n.kind == CALLABLE_REF_EXPR && n.name_len > 0 && n.name != "class" && definition::callable_ref_has_receiver(pr, i));
+		if (!is_call && !is_cref) continue;
 		if (n.name.len == 0) continue;
 
 		// Must be descendant of our function

@@ -299,3 +299,47 @@ fn void cross_file_exclude_declaration() @test {
 		assert(total_excl <= total_incl, "exclude_declaration should not add refs: excl=%d incl=%d", (int)total_excl, (int)total_incl);
 	};
 }
+
+// ── Callable references: Type::member finds same-name usages ──────
+
+fn void callable_ref_includes_member_usages() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A: class with companion fromString, plus a direct call
+		String file_a =
+			"class Header {\n"
+			"    companion object {\n"
+			"        fun fromString(s: String): Header = Header()\n"
+			"    }\n"
+			"}\n"
+			"fun direct() { Header.fromString(\"x\") }\n";
+		ws.index_file("file:///header.kt", file_a);
+		store.open("file:///header.kt", "kotlin", 1, file_a);
+
+		// File B: callable ref Header::fromString
+		String file_b =
+			"fun useIt() { listOf(\"a\").map(Header::fromString) }\n";
+		store.open("file:///use.kt", "kotlin", 1, file_b);
+
+		// Cursor on "fromString" inside Header::fromString. Col of 'f':
+		// "fun useIt() { listOf(\"a\").map(Header::fromString) }"
+		//  0         1         2         3         4
+		//  0123456789012345678901234567890123456789012345678901
+		//                                  ^ Header at 30, ::at 36, f at 38
+		Object* params = make_params("file:///use.kt", 0, 38);
+		Object* result = references::handle_references(&store, &ws, params)!!;
+
+		assert(result != null, "expected references array");
+		usz total = result.get_len();
+		// Should at least include: callable ref in use.kt, decl in header.kt,
+		// direct call in header.kt -> >= 3
+		assert(total >= 3, "expected >= 3 references for callable-ref member, got %d", (int)total);
+	};
+}

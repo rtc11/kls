@@ -3,6 +3,7 @@ module kls::test::rename_test;
 import std::collections::object;
 import kls::document;
 import kls::lsp::rename;
+import kls::workspace;
 
 // ── Helper: build params for prepareRename ─────────────────────────
 
@@ -916,5 +917,53 @@ fn void rename_accepts_underscore_start() @test {
 		Object* result = rename::handle_rename(&store, null, params) ?? null;
 
 		assert(result != null, "expected rename to succeed with underscore-prefixed name");
+	};
+}
+
+// ── Rename via callable reference: Type::member ────────────────────
+
+fn void rename_via_callable_ref_renames_decl_and_usages() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Single file: companion fun fromString + Type::fromString usage.
+		String file =
+			"class Header {\n"
+			"    companion object {\n"
+			"        fun fromString(s: String): Header = Header()\n"
+			"    }\n"
+			"}\n"
+			"fun useIt() = listOf(\"a\").map(Header::fromString)\n";
+		store.open("file:///header.kt", "kotlin", 1, file);
+		ws.index_file("file:///header.kt", file);
+
+		// Cursor on "fromString" inside Header::fromString. Compute col:
+		// "fun useIt() = listOf(\"a\").map(Header::fromString)"
+		//  0         1         2         3         4
+		//  012345678901234567890123456789012345678901234567890
+		// Header at col 30, :: at 36, fromString starts at col 38
+		Object* params = make_rename_params("file:///header.kt", 5, 38, "parse");
+		Object* result = rename::handle_rename(&store, &ws, params) ?? null;
+
+		assert(result != null, "expected rename via callable ref to succeed");
+
+		Object* edits = get_edits_for_uri(result, "file:///header.kt");
+		assert(edits != null, "expected edits for header.kt");
+		// Should rename: declaration on line 2, callable-ref usage on line 5.
+		// (no other usages in this fixture)
+		usz count = edits.get_len();
+		assert(count >= 2, "expected >= 2 edits, got %d", (int)count);
+
+		// Every edit's newText must be "parse"
+		for (usz i = 0; i < count; i++) {
+			assert(get_edit_new_text(edits, i) == "parse",
+				"expected newText 'parse' at edit %d", (int)i);
+		}
 	};
 }

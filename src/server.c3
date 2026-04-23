@@ -368,7 +368,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/documentHighlight":
 			if (params == null) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
-			} else if (try result = document_highlight::handle_document_highlight(&self.documents, params)) {
+			} else if (try result = document_highlight::handle_document_highlight(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");
@@ -377,7 +377,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "textDocument/linkedEditingRange":
 			if (params == null) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
-			} else if (try result = linked_editing_range::handle_linked_editing_range(&self.documents, params)) {
+			} else if (try result = linked_editing_range::handle_linked_editing_range(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");

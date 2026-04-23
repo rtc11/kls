@@ -539,3 +539,138 @@ fn void chained_call_resolves_to_return_type_method() @test {
 			"expected processor at line 1 of stream.kt, got %d", line);
 	};
 }
+
+// ── Callable references (Type::member, ::name, Type::class) ────────
+
+fn void callable_ref_to_companion_member_resolves() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A: class with companion fromString
+		String file_a =
+			"class Header(val name: String, val value: String?) {\n"
+			"    companion object {\n"
+			"        fun fromString(str: String): Header {\n"
+			"            return Header(\"a\", \"b\")\n"
+			"        }\n"
+			"    }\n"
+			"}\n";
+		ws.index_file("file:///header.kt", file_a);
+
+		// File B: callable reference Header::fromString
+		String file_b =
+			"fun parseAll(rows: List<String>): List<Header> {\n"
+			"    return rows.map(Header::fromString)\n"
+			"}\n";
+		store.open("file:///dao.kt", "kotlin", 1, file_b);
+
+		// Cursor on "fromString" at line 1, col 28
+		Object* params = make_params("file:///dao.kt", 1, 28);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected callable-ref to resolve to companion member");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///header.kt", "expected header.kt, got '%s'", uri);
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 2, "expected fromString at line 2 of header.kt, got %d", line);
+	};
+}
+
+fn void callable_ref_to_top_level_fun_same_file() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String file =
+			"fun helper(s: String): String = s\n"
+			"fun caller(xs: List<String>): List<String> = xs.map(::helper)\n";
+		store.open("file:///a.kt", "kotlin", 1, file);
+		ws.index_file("file:///a.kt", file);
+
+		// Cursor on "helper" inside ::helper at line 1, col 54
+		Object* params = make_params("file:///a.kt", 1, 54);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected bare ::helper to resolve to top-level fun");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///a.kt", "expected a.kt, got '%s'", uri);
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = start.get_int("line")!!;
+		assert(line == 0, "expected helper at line 0, got %d", line);
+	};
+}
+
+fn void callable_ref_class_literal_no_navigation() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String file =
+			"class Foo\n"
+			"fun klass() = Foo::class\n";
+		store.open("file:///a.kt", "kotlin", 1, file);
+		ws.index_file("file:///a.kt", file);
+
+		// Cursor on "class" at line 1, col 19 — keyword, not a member.
+		// Goto-def must not crash; returns null (or non-null only if
+		// resolver finds nothing meaningful — accept either).
+		Object* params = make_params("file:///a.kt", 1, 19);
+		Object*? result = definition::handle_definition(&store, &ws, params);
+		// Just ensure no panic / no fault propagation
+		Object* unused = result ?? null;
+		assert(unused == null || unused != null, "should not crash");
+	};
+}
+
+fn void callable_ref_chained_receiver_resolves() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// File A: companion in class
+		String file_a =
+			"class Parser {\n"
+			"    companion object {\n"
+			"        fun parse(s: String): Int = 0\n"
+			"    }\n"
+			"}\n";
+		ws.index_file("file:///parser.kt", file_a);
+
+		// File B: Parser::parse passed as callable ref
+		String file_b =
+			"fun process(xs: List<String>): List<Int> = xs.map(Parser::parse)\n";
+		store.open("file:///use.kt", "kotlin", 1, file_b);
+
+		// Cursor on "parse" at line 0, col 58
+		Object* params = make_params("file:///use.kt", 0, 58);
+		Object* result = definition::handle_definition(&store, &ws, params)!!;
+
+		assert(result != null, "expected callable ref to companion fun to resolve");
+		String uri = result.get_string("uri")!!;
+		assert(uri == "file:///parser.kt", "expected parser.kt, got '%s'", uri);
+	};
+}

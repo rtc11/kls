@@ -3,6 +3,7 @@ module kls::test::document_highlight_test;
 import std::collections::object;
 import kls::document;
 import kls::lsp::document_highlight;
+import kls::workspace;
 
 // ── Helper: build params object ────────────────────────────────────
 
@@ -61,7 +62,7 @@ fn void highlight_function_occurrences() @test {
 
 		// Cursor on "greet" in the call at line 1, col 13
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		assert(result.get_len() == 2, "expected 2 highlights, got %d", (int)result.get_len());
@@ -88,7 +89,7 @@ fn void highlight_declaration_is_write() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		assert(result.get_len() == 2, "expected 2 highlights");
@@ -110,7 +111,7 @@ fn void highlight_usage_is_read() @test {
 		store.open("file:///test.kt", "kotlin", 1, content);
 
 		Object* params = make_params("file:///test.kt", 1, 13);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		assert(result.get_len() == 2, "expected 2 highlights");
@@ -133,7 +134,7 @@ fn void highlight_variable_declaration_and_usage() @test {
 
 		// Cursor on "x" at line 0, col 4 (declaration)
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		assert(result.get_len() == 2, "expected 2 highlights, got %d", (int)result.get_len());
@@ -162,7 +163,7 @@ fn void highlight_keyword_returns_null() @test {
 
 		// Cursor on "fun" keyword at col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result == null, "expected null for keyword");
 	};
@@ -180,7 +181,7 @@ fn void highlight_whitespace_returns_null() @test {
 
 		// Cursor on space at col 3
 		Object* params = make_params("file:///test.kt", 0, 3);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result == null, "expected null on whitespace");
 	};
@@ -195,7 +196,7 @@ fn void highlight_unknown_document() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///unknown.kt", 0, 0);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result == null, "expected null for unknown document");
 	};
@@ -214,7 +215,7 @@ fn void highlight_single_occurrence() @test {
 
 		// Cursor on "uniqueName" at col 4
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		assert(result.get_len() == 1, "expected 1 highlight, got %d", (int)result.get_len());
@@ -235,7 +236,7 @@ fn void highlight_range_covers_name() @test {
 
 		// Cursor on "MyWidget" at line 0, col 6
 		Object* params = make_params("file:///test.kt", 0, 6);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		// All highlights should have end_col = start_col + 8 ("MyWidget" length)
@@ -267,7 +268,7 @@ fun main() {
 
 		// Cursor on "doWork" at line 0, col 4
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		// 1 declaration + 3 calls = 4
@@ -307,7 +308,7 @@ fun main() {
 
 		// Cursor on "bar" at line 1, col 8 (declaration)
 		Object* params = make_params("file:///test.kt", 1, 8);
-		Object* result = document_highlight::handle_document_highlight(&store, params)!!;
+		Object* result = document_highlight::handle_document_highlight(&store, null, params)!!;
 
 		assert(result != null, "expected highlights array");
 		// "bar" appears: declaration (line 1), call in baz (line 2), call in main (line 6)
@@ -318,5 +319,38 @@ fun main() {
 		// Usages are Read
 		assert(get_kind(result, 1) == 2, "expected usage 1 to be Read(2)");
 		assert(get_kind(result, 2) == 2, "expected usage 2 to be Read(2)");
+	};
+}
+
+// ── Highlight via callable reference: Type::member ─────────────────
+
+fn void highlight_via_callable_ref_includes_decl_and_usage() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String content =
+			"class Header {\n"
+			"    companion object {\n"
+			"        fun fromString(s: String): Header = Header()\n"
+			"    }\n"
+			"}\n"
+			"fun useIt() = listOf(\"a\").map(Header::fromString)\n";
+		store.open("file:///header.kt", "kotlin", 1, content);
+		ws.index_file("file:///header.kt", content);
+
+		// Cursor on "fromString" inside Header::fromString at line 5, col 38
+		Object* params = make_params("file:///header.kt", 5, 38);
+		Object* result = document_highlight::handle_document_highlight(&store, &ws, params)!!;
+
+		assert(result != null, "expected highlights array");
+		usz count = result.get_len();
+		// Declaration (line 2) + callable-ref usage (line 5) → >= 2
+		assert(count >= 2, "expected >= 2 highlights, got %d", (int)count);
 	};
 }

@@ -855,11 +855,205 @@ faultdef NOT_DOT_MEMBER;
 fn bool is_token_dot_member(ParseResult* pr, Token tok) {
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
-		if (n.kind != DOT_EXPR) continue;
-		if (n.name != tok.text) continue;
-		if (n.name_line == tok.line && n.name_col == tok.col) return true;
+		if (n.kind == DOT_EXPR) {
+			if (n.name != tok.text) continue;
+			if (n.name_line == tok.line && n.name_col == tok.col) return true;
+			continue;
+		}
+		// `Type::member` callable reference is semantically a member access.
+		// Only when receiver is present (single child) and member name is
+		// not the `class` literal keyword (Type::class is a class literal,
+		// not a member reference).
+		if (n.kind == CALLABLE_REF_EXPR) {
+			if (n.name != tok.text) continue;
+			if (n.name_line != tok.line || n.name_col != tok.col) continue;
+			if (n.name == "class") continue;
+			if (!callable_ref_has_receiver(pr, i)) continue;
+			return true;
+		}
 	}
 	return false;
+}
+
+/**
+ * Check if a CALLABLE_REF_EXPR node has a receiver child.
+ * `Type::member` has a receiver; `::name` (bare callable ref) does not.
+ */
+fn bool callable_ref_has_receiver(ParseResult* pr, uint node_idx) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == node_idx) return true;
+	}
+	return false;
+}
+
+/**
+ * Check if a byte offset corresponds to the member name of a qualified
+ * callable reference (`Type::member` form, with receiver, member != "class").
+ * Used by references/rename/highlight to special-case callable-ref tokens
+ * that aren't covered by the scope-walk binding lookup.
+ */
+fn bool is_callable_ref_member_offset(ParseResult* pr, uint offset) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CALLABLE_REF_EXPR) continue;
+		if (n.name_offset != offset || n.name_len == 0) continue;
+		if (n.name == "class") continue;
+		if (!callable_ref_has_receiver(pr, i)) continue;
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Stable identity for a resolved token target. Used by references,
+ * rename, document_highlight, and linked_editing_range to compare two
+ * tokens' bindings without having to re-resolve every comparison.
+ *
+ *   - kind == NONE        → unresolved.
+ *   - kind == IN_FILE     → declaration is in `current_uri`. `name_offset`
+ *                           is either the byte offset of the decl
+ *                           identifier (when sourced via scope walk) or
+ *                           a packed (line<<16|col) value (when sourced
+ *                           via dot-member resolver which returns a
+ *                           Location, not an AstNode). Two TokenTargets
+ *                           compare equal only when both came from the
+ *                           same source — for the same token under
+ *                           re-resolution this holds.
+ *   - kind == CROSS_FILE  → declaration is in `uri` (foreign file).
+ *                           `name_offset == uint.max` (URI alone is the key).
+ */
+enum TargetKind { NONE, IN_FILE, CROSS_FILE }
+
+struct TokenTarget {
+	TargetKind kind;
+	String uri;
+	uint name_offset;
+}
+
+const TokenTarget NO_TARGET = { .kind = TargetKind.NONE, .uri = "", .name_offset = uint.max };
+
+/**
+ * Pack (line, col) into a single uint for in-file targets sourced from
+ * a Location object. High 16 bits = line, low 16 bits = col.
+ */
+fn uint encode_line_col(uint line, uint col) {
+	uint l = line > 0xFFFF ? 0xFFFF : line;
+	uint c = col > 0xFFFF ? 0xFFFF : col;
+	return (l << 16) | c;
+}
+
+/**
+ * Decode a Location JSON object into a TokenTarget relative to current_uri.
+ * Returns NO_TARGET when the Location is malformed.
+ */
+fn TokenTarget decode_location_target(Object* loc, String current_uri) {
+	if (loc == null) return NO_TARGET;
+	String result_uri;
+	if (try u = loc.get_string("uri")) {
+		result_uri = u;
+	} else {
+		return NO_TARGET;
+	}
+
+	if (result_uri != current_uri) {
+		return (TokenTarget){ .kind = TargetKind.CROSS_FILE, .uri = result_uri, .name_offset = uint.max };
+	}
+
+	uint line = uint.max;
+	uint character = uint.max;
+	if (try range = loc.get("range")) {
+		if (try start = range.get("start")) {
+			if (try l = start.get_int("line")) line = (uint)l;
+			if (try c = start.get_int("character")) character = (uint)c;
+		}
+	}
+	if (line == uint.max) return NO_TARGET;
+
+	return (TokenTarget){
+		.kind = TargetKind.IN_FILE,
+		.uri = result_uri,
+		.name_offset = encode_line_col(line, character),
+	};
+}
+
+/**
+ * Resolve the token at `offset` (in the current file) to a stable
+ * TokenTarget identity. Routing:
+ *
+ *   1. Token is the member of `Type::member` (qualified callable ref) →
+ *      dot-member resolver, decode resulting Location.
+ *   2. Token is the member of `recv.member` (DOT_EXPR) → same.
+ *   3. Bare identifier → in-file scope walk via
+ *      `find_declaration_in_file`. (Cross-file bare names handled by
+ *      callers' name-based fallback scan.)
+ *
+ * Returns NO_TARGET when nothing resolves.
+ */
+fn TokenTarget resolve_token_binding(ParseResult* pr, TypeInfo* ti,
+		WorkspaceIndex* workspace, DocumentStore* store,
+		String current_uri, String name, uint offset, bool is_call) {
+	bool is_dot = false;
+	for (uint i = 0; i < pr.node_count && !is_dot; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != DOT_EXPR) continue;
+		if (n.name_offset != offset || n.name_len == 0) continue;
+		is_dot = true;
+	}
+	bool is_cref = is_callable_ref_member_offset(pr, offset);
+
+	if ((is_dot || is_cref) && ti != null && workspace != null) {
+		// Manufacture a Token at the AST name position. Dot-member
+		// resolver matches by tok.text + tok.line + tok.col.
+		Token synthetic_tok;
+		bool synthetic_set = false;
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.name_offset == offset && n.name_len > 0 && n.name == name) {
+				synthetic_tok.kind = IDENTIFIER;
+				synthetic_tok.text = name;
+				synthetic_tok.offset = offset;
+				synthetic_tok.len = n.name_len;
+				synthetic_tok.line = n.name_line;
+				synthetic_tok.col = n.name_col;
+				synthetic_set = true;
+				break;
+			}
+		}
+		if (synthetic_set) {
+			Object* loc = find_dot_member_definition(pr, ti, store, workspace,
+				synthetic_tok, current_uri) ?? null;
+			if (loc != null) {
+				TokenTarget t = decode_location_target(loc, current_uri);
+				if (t.kind != TargetKind.NONE) return t;
+			}
+		}
+	}
+
+	// Fall back to scope-walk + global fallback (in-file only).
+	if (try node = find_declaration_in_file(pr, name, offset, is_call, ti)) {
+		return (TokenTarget){
+			.kind = TargetKind.IN_FILE,
+			.uri = current_uri,
+			.name_offset = node.name_offset,
+		};
+	}
+	return NO_TARGET;
+}
+
+/**
+ * Convenience: check whether the candidate token at `cand_offset` binds
+ * to the same target as `target`. Single-call wrapper around
+ * resolve_token_binding for per-token loops in references/rename/highlight.
+ */
+fn bool token_binds_to_target(TokenTarget target, ParseResult* pr, TypeInfo* ti,
+		WorkspaceIndex* workspace, DocumentStore* store, String current_uri,
+		String name, uint cand_offset, bool is_call) {
+	if (target.kind == TargetKind.NONE) return false;
+	TokenTarget cand = resolve_token_binding(pr, ti, workspace, store,
+		current_uri, name, cand_offset, is_call);
+	if (cand.kind != target.kind) return false;
+	if (cand.uri != target.uri) return false;
+	return cand.name_offset == target.name_offset;
 }
 
 /**
@@ -868,11 +1062,19 @@ fn bool is_token_dot_member(ParseResult* pr, Token tok) {
  */
 fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentStore* store,
 		WorkspaceIndex* workspace, Token tok, String current_uri) {
-	// Find the DOT_EXPR that has this token as its member name
+	// Find the DOT_EXPR (or qualified CALLABLE_REF_EXPR `Type::member`)
+	// that has this token as its member name. CALLABLE_REF_EXPR shares
+	// the same receiver-resolution semantics as DOT_EXPR for navigation.
 	uint dot_count = 0;
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
-		if (n.kind != DOT_EXPR) continue;
+		if (n.kind != DOT_EXPR && n.kind != CALLABLE_REF_EXPR) continue;
+		if (n.kind == CALLABLE_REF_EXPR) {
+			// Skip `Type::class` (class literal, not member access)
+			// and bare `::name` (no receiver).
+			if (n.name == "class") continue;
+			if (!callable_ref_has_receiver(pr, i)) continue;
+		}
 		dot_count++;
 		if (n.name != tok.text) continue;
 		if (n.name_line != tok.line || n.name_col != tok.col) continue;
@@ -944,7 +1146,39 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 		}
 
 		if (receiver_type.kind == UNKNOWN) {
-			// Fallback: check if receiver is a known JDK/dependency class
+			// Workspace class-ref fallback: receiver is a NAME_EXPR matching a
+			// workspace class/interface/object. Used by `Type::member` callable
+			// references and any `ClassName.staticMember` access where TypeInfo
+			// didn't populate the receiver's type (e.g., g_workspace was null
+			// during type resolution).
+			if (workspace != null) {
+				String recv_name = "";
+				for (uint j = 0; j < pr.node_count; j++) {
+					if (pr.nodes[j].parent == dot_idx && pr.nodes[j].kind == NAME_EXPR) {
+						recv_name = pr.nodes[j].name;
+						break;
+					}
+				}
+				if (recv_name.len > 0) {
+					if (try indices = workspace.lookup_by_name(recv_name)) {
+						for (usz idx = 0; idx < indices.len(); idx++) {
+							WorkspaceSymbol* sym = workspace.get_symbol((*indices)[idx]);
+							if (sym.kind == symbols::SymbolKind.CLASS ||
+								sym.kind == symbols::SymbolKind.INTERFACE ||
+								sym.kind == symbols::SymbolKind.OBJECT) {
+								receiver_type.kind = SIMPLE;
+								receiver_type.name = sym.name;
+								receiver_type.is_class_ref = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if (receiver_type.kind == UNKNOWN) {
+			// Fallback: check if receiver is a known JDK/dependency class.
 			// This handles cases like System.nanoTime() where System is a
 			// java.lang class not declared in any Kotlin source file.
 			if (workspace != null && workspace.dep_index.initialized) {

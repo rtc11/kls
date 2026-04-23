@@ -29,7 +29,7 @@ fn void linked_editing_unknown_doc_returns_null() @test {
 		defer store.free();
 
 		Object* params = make_params("file:///nonexistent.kt", 0, 0);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 		assert(result == null, "expected null for unknown document");
 	};
 }
@@ -45,7 +45,7 @@ fn void linked_editing_keyword_returns_null() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 		// Cursor on "fun" at col 0
 		Object* params = make_params("file:///test.kt", 0, 0);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 		assert(result == null, "expected null for keyword");
 	};
 }
@@ -61,7 +61,7 @@ fn void linked_editing_single_occurrence() @test {
 		store.open("file:///test.kt", "kotlin", 1, "fun greet() {}");
 		// Cursor on "greet" at col 4
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 
 		assert(result != null, "expected a result");
 		Object* ranges = result.get("ranges")!!;
@@ -82,7 +82,7 @@ fn void linked_editing_multiple_same_scope() @test {
 
 		// Cursor on first "x" at line 1, col 8
 		Object* params = make_params("file:///test.kt", 1, 8);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 
 		assert(result != null, "expected a result");
 		Object* ranges = result.get("ranges")!!;
@@ -104,7 +104,7 @@ fn void linked_editing_cross_scope_isolation() @test {
 
 		// Cursor on "x" in foo() at line 1, col 8
 		Object* params = make_params("file:///test.kt", 1, 8);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 
 		assert(result != null, "expected a result");
 		Object* ranges = result.get("ranges")!!;
@@ -123,7 +123,7 @@ fn void linked_editing_has_word_pattern() @test {
 
 		store.open("file:///test.kt", "kotlin", 1, "val x = 1");
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 
 		assert(result != null, "expected a result");
 		String pattern = result.get_string("wordPattern")!!;
@@ -144,7 +144,7 @@ fn void linked_editing_top_level() @test {
 
 		// Cursor on "x" at line 0, col 4
 		Object* params = make_params("file:///test.kt", 0, 4);
-		Object* result = linked_editing_range::handle_linked_editing_range(&store, params)!!;
+		Object* result = linked_editing_range::handle_linked_editing_range(&store, null, params)!!;
 
 		assert(result != null, "expected a result");
 		Object* ranges = result.get("ranges")!!;
