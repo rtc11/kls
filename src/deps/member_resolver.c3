@@ -288,3 +288,71 @@ fn usz find_dep_class_members(
 
 	return count;
 }
+
+/**
+ * Enumerate all accessible members of a dep class for completion.
+ *
+ * Unlike `find_dep_class_members` (lookup by member name), this returns
+ * every method/field declared on `class_name`, then walks one level of
+ * supertypes for inherited members. Static/instance filter applied via
+ * `is_member_accessible(receiver_is_class_ref)`.
+ *
+ * Backed by `dep_index.lookup_members_by_class` (O(class members), not
+ * O(all symbols)).
+ *
+ * Returns count of pointers written to `out`. May contain duplicates by
+ * name if a subclass overrides a supertype member — caller dedups.
+ */
+fn usz find_dep_class_all_members(
+		DependencyIndex* dep_index,
+		String class_name,
+		bool receiver_is_class_ref,
+		DepSymbol*[] out) {
+
+	if (dep_index == null || !dep_index.initialized) return 0;
+	if (out.len == 0 || class_name.len == 0) return 0;
+
+	usz count = 0;
+
+	// Direct members
+	DepSymbol*[256] direct;
+	usz direct_count = dep_index.lookup_members_by_class(class_name, &direct);
+	for (usz i = 0; i < direct_count && count < out.len; i++) {
+		DepSymbol* sym = direct[i];
+		if (!is_member_accessible(sym, receiver_is_class_ref)) continue;
+		out[count] = sym;
+		count++;
+	}
+
+	// Supertype walk for inherited members.
+	// Look up class symbol to get supertype list.
+	DepSymbol*[16] class_matches;
+	usz class_count = dep_index.lookup_by_name(class_name, &class_matches);
+	DepSymbol* class_sym = null;
+	for (usz i = 0; i < class_count; i++) {
+		DepSymbol* s = class_matches[i];
+		if (s.kind == DEP_CLASS || s.kind == DEP_INTERFACE ||
+			s.kind == DEP_ENUM || s.kind == DEP_OBJECT) {
+			class_sym = s;
+			break;
+		}
+	}
+
+	if (class_sym != null) {
+		for (usz s = 0; s < class_sym.supertype_count && count < out.len; s++) {
+			String super_name = class_sym.supertypes[s];
+			if (super_name.len == 0) continue;
+
+			DepSymbol*[256] inherited;
+			usz inh_count = dep_index.lookup_members_by_class(super_name, &inherited);
+			for (usz i = 0; i < inh_count && count < out.len; i++) {
+				DepSymbol* sym = inherited[i];
+				if (!is_member_accessible(sym, receiver_is_class_ref)) continue;
+				out[count] = sym;
+				count++;
+			}
+		}
+	}
+
+	return count;
+}

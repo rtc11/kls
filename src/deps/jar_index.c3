@@ -47,7 +47,8 @@ struct DependencyIndex {
 	List{DepSymbol} symbols;
 	HashMap{String, List{usz}} name_index;   // name -> symbol indices
 	HashMap{String, List{usz}} super_index;  // supertype name -> symbol indices that extend/implement it
-	Mutex index_mutex;                        // guards symbols/name_index/super_index during parallel indexing
+	HashMap{String, List{usz}} class_index;  // declaring class name -> METHOD/FIELD symbol indices
+	Mutex index_mutex;                        // guards symbols/name_index/super_index/class_index during parallel indexing
 	bool initialized;
 	bool limit_warned;                        // #15: only warn once about symbol limit
 }
@@ -56,6 +57,7 @@ fn void DependencyIndex.init(DependencyIndex* self) {
 	self.symbols.init(mem);
 	self.name_index.init(mem);
 	self.super_index.init(mem);
+	self.class_index.init(mem);
 	if (catch excuse = self.index_mutex.init()) {
 		log::err("[kls] Failed to init dep index mutex: %s", excuse);
 		return;
@@ -118,6 +120,14 @@ fn void DependencyIndex.free(DependencyIndex* self) {
 		}
 	};
 	self.super_index.free();
+
+	// Free class_index lists
+	@pool() {
+		foreach (&list : self.class_index.tvalues()) {
+			list.free();
+		}
+	};
+	self.class_index.free();
 
 	self.index_mutex.destroy();
 	self.initialized = false;
@@ -651,6 +661,19 @@ fn void add_dep_symbol(DependencyIndex* idx, String name, String signature,
 			idx.super_index.set(sym.supertypes[i], new_list);
 		}
 	}
+
+	// Update class_index: map declaring class -> METHOD/FIELD indices.
+	// Used by completion's add_dep_class_member_completions for fast class -> members lookup.
+	if ((kind == DEP_METHOD || kind == DEP_FIELD) && class_name.len > 0) {
+		if (try list_ref = idx.class_index.get_ref(class_name)) {
+			list_ref.push(sym_idx);
+		} else {
+			List{usz} new_list;
+			new_list.init(mem);
+			new_list.push(sym_idx);
+			idx.class_index.set(sym.class_name, new_list);
+		}
+	}
 }
 
 // ── Lookup functions ───────────────────────────────────────────────
@@ -714,6 +737,18 @@ fn void DependencyIndex.copy_symbols_from_jar(DependencyIndex* self, DependencyI
 				new_list.init(mem);
 				new_list.push(sym_idx);
 				self.super_index.set(sym.supertypes[s], new_list);
+			}
+		}
+
+		// Update class_index for METHOD/FIELD
+		if ((sym.kind == DEP_METHOD || sym.kind == DEP_FIELD) && sym.class_name.len > 0) {
+			if (try list_ref = self.class_index.get_ref(src.class_name)) {
+				list_ref.push(sym_idx);
+			} else {
+				List{usz} new_list;
+				new_list.init(mem);
+				new_list.push(sym_idx);
+				self.class_index.set(sym.class_name, new_list);
 			}
 		}
 	}
@@ -781,6 +816,30 @@ fn usz DependencyIndex.lookup_by_supertype(DependencyIndex* self, String superty
 	if (out_buf.len == 0 || supertype_name.len == 0) return 0;
 
 	if (try indices = self.super_index.get_ref(supertype_name)) {
+		usz count = 0;
+		for (usz i = 0; i < indices.len() && count < out_buf.len; i++) {
+			usz idx = indices.get(i);
+			if (idx < self.symbols.len()) {
+				out_buf[count] = &self.symbols[idx];
+				count++;
+			}
+		}
+		return count;
+	}
+	return 0;
+}
+
+/**
+ * Look up all METHOD/FIELD symbols whose declaring class equals the given name.
+ * Used by completion's dot-member dep path. Backed by class_index, populated
+ * incrementally in add_dep_symbol/copy_symbols_from_jar.
+ *
+ * Writes matching pointers into out_buf and returns the count.
+ */
+fn usz DependencyIndex.lookup_members_by_class(DependencyIndex* self, String class_name, DepSymbol*[] out_buf) {
+	if (out_buf.len == 0 || class_name.len == 0) return 0;
+
+	if (try indices = self.class_index.get_ref(class_name)) {
 		usz count = 0;
 		for (usz i = 0; i < indices.len() && count < out_buf.len; i++) {
 			usz idx = indices.get(i);

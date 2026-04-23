@@ -396,14 +396,14 @@ Two AST lookup helpers:
 DONE (Phase 0–2 of Tier-3 refactor):
 - `DepSymbol.is_static` (`src/deps/jar_index.c3`) — set from `ACC_STATIC` for Java methods/fields and Kotlin companion members.
 - `TypeRef.is_class_ref` (`src/kotlin/types.c3`) — set in `resolve_name_expr_type` (workspace branch) and `resolve_dep_name_by_import` (3 dep-import branches) for class/interface/object/companion references.
-- `is_member_accessible(sym, receiver_is_class_ref)` (`src/lsp/definition.c3:1316`) — class-ref receivers see only static members; instance receivers see all (strict instance-mode is future work).
-- Wired in `find_dep_member_definition` (definition) and `describe_dep_member` (hover) including the supertype walk and UNKNOWN-receiver fallback. Tests in `test/cross_file_hover_test.c3` cover static-on-class-ref shows, instance-on-class-ref hidden, static-on-instance allowed.
+- `is_member_accessible(sym, receiver_is_class_ref)` (`src/deps/member_resolver.c3`) — class-ref receivers see only static members; instance receivers see all (strict instance-mode is future work).
+- Wired in `find_dep_member_definition` (definition), `describe_dep_member` (hover) and `add_dep_class_member_completions` (completion) including the supertype walk and UNKNOWN-receiver fallback. Tests in `test/cross_file_hover_test.c3` and `test/cross_file_completion_test.c3` cover static-on-class-ref shows, instance-on-class-ref hidden, static-on-instance allowed, inherited members via supertype.
+- `DependencyIndex.class_index` (`src/deps/jar_index.c3`) — class_name → METHOD/FIELD indices; backs `lookup_members_by_class` for O(class members) completion lookup.
 
 NOT DONE (deferred):
 1. **`@JvmStatic` on Kotlin members** — would let Kotlin companion methods marked `@JvmStatic` resolve as Java statics on the outer class.
 2. **Strict instance mode** — currently `is_member_accessible` only filters when receiver is class-ref. Strict mode would also hide statics on instance receivers.
-3. **Completion dot-member dep path** — `add_dot_completions` (`src/lsp/completion.c3`) does not currently surface dep-class members at all (only stdlib + workspace + hardcoded type tables). When added, must wire `is_member_accessible`.
-4. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
+3. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
 
 ## Key References
 

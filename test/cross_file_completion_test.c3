@@ -4,6 +4,7 @@ import std::collections::object;
 import kls::document;
 import kls::lsp::completion;
 import kls::workspace;
+import kls::deps::jar_index;
 
 // ── Helper: build params object ────────────────────────────────────
 
@@ -847,5 +848,193 @@ fn void cross_file_completion_multiple_files() @test {
 		}
 		assert(found_data_utils, "expected 'dataUtils' from file a.kt");
 		assert(found_data_processor || found_data_path, "expected symbols from multiple workspace files");
+	};
+}
+
+// ── Dep-class member dot-completion ────────────────────────────────
+
+fn void dot_completion_dep_class_static_member_via_class_ref() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Index UUID class + static factory randomUUID
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"randomUUID", "fun randomUUID(): UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0, false, true);
+
+		store.workspace = &ws;
+
+		String content = "import java.util.UUID\nfun main() {\n    UUID.\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor right after "UUID." on line 2, col 9
+		Object* params = make_params("file:///test.kt", 2, 9);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "randomUUID") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected 'randomUUID' as static member completion on UUID class-ref");
+	};
+}
+
+fn void dot_completion_dep_class_instance_member() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// ArrayList class + instance method add (instance => is_static=false)
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"ArrayList", "class ArrayList", "java.util", "ArrayList", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"add", "fun add(E): Boolean", "java.util", "ArrayList", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0, false, false);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"size", "val size: Int", "java.util", "ArrayList", "/fake/java.base.jmod",
+			DEP_FIELD, null, 0, false, false);
+
+		store.workspace = &ws;
+
+		String content = "import java.util.ArrayList\nfun main() {\n    val xs: ArrayList = ArrayList()\n    xs.\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Cursor right after "xs." on line 3, col 7
+		Object* params = make_params("file:///test.kt", 3, 7);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_add = false;
+		bool found_size = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "add") found_add = true;
+			if (label == "size") found_size = true;
+		}
+		assert(found_add, "expected 'add' as instance member completion on ArrayList instance");
+		assert(found_size, "expected 'size' as instance field completion on ArrayList instance");
+	};
+}
+
+fn void dot_completion_dep_class_static_hidden_on_instance_in_strict_mode_NA() @test {
+	// Documentation test: strict instance mode is NOT yet implemented.
+	// is_member_accessible currently allows statics on instance receivers
+	// (only filters when receiver is class-ref). So `instance.STATIC_MEMBER`
+	// will surface in completion until strict mode lands. This test
+	// codifies current behaviour.
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"UUID", "class UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"randomUUID", "fun randomUUID(): UUID", "java.util", "UUID", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0, false, true);
+
+		store.workspace = &ws;
+
+		String content = "import java.util.UUID\nfun main() {\n    val u: UUID = UUID.randomUUID()\n    u.\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 3, 6);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		// Currently allowed (no strict instance filter); when strict mode lands,
+		// flip the assertion.
+		bool found = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "randomUUID") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "current behaviour: static surfaces on instance receiver (strict instance mode pending)");
+	};
+}
+
+fn void dot_completion_dep_class_inherited_member_via_supertype() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Subclass with one supertype "AbstractList"
+		String[jar_index::MAX_DEP_SUPERTYPES] supers;
+		supers[0] = "AbstractList";
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"ArrayList", "class ArrayList", "java.util", "ArrayList", "/fake/java.base.jmod",
+			DEP_CLASS, &supers, 1);
+
+		// Supertype with an inherited method
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"AbstractList", "class AbstractList", "java.util", "AbstractList", "/fake/java.base.jmod",
+			DEP_CLASS, null, 0);
+		jar_index::add_dep_symbol(&ws.dep_index,
+			"clear", "fun clear(): Unit", "java.util", "AbstractList", "/fake/java.base.jmod",
+			DEP_METHOD, null, 0, false, false);
+
+		store.workspace = &ws;
+
+		String content = "import java.util.ArrayList\nfun main() {\n    val xs: ArrayList = ArrayList()\n    xs.\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 3, 7);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_clear = false;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "clear") {
+				found_clear = true;
+				break;
+			}
+		}
+		assert(found_clear, "expected 'clear' inherited from AbstractList supertype");
 	};
 }

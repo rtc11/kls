@@ -15,6 +15,7 @@ import kls::kotlin::parser;
 import kls::kotlin::types;
 import kls::workspace;
 import kls::deps::jar_index;
+import kls::deps::member_resolver;
 
 // LSP CompletionItemKind constants
 const int COMPLETION_KIND_METHOD = 2;
@@ -937,8 +938,90 @@ fn void add_dot_completions(Object* items, DocumentStore* store, WorkspaceIndex*
 		add_workspace_class_members(items, workspace, store, &receiver_type, prefix);
 	}
 
+	// Look up members from dep JARs (Java/Kotlin classes from classpath).
+	// Runs after workspace so user-defined types win on dedup.
+	if (workspace != null && workspace.dep_index.initialized) {
+		add_dep_class_member_completions(items, &workspace.dep_index, &receiver_type, prefix);
+	}
+
 	// Also add receiver-specific stdlib completions
 	add_stdlib_receiver_completions(items, &receiver_type, prefix);
+}
+
+/**
+ * Surface dep-class members (Java/Kotlin from JARs) as completions for
+ * `receiver.` expressions. Uses the class_index for O(class members)
+ * lookup, walks one level of supertypes for inherited members, applies
+ * static-vs-instance filter via TypeRef.is_class_ref.
+ *
+ * Dedup against existing items by label (workspace + stdlib already added).
+ */
+fn void add_dep_class_member_completions(Object* items, DependencyIndex* dep_index,
+		TypeRef* receiver_type, String prefix) {
+	String type_name = receiver_type.name;
+	if (type_name.len == 0) return;
+
+	DepSymbol*[256] members;
+	usz count = member_resolver::find_dep_class_all_members(
+		dep_index, type_name, receiver_type.is_class_ref, &members);
+	if (count == 0) return;
+
+	// Collect existing labels for dedup
+	String[256] seen_buf;
+	usz seen_count = 0;
+	for (usz i = 0; i < items.get_len() && seen_count < 256; i++) {
+		Object* item = items.get_at(i);
+		if (try label = item.get_string("label")) {
+			seen_buf[seen_count] = label;
+			seen_count++;
+		}
+	}
+
+	for (usz i = 0; i < count; i++) {
+		DepSymbol* sym = members[i];
+
+		// Filter by prefix
+		if (prefix.len > 0 && !sym.name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && sym.name == prefix) continue;
+
+		// Dedup against existing items + within this batch
+		bool already_seen = false;
+		for (usz j = 0; j < seen_count; j++) {
+			if (seen_buf[j] == sym.name) {
+				already_seen = true;
+				break;
+			}
+		}
+		if (already_seen) continue;
+		if (seen_count < 256) {
+			seen_buf[seen_count] = sym.name;
+			seen_count++;
+		}
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", sym.name);
+		item.set("kind", jar_index::dep_kind_to_completion_kind(sym.kind));
+		// Detail: signature if available, else "package.Class"
+		if (sym.signature.len > 0) {
+			item.set("detail", sym.signature);
+		} else if (sym.class_name.len > 0 && sym.package_name.len > 0) {
+			DString detail;
+			detail.tinit();
+			detail.appendf("%s.%s", sym.package_name, sym.class_name);
+			item.set("detail", detail.str_view());
+		} else if (sym.package_name.len > 0) {
+			item.set("detail", sym.package_name);
+		}
+
+		// Data for lazy resolve via existing dep doc path
+		Object* data = object::new_obj(tmem);
+		data.set("source", "dep");
+		data.set("name", sym.name);
+		data.set("package", sym.package_name);
+		item.set("data", data);
+
+		items.push(item);
+	}
 }
 
 /**
