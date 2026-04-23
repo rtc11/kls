@@ -450,6 +450,9 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 
 	ds.appendf("```kotlin\n");
 
+	// Java-interop annotations (cosmetic; documents JVM bytecode shape).
+	append_jvm_annotations(&ds, node);
+
 	// Modifiers
 	append_modifiers(&ds, node.mod_flags);
 
@@ -663,6 +666,22 @@ fn bool append_where_clause(DString* ds, ParseResult* pr, AstNode* node) {
 /**
  * Append modifier keywords to a DString based on mod_flags.
  */
+/**
+ * Emit Java-interop annotations on a declaration as their `@Name` form,
+ * one per line, before the modifier line. Cosmetic only; documents the
+ * JVM bytecode shape (e.g. `@JvmStatic` companion methods are emitted
+ * as static methods on the outer class). Resolution semantics unaffected.
+ *
+ * Whitelisted: JvmStatic, JvmField, JvmOverloads, JvmName.
+ */
+fn void append_jvm_annotations(DString* ds, AstNode* node) {
+	if (node.annotation_text.len == 0) return;
+	if (node.has_annotation("JvmStatic"))    ds.appendf("@JvmStatic\n");
+	if (node.has_annotation("JvmField"))     ds.appendf("@JvmField\n");
+	if (node.has_annotation("JvmOverloads")) ds.appendf("@JvmOverloads\n");
+	if (node.has_annotation("JvmName"))      ds.appendf("@JvmName\n");
+}
+
 fn void append_modifiers(DString* ds, uint flags) {
 	if (flags & ast::MOD_PUBLIC != 0)      ds.appendf("public ");
 	if (flags & ast::MOD_PRIVATE != 0)     ds.appendf("private ");

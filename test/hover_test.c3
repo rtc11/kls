@@ -740,3 +740,75 @@ fn void hover_dot_member_skips_top_level_stdlib() @test {
 		}
 	};
 }
+
+// ── @JvmStatic / Java-interop annotation display ───────────────────
+
+fn void hover_jvmstatic_annotation_displayed() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String src = `class Foo {
+    companion object {
+        @JvmStatic
+        fun bar(): Int = 42
+    }
+}`;
+		store.open("file:///test.kt", "kotlin", 1, src);
+		// Line 3: "        fun bar(): Int = 42", col 12 = 'b' of bar
+		Object* params = make_hover_params("file:///test.kt", 3, 12);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("@JvmStatic"),
+			"expected '@JvmStatic' in hover signature, got: '%s'", value);
+		assert(value.contains("fun bar"),
+			"expected 'fun bar' in hover signature, got: '%s'", value);
+	};
+}
+
+fn void hover_no_annotation_no_jvmstatic_marker() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String src = "class Foo {\n    fun bar(): Int = 42\n}";
+		store.open("file:///test.kt", "kotlin", 1, src);
+		// Line 1: "    fun bar(): Int = 42", col 8 = 'b'
+		Object* params = make_hover_params("file:///test.kt", 1, 8);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(!value.contains("@JvmStatic"),
+			"unannotated function should not show @JvmStatic, got: '%s'", value);
+	};
+}
+
+fn void hover_jvmoverloads_annotation_displayed() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String src = `class Foo {
+    @JvmOverloads
+    fun greet(name: String = "world"): String = "hi $name"
+}`;
+		store.open("file:///test.kt", "kotlin", 1, src);
+		// Line 2: "    fun greet(name: String...", col 8 = 'g'
+		Object* params = make_hover_params("file:///test.kt", 2, 8);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+
+		assert(result != null, "expected hover result");
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("@JvmOverloads"),
+			"expected '@JvmOverloads' in hover signature, got: '%s'", value);
+	};
+}

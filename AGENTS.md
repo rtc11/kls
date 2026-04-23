@@ -401,7 +401,7 @@ DONE (Phase 0–2 of Tier-3 refactor):
 - `DependencyIndex.class_index` (`src/deps/jar_index.c3`) — class_name → METHOD/FIELD indices; backs `lookup_members_by_class` for O(class members) completion lookup.
 
 NOT DONE (deferred):
-1. **`@JvmStatic` on Kotlin members** — would let Kotlin companion methods marked `@JvmStatic` resolve as Java statics on the outer class.
+1. **`@JvmStatic` / Java-interop semantic effect** — currently displayed cosmetically in `build_signature` (`@JvmStatic`/`@JvmField`/`@JvmOverloads`/`@JvmName` shown in hover). No resolution semantics: workspace already exposes companion members via `from_companion`, deps already get the synthetic static method from kotlinc-emitted bytecode. KLS does not serve Java callers, so no further effect needed.
 2. **Strict instance mode** — currently `is_member_accessible` only filters when receiver is class-ref. Strict mode would also hide statics on instance receivers.
 3. **Built-in type-table filtering** — `types::lookup_members` returns Any-derived methods like `toString` regardless of receiver. Hover on `UUID.toString` (class-ref) still shows the inherited `Any::toString` because that path bypasses dep filter.
 
