@@ -2037,10 +2037,12 @@ fn void Parser.parse_if_expr(Parser* self) {
 			self.result.error_count = save_error_count;
 
 			self.allow_angle_comparison = true;
-			self.advance(); // consume '('
-			if (!self.at(RPAREN) && !self.at_eof()) {
-				self.parse_expression(0);
-			}
+		self.advance(); // consume '('
+		if (!self.at(RPAREN) && !self.at_eof()) {
+			self.allow_angle_comparison = true;
+			self.parse_expression(0);
+			self.allow_angle_comparison = false;
+		}
 			self.allow_angle_comparison = false;
 
 			if (self.at(RPAREN)) {

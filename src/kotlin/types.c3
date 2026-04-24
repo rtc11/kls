@@ -3,6 +3,8 @@ module kls::kotlin::types;
 import kls::kotlin::ast;
 import kls::kotlin::token;
 import kls::kotlin::lexer;
+import kls::kotlin::cfg;
+import kls::kotlin::flow;
 import std::core::string;
 import kls::workspace;
 import kls::kotlin::symbols;
@@ -108,9 +110,25 @@ const TypeRef TYPE_NOTHING_NULLABLE = { .kind = SIMPLE, .name = "Nothing", .null
 
 // ── Per-file type info cache ───────────────────────────────────────
 
+const usz MAX_FUNCTIONS_PER_FILE = 512;
+
+struct FunctionFlow {
+	uint func_ast_idx;
+	cfg::Cfg* cfg;
+	flow::FlowAnalysis* fa;
+}
+
 struct TypeInfo {
 	TypeRef[ast::MAX_NODES] node_types;  // parallel to ParseResult.nodes
 	bool[ast::MAX_NODES] has_type;       // whether node_types[i] is populated
+
+	// Per-function flow analysis. enclosing_func[i] = AST idx of function
+	// containing node i (NO_PARENT for top-level). func_flow_idx[func] =
+	// index into func_flows array (or uint.max).
+	uint[ast::MAX_NODES] enclosing_func;
+	FunctionFlow[MAX_FUNCTIONS_PER_FILE] func_flows;
+	uint func_flow_count;
+	uint[ast::MAX_NODES] func_flow_lookup; // ast func idx -> func_flows index
 }
 
 // ── Type text parser ───────────────────────────────────────────────
@@ -513,6 +531,8 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	for (uint i = 0; i < pr.node_count; i++) {
 		info.has_type[i] = false;
 	}
+	// Clear flow caches
+	clear_flow(info);
 
 	// Phase 1: Resolve explicit type annotations on declarations
 	resolve_declaration_types(pr, info);
@@ -545,6 +565,152 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	// val (a, b) = pair -> a: Pair.component1, b: Pair.component2
 	// for ((k, v) in map) -> k: Map.Entry.component1, v: Map.Entry.component2
 	resolve_destructuring_types(pr, info);
+
+	// Phase 9: Build CFG + run flow analysis per function for smart casts.
+	// Done after type resolution so subsequent phases (re-runs) see flow
+	// facts via resolve_name_expr_type, which queries info.func_flows.
+	build_function_flows(pr, info);
+
+	// Phase 10: Final expression pass — now with smart-cast facts available.
+	// Clear cached types on NAME_EXPR / DOT_EXPR nodes so flow facts can
+	// override the originally-resolved types. Then propagate to initializers.
+	for (uint i = 0; i < pr.node_count; i++) {
+		NodeKind k = pr.nodes[i].kind;
+		if (k == NAME_EXPR || k == DOT_EXPR) {
+			info.has_type[i] = false;
+		}
+	}
+	resolve_expression_types(pr, info);
+	// Re-run initializer pass: declarations whose initializer is a smart-cast
+	// reference should pick up the narrowed type.
+	for (uint i = 0; i < pr.node_count; i++) {
+		NodeKind k = pr.nodes[i].kind;
+		if (k == PROPERTY_DECL && pr.nodes[i].type_text.len == 0) {
+			// Skip destructured component decls — their type comes from the
+			// destructuring parent, not an initializer.
+			uint parent = pr.nodes[i].parent;
+			if (parent != ast::NO_PARENT && parent < pr.node_count
+				&& pr.nodes[parent].kind == PROPERTY_DECL
+				&& pr.nodes[parent].name == "(destructuring)") continue;
+			info.has_type[i] = false;
+		}
+	}
+	resolve_initializer_types(pr, info);
+	// Re-apply destructuring component types after the initializer pass
+	// (in case re-resolved initializers changed the destructured value's type).
+	resolve_destructuring_types(pr, info);
+}
+
+// ── Flow analysis bookkeeping ─────────────────────────────────────
+
+fn void clear_flow(TypeInfo* info) {
+	for (uint i = 0; i < info.func_flow_count; i++) {
+		FunctionFlow* ff = &info.func_flows[i];
+		if (ff.cfg != null) {
+			ff.cfg.free();
+		}
+		if (ff.fa != null) {
+			ff.fa.free();
+		}
+		ff.cfg = null;
+		ff.fa = null;
+	}
+	info.func_flow_count = 0;
+	for (uint i = 0; i < ast::MAX_NODES; i++) {
+		info.enclosing_func[i] = ast::NO_PARENT;
+		info.func_flow_lookup[i] = uint.max;
+	}
+}
+
+/**
+ * Release heap allocations owned by TypeInfo (CFG + FlowAnalysis per function).
+ * Caller still owns the TypeInfo struct itself.
+ */
+fn void free_type_info(TypeInfo* info) {
+	if (info == null) return;
+	clear_flow(info);
+}
+
+/**
+ * Build a CFG + run flow analysis for every function-like declaration in
+ * the file. Records enclosing-function map for each AST node so callers
+ * (resolve_name_expr_type) can locate the analysis quickly.
+ */
+fn void build_function_flows(ParseResult* pr, TypeInfo* info) {
+	// Single pass in AST order. Parents (enclosing functions) appear
+	// before their nested lambdas, so when we hit a lambda we can look
+	// up the already-built flow of its enclosing function and seed the
+	// lambda's entry state from the enclosing flow at the lambda's
+	// lexical position. This propagates smart-cast facts (e.g. early
+	// return null guards) across lambda boundaries.
+	for (uint i = 0; i < pr.node_count; i++) {
+		NodeKind k = pr.nodes[i].kind;
+		bool is_func = k == FUN_DECL
+			|| k == CONSTRUCTOR_DECL
+			|| k == INIT_BLOCK
+			|| k == LAMBDA_EXPR
+			|| k == ANONYMOUS_FUN_EXPR;
+		if (!is_func) continue;
+		if (info.func_flow_count >= MAX_FUNCTIONS_PER_FILE) break;
+		uint slot = info.func_flow_count;
+		cfg::Cfg* c = cfg::build_cfg(pr, i);
+
+		// Find nearest enclosing function-like ancestor that already has
+		// a flow analysis. If found, seed our entry from its state at
+		// our lexical position.
+		flow::FlowAnalysis* fa;
+		uint parent = pr.nodes[i].parent;
+		uint enc_func = ast::NO_PARENT;
+		while (parent != ast::NO_PARENT && parent < pr.node_count) {
+			if (info.func_flow_lookup[parent] != uint.max) {
+				enc_func = parent;
+				break;
+			}
+			parent = pr.nodes[parent].parent;
+		}
+		if (enc_func != ast::NO_PARENT) {
+			uint enc_slot = info.func_flow_lookup[enc_func];
+			FunctionFlow* enc_ff = &info.func_flows[enc_slot];
+			flow::FlowState entry = enc_ff.fa.state_at(pr, enc_ff.cfg, i);
+			fa = flow::analyze_with_entry(pr, c, &entry);
+		} else {
+			fa = flow::analyze(pr, c);
+		}
+
+		info.func_flows[slot] = { .func_ast_idx = i, .cfg = c, .fa = fa };
+		info.func_flow_lookup[i] = slot;
+		info.func_flow_count++;
+	}
+
+	// Second pass: assign enclosing function to every AST node by walking
+	// up parents.
+	for (uint i = 0; i < pr.node_count; i++) {
+		info.enclosing_func[i] = compute_enclosing_func(pr, info, i);
+	}
+}
+
+fn uint compute_enclosing_func(ParseResult* pr, TypeInfo* info, uint idx) {
+	uint cur = idx;
+	while (cur != ast::NO_PARENT && cur < pr.node_count) {
+		if (info.func_flow_lookup[cur] != uint.max) return cur;
+		cur = pr.nodes[cur].parent;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Look up a smart-cast fact for `name` at AST node `use_idx`. Returns
+ * null if no flow analysis covers this node or no fact applies.
+ */
+fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_idx, String name) {
+	if (use_idx >= ast::MAX_NODES) return null;
+	uint func_idx = info.enclosing_func[use_idx];
+	if (func_idx == ast::NO_PARENT) return null;
+	uint slot = info.func_flow_lookup[func_idx];
+	if (slot == uint.max) return null;
+	FunctionFlow* ff = &info.func_flows[slot];
+	if (ff.fa == null) return null;
+	return ff.fa.fact_at(pr, ff.cfg, use_idx, name);
 }
 
 /**
@@ -999,10 +1165,13 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
-	// Check for smart cast: if this NAME_EXPR is inside the then-branch
-	// of an `if (x is Type)`, narrow the type to Type.
-	TypeRef smart_cast = check_smart_cast(pr, info, idx, node.name);
-	if (smart_cast.kind != UNKNOWN) return smart_cast;
+	// Flow-sensitive smart cast (Phase D): check CFG-based facts.
+	// If a fact narrows the type (is T), return narrowed type.
+	// If a fact proves non-null, fall through and apply non-null to base type.
+	flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, node.name);
+	if (fact != null && fact.narrowed.kind != UNKNOWN) {
+		return fact.narrowed;
+	}
 
 	// Special case: implicit lambda parameter `it`
 	if (node.name == "it") {
@@ -1021,7 +1190,11 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			if (candidate.name != node.name) continue;
 
 			if (info.has_type[j]) {
-				return info.node_types[j];
+				TypeRef base = info.node_types[j];
+				if (fact != null && fact.not_null && base.nullable) {
+					base.nullable = false;
+				}
+				return base;
 			}
 			return TYPE_UNKNOWN;
 		}
@@ -1397,394 +1570,6 @@ fn bool is_safe_call(ParseResult* pr, uint call_idx) {
 	return false;
 }
 
-/**
- * Check if a NAME_EXPR with the given name is inside the then-branch
- * of an `if (name is Type)` check, and if so, return the narrowed type.
- * Also handles null checks: `if (name != null)` narrows to non-nullable,
- * and `if (name == null)` narrows to non-nullable in the else branch.
- */
-fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, String name) {
-	// Walk up the parent chain looking for an IF_EXPR
-	uint current = name_idx;
-	while (current != 0 && pr.nodes[current].parent != ast::NO_PARENT) {
-		uint parent_idx = pr.nodes[current].parent;
-		AstNode* parent = &pr.nodes[parent_idx];
-
-		if (parent.kind == IF_EXPR) {
-			// Determine which child of the IF_EXPR we're in:
-			// child 0 = condition, child 1 = then-branch, child 2 = else-branch
-			uint child_pos = 0;
-			for (uint j = 0; j < pr.node_count; j++) {
-				if (pr.nodes[j].parent == parent_idx) {
-					if (j == current) break;
-					child_pos++;
-				}
-			}
-
-			// We're in the then-branch (child 1) or a descendant of it
-			if (child_pos == 1) {
-				// Check condition (first child of IF_EXPR) for `x is Type`
-				TypeRef narrowed = find_is_check_in_condition(pr, parent_idx, name);
-				if (narrowed.kind != UNKNOWN) return narrowed;
-
-				// Check for null check: `x != null` -> narrow to non-nullable
-				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, true);
-				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
-			}
-
-			// We're in the else-branch (child 2)
-			if (child_pos == 2) {
-				// Check for `x == null` in condition -> else branch has non-nullable
-				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, false);
-				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
-
-				// Check for `x !is Type` in condition -> else branch has narrowed type
-				TypeRef is_narrowed = find_not_is_check_in_condition(pr, parent_idx, name);
-				if (is_narrowed.kind != UNKNOWN) return is_narrowed;
-			}
-		}
-
-		// When subject smart cast: when (x) { is String -> x.length }
-		if (parent.kind == WHEN_ENTRY) {
-			// Parent of WHEN_ENTRY is WHEN_EXPR
-			uint when_idx = parent.parent;
-			if (when_idx < pr.node_count && pr.nodes[when_idx].kind == WHEN_EXPR) {
-				// Find subject of when (first child NAME_EXPR)
-				String subject_name = "";
-				for (uint j = 0; j < pr.node_count; j++) {
-					if (pr.nodes[j].parent != when_idx) continue;
-					if (pr.nodes[j].kind == NAME_EXPR) {
-						subject_name = pr.nodes[j].name;
-						break;
-					}
-					// Also handle PAREN_EXPR wrapping a NAME_EXPR
-					if (pr.nodes[j].kind == PAREN_EXPR) {
-						for (uint k = 0; k < pr.node_count; k++) {
-							if (pr.nodes[k].parent == j && pr.nodes[k].kind == NAME_EXPR) {
-								subject_name = pr.nodes[k].name;
-								break;
-							}
-						}
-						break;
-					}
-					// Subject binding: when (val x = expr) -- bound name is the subject
-					if (pr.nodes[j].kind == PROPERTY_DECL) {
-						subject_name = pr.nodes[j].name;
-						break;
-					}
-					break;
-				}
-
-				if (subject_name == name) {
-					// Check if this WHEN_ENTRY has an `is Type` condition
-					TypeRef narrowed = find_when_entry_type_check(pr, parent_idx, name);
-					if (narrowed.kind != UNKNOWN) return narrowed;
-				}
-			}
-		}
-
-		// Early-return null check smart cast:
-		// In a block (or lambda body) where a preceding statement is
-		// `if (name == null) return/throw ...`, `name` is non-null afterwards.
-		if (parent.kind == BLOCK || parent.kind == LAMBDA_EXPR) {
-			TypeRef early_return = check_early_return_null_guard(pr, info, parent_idx, current, name);
-			if (early_return.kind != UNKNOWN) return early_return;
-		}
-
-		current = parent_idx;
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Check for early-return null guard pattern in a block:
- *   if (name == null) return ...
- *   // name is now non-null
- *
- * `block_idx` is the enclosing BLOCK node.
- * `child_in_block_idx` is the direct child of the block that contains
- * (or is) the name reference.
- * Returns the non-nullable type of `name` if a matching guard precedes
- * `child_in_block_idx`; otherwise TYPE_UNKNOWN.
- */
-fn TypeRef check_early_return_null_guard(ParseResult* pr, TypeInfo* info, uint block_idx, uint child_in_block_idx, String name) {
-	uint ref_offset = pr.nodes[child_in_block_idx].start_offset;
-
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != block_idx) continue;
-		if (j == child_in_block_idx) continue;
-		// Only consider statements that come before the reference
-		if (pr.nodes[j].start_offset >= ref_offset) continue;
-		if (pr.nodes[j].kind != IF_EXPR) continue;
-
-		// IF_EXPR children: [0]=condition, [1]=then-branch, optional [2]=else-branch
-		uint cond_idx = ast::NO_PARENT;
-		uint then_idx = ast::NO_PARENT;
-		uint else_idx = ast::NO_PARENT;
-		uint child_pos = 0;
-		for (uint k = 0; k < pr.node_count; k++) {
-			if (pr.nodes[k].parent != j) continue;
-			if (child_pos == 0) {
-				cond_idx = k;
-			} else if (child_pos == 1) {
-				then_idx = k;
-			} else if (child_pos == 2) {
-				else_idx = k;
-			}
-			child_pos++;
-		}
-
-		if (cond_idx == ast::NO_PARENT || then_idx == ast::NO_PARENT) continue;
-		// Must have no else branch (or it would also need to exit) -- keep simple: no else
-		if (else_idx != ast::NO_PARENT) continue;
-
-		// Condition must be `name == null`
-		AstNode* cond = &pr.nodes[cond_idx];
-		if (cond.kind != BINARY_EXPR || cond.extra_text != "==") continue;
-		if (check_null_comparison(pr, info, cond_idx, name).kind == UNKNOWN) continue;
-
-		// Then-branch must definitely exit (return / throw, possibly inside a block)
-		if (!branch_definitely_exits(pr, then_idx)) continue;
-
-		// Found valid early-return guard: return non-nullable type
-		uint scope_idx = find_innermost_scope(pr, child_in_block_idx);
-		uint cur_scope = scope_idx;
-		while (true) {
-			for (uint k = 0; k < pr.node_count; k++) {
-				AstNode* candidate = &pr.nodes[k];
-				if (candidate.parent != cur_scope) continue;
-				if (!is_typed_declaration(candidate.kind)) continue;
-				if (candidate.name != name) continue;
-				if (info.has_type[k]) {
-					TypeRef result = info.node_types[k];
-					result.nullable = false;
-					return result;
-				}
-				return TYPE_UNKNOWN;
-			}
-			AstNode* sc = &pr.nodes[cur_scope];
-			if (cur_scope == 0 || sc.parent == ast::NO_PARENT) break;
-			cur_scope = sc.parent;
-		}
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Returns true if `branch_idx` is (or contains as its sole/first effective
- * statement) a RETURN_EXPR or THROW_EXPR -- i.e., control definitely leaves
- * the enclosing function.
- */
-fn bool branch_definitely_exits(ParseResult* pr, uint branch_idx) {
-	AstNode* node = &pr.nodes[branch_idx];
-	if (node.kind == RETURN_EXPR || node.kind == THROW_EXPR) return true;
-
-	// Block: any statement that is RETURN_EXPR or THROW_EXPR makes the block exit.
-	if (node.kind == BLOCK) {
-		for (uint k = 0; k < pr.node_count; k++) {
-			if (pr.nodes[k].parent != branch_idx) continue;
-			if (pr.nodes[k].kind == RETURN_EXPR || pr.nodes[k].kind == THROW_EXPR) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-/**
- * Search the condition (first child) of an IF_EXPR for a type check
- * `name is Type` and return the checked type.
- */
-fn TypeRef find_is_check_in_condition(ParseResult* pr, uint if_idx, String name) {
-	// Find the first child of the IF_EXPR (the condition)
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != if_idx) continue;
-
-		AstNode* cond = &pr.nodes[j];
-
-		// Direct is-check: x is Type
-		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "is") {
-			if (try checked = get_is_check_variable_name(pr, j)) {
-				if (checked == name && cond.type_text.len > 0) {
-					return parse_type_text(cond.type_text);
-				}
-			}
-		}
-
-		// Check for && conjunction: x is Type && ...
-		if (cond.kind == BINARY_EXPR && cond.extra_text == "&&") {
-			for (uint k = 0; k < pr.node_count; k++) {
-				if (pr.nodes[k].parent != j) continue;
-				if (pr.nodes[k].kind == TYPE_CHECK_EXPR && pr.nodes[k].extra_text == "is") {
-					if (try checked = get_is_check_variable_name(pr, k)) {
-						if (checked == name && pr.nodes[k].type_text.len > 0) {
-							return parse_type_text(pr.nodes[k].type_text);
-						}
-					}
-				}
-			}
-		}
-
-		break; // Only check first child (the condition)
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Search the condition (first child) of an IF_EXPR for a `!is Type` check
- * on `name`. Used for else-branch narrowing: `if (x !is String) ... else { x.length }`.
- * In the else branch, x is known to be Type.
- * Does NOT walk && (in else, && does not narrow uniformly).
- */
-fn TypeRef find_not_is_check_in_condition(ParseResult* pr, uint if_idx, String name) {
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != if_idx) continue;
-
-		AstNode* cond = &pr.nodes[j];
-
-		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "!is") {
-			if (try checked = get_is_check_variable_name(pr, j)) {
-				if (checked == name && cond.type_text.len > 0) {
-					return parse_type_text(cond.type_text);
-				}
-			}
-		}
-
-		break; // Only first child (the condition)
-	}
-
-	return TYPE_UNKNOWN;
-}
-fn String? get_is_check_variable_name(ParseResult* pr, uint check_idx) {
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent == check_idx && pr.nodes[j].kind == NAME_EXPR) {
-			if (pr.nodes[j].name.len > 0) {
-				return pr.nodes[j].name;
-			}
-		}
-	}
-	return ast::NOT_FOUND~;
-}
-
-/**
- * Find an `is Type` condition in a WHEN_ENTRY node.
- * Scans the WHEN_ENTRY's children (conditions come before the body)
- * for a TYPE_CHECK_EXPR with extra_text "is".
- */
-fn TypeRef find_when_entry_type_check(ParseResult* pr, uint entry_idx, String name) {
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != entry_idx) continue;
-		AstNode* child = &pr.nodes[j];
-
-		// Direct `is Type` condition
-		if (child.kind == TYPE_CHECK_EXPR && child.extra_text == "is") {
-			if (child.type_text.len > 0) {
-				return parse_type_text(child.type_text);
-			}
-		}
-
-		// Comma-separated conditions: check each TYPE_CHECK_EXPR
-		// (conditions are direct children of WHEN_ENTRY before the body)
-	}
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Search the condition (first child) of an IF_EXPR for a null check
- * and return the variable's type with nullability stripped.
- *
- * When then_branch is true, looks for `name != null` (then-branch is non-nullable).
- * When then_branch is false, looks for `name == null` (else-branch is non-nullable).
- * Also handles && conjunctions (e.g. `x != null && y != null`).
- */
-fn TypeRef find_null_check_in_condition(ParseResult* pr, TypeInfo* info, uint if_idx, String name, bool then_branch) {
-	// The operator we're looking for depends on the branch:
-	// then-branch: x != null  (operator "!=")
-	// else-branch: x == null  (operator "==")
-	String target_op = then_branch ? "!=" : "==";
-
-	// Find the first child of the IF_EXPR (the condition)
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != if_idx) continue;
-
-		AstNode* cond = &pr.nodes[j];
-
-		// Direct null check: x != null  or  x == null
-		if (cond.kind == BINARY_EXPR && cond.extra_text == target_op) {
-			TypeRef result = check_null_comparison(pr, info, j, name);
-			if (result.kind != UNKNOWN) return result;
-		}
-
-		// Check for && conjunction: x != null && ...
-		// (only meaningful in then-branch; in else-branch && doesn't narrow)
-		if (then_branch && cond.kind == BINARY_EXPR && cond.extra_text == "&&") {
-			for (uint k = 0; k < pr.node_count; k++) {
-				if (pr.nodes[k].parent != j) continue;
-				if (pr.nodes[k].kind == BINARY_EXPR && pr.nodes[k].extra_text == target_op) {
-					TypeRef result = check_null_comparison(pr, info, k, name);
-					if (result.kind != UNKNOWN) return result;
-				}
-			}
-		}
-
-		break; // Only check first child (the condition)
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Check if a BINARY_EXPR at `expr_idx` is a null comparison for `name`.
- * One child must be a NAME_EXPR matching `name`, and the other must be
- * a LITERAL_EXPR with extra_text "null". If so, look up the variable's
- * declared type and return it with nullable stripped.
- */
-fn TypeRef check_null_comparison(ParseResult* pr, TypeInfo* info, uint expr_idx, String name) {
-	bool found_name = false;
-	bool found_null = false;
-
-	for (uint c = 0; c < pr.node_count; c++) {
-		if (pr.nodes[c].parent != expr_idx) continue;
-
-		if (pr.nodes[c].kind == NAME_EXPR && pr.nodes[c].name == name) {
-			found_name = true;
-		}
-		if (pr.nodes[c].kind == LITERAL_EXPR && pr.nodes[c].extra_text == "null") {
-			found_null = true;
-		}
-	}
-
-	if (!found_name || !found_null) return TYPE_UNKNOWN;
-
-	// Look up the declared type of the variable by searching declarations
-	// in enclosing scopes, same as resolve_name_expr_type
-	uint scope_idx = find_innermost_scope(pr, expr_idx);
-	uint current = scope_idx;
-	while (true) {
-		for (uint j = 0; j < pr.node_count; j++) {
-			AstNode* candidate = &pr.nodes[j];
-			if (candidate.parent != current) continue;
-			if (!is_typed_declaration(candidate.kind)) continue;
-			if (candidate.name != name) continue;
-
-			if (info.has_type[j]) {
-				TypeRef result = info.node_types[j];
-				result.nullable = false;
-				return result;
-			}
-			return TYPE_UNKNOWN;
-		}
-
-		AstNode* scope = &pr.nodes[current];
-		if (current == 0 || scope.parent == ast::NO_PARENT) break;
-		current = scope.parent;
-	}
-
-	return TYPE_UNKNOWN;
-}
 
 // ── Call expression resolution ─────────────────────────────────────
 

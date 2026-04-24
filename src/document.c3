@@ -48,7 +48,7 @@ fn void DocumentStore.free(DocumentStore* self) {
 				mem::free(doc.cached_ast);
 			}
 			if (doc.cached_types != null) {
-				mem::free(doc.cached_types);
+				types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 			}
 			if (doc.cached_chunks != null) {
 				mem::free(doc.cached_chunks);
@@ -75,7 +75,7 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 			mem::free(old.cached_ast);
 		}
 		if (old.cached_types != null) {
-			mem::free(old.cached_types);
+			types::free_type_info(old.cached_types); mem::free(old.cached_types);
 		}
 		if (old.cached_chunks != null) {
 			mem::free(old.cached_chunks);
@@ -114,7 +114,7 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 			doc.cached_ast = null;
 		}
 		if (doc.cached_types != null) {
-			mem::free(doc.cached_types);
+			types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 			doc.cached_types = null;
 		}
 		if (doc.cached_chunks != null) {
@@ -147,7 +147,7 @@ fn void DocumentStore.invalidate_all_caches(DocumentStore* self) {
 				doc.cached_ast = null;
 			}
 			if (doc.cached_types != null) {
-				mem::free(doc.cached_types);
+				types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 				doc.cached_types = null;
 			}
 			if (doc.cached_chunks != null) {
@@ -209,7 +209,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 				// Incremental parse succeeded -- invalidate types only
 				// (types depend on the AST which was updated in-place)
 				if (doc.cached_types != null) {
-					mem::free(doc.cached_types);
+					types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 					doc.cached_types = null;
 				}
 				// Update name/type_text/extra_text String slices that point into
@@ -232,7 +232,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 				doc.cached_ast = null;
 			}
 			if (doc.cached_types != null) {
-				mem::free(doc.cached_types);
+				types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 				doc.cached_types = null;
 			}
 			if (doc.cached_chunks != null) {
@@ -374,7 +374,7 @@ fn void DocumentStore.close(DocumentStore* self, String uri) {
 			mem::free(doc.cached_ast);
 		}
 		if (doc.cached_types != null) {
-			mem::free(doc.cached_types);
+			types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 		}
 		if (doc.cached_chunks != null) {
 			mem::free(doc.cached_chunks);

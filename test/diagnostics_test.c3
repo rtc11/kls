@@ -16,7 +16,7 @@ fn Object* build_test_diagnostics(String content) {
 	defer { pr.free_errors(); mem::free(pr); }
 	parser::parse(content, pr);
 	TypeInfo* ti = mem::new(TypeInfo);
-	defer mem::free(ti);
+	defer { types::free_type_info(ti); mem::free(ti); };
 	types::resolve_types(pr, ti);
 	return diagnostics::build_diagnostics_array(content, pr, null, ti);
 }

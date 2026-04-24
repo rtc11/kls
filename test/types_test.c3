@@ -25,8 +25,7 @@ fn void free_result(ParseResult* r) {
 
 fn TypeInfo* do_resolve(ParseResult* pr) {
 	TypeInfo* ti = mem::new(TypeInfo);
-	types::resolve_types(pr, ti);
-	return ti;
+	types::resolve_types(pr, ti);	return ti;
 }
 
 // Find a declaration node by name
@@ -82,7 +81,7 @@ fn void dep_name_via_explicit_import() @test {
 		String src = `import io.ktor.http.HttpStatusCode
 			val status: HttpStatusCode = HttpStatusCode`;
 		ParseResult* pr = do_parse(src); defer free_result(pr);
-		TypeInfo* ti = do_resolve(pr); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the val declaration — should resolve to HttpStatusCode
 		uint decl_idx = find_decl(pr, "status");
@@ -109,7 +108,7 @@ fn void dep_name_via_star_import() @test {
 		String src = `import io.ktor.http.*
 			val status: HttpStatusCode = HttpStatusCode`;
 		ParseResult* pr = do_parse(src); defer free_result(pr);
-		TypeInfo* ti = do_resolve(pr); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint decl_idx = find_decl(pr, "status");
 		assert(decl_idx > 0, "should find status decl");
@@ -135,7 +134,7 @@ fn void dep_name_no_import_stays_unknown() @test {
 		// No import — should NOT resolve
 		String src = `val status: HttpStatusCode = HttpStatusCode`;
 		ParseResult* pr = do_parse(src); defer free_result(pr);
-		TypeInfo* ti = do_resolve(pr); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// The type annotation resolves via parse_type_text, but the NAME_EXPR
 		// on the RHS should be UNKNOWN since no import matches
@@ -252,7 +251,7 @@ fn void format_unit_type() @test {
 fn void infer_int_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 42"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -264,7 +263,7 @@ fn void infer_int_literal() @test {
 fn void infer_long_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 42L"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -276,7 +275,7 @@ fn void infer_long_literal() @test {
 fn void infer_double_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 3.14"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -288,7 +287,7 @@ fn void infer_double_literal() @test {
 fn void infer_float_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 3.14f"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -300,7 +299,7 @@ fn void infer_float_literal() @test {
 fn void infer_string_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse(`val x = "hello"`); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -312,7 +311,7 @@ fn void infer_string_literal() @test {
 fn void infer_boolean_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = true"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -324,7 +323,7 @@ fn void infer_boolean_literal() @test {
 fn void infer_null_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = null"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -336,7 +335,7 @@ fn void infer_null_literal() @test {
 fn void infer_char_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 'a'"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -350,7 +349,7 @@ fn void infer_char_literal() @test {
 fn void explicit_type_annotation() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: Int = 42"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -361,7 +360,7 @@ fn void explicit_type_annotation() @test {
 fn void explicit_nullable_annotation() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: String? = null"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -373,7 +372,7 @@ fn void explicit_nullable_annotation() @test {
 fn void explicit_generic_annotation() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: List<Int> = listOf(1)"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -385,7 +384,7 @@ fn void explicit_generic_annotation() @test {
 fn void fun_return_type() @test {
 	@pool() {
 		ParseResult* r = do_parse("fun greet(): String { return \"hi\" }"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "greet");
 		assert(idx > 0, "expected to find 'greet'");
 		assert(ti.has_type[idx], "expected type for 'greet'");
@@ -396,7 +395,7 @@ fn void fun_return_type() @test {
 fn void fun_param_type() @test {
 	@pool() {
 		ParseResult* r = do_parse("fun greet(name: String) {}"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		// Find the PARAM node
 		uint idx = 0;
 		for (uint i = 0; i < r.node_count; i++) {
@@ -416,7 +415,7 @@ fn void fun_param_type() @test {
 fn void resolve_empty_source() @test {
 	@pool() {
 		ParseResult* r = do_parse(""); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		// Should not crash
 		assert(true);
 	};
@@ -425,7 +424,7 @@ fn void resolve_empty_source() @test {
 fn void resolve_class_no_type() @test {
 	@pool() {
 		ParseResult* r = do_parse("class Foo"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "Foo");
 		// Classes don't get TypeInfo entries (they ARE types)
 		// Just verify no crash
@@ -436,7 +435,7 @@ fn void resolve_class_no_type() @test {
 fn void resolve_var_with_initializer() @test {
 	@pool() {
 		ParseResult* r = do_parse("var x = 100"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -454,7 +453,7 @@ fn void resolve_multiple_properties() @test {
 			val b = "hi"
 			val c = true`
 		); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint ai = find_decl(r, "a");
 		uint bi = find_decl(r, "b");
@@ -475,7 +474,7 @@ fn void resolve_multiple_properties() @test {
 fn void hover_shows_inferred_type_for_val() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 42"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		AstNode* node = &r.nodes[idx];
 
@@ -496,7 +495,7 @@ fn void hover_shows_inferred_type_for_val() @test {
 fn void hover_shows_explicit_type_for_val() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: String = \"hi\""); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		AstNode* node = &r.nodes[idx];
 
@@ -520,7 +519,7 @@ fn void hover_no_type_without_initializer() @test {
 		// In real Kotlin this would be a compile error, but we just verify
 		// our type system doesn't crash
 		ParseResult* r = do_parse("val x"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		if (idx > 0) {
 			// Type should be unknown
@@ -783,7 +782,7 @@ fn void stdlib_lookup_by_receiver_empty() @test {
 // Helper: resolve types and find the first expression node of given kind
 fn TypeRef resolve_and_get_expr(ParseResult* pr, NodeKind kind, String name = "") {
 	TypeInfo* ti = mem::new(TypeInfo);
-	defer mem::free(ti);
+	defer { types::free_type_info(ti); mem::free(ti); };
 	types::resolve_types(pr, ti);
 	for (uint i = 0; i < pr.node_count; i++) {
 		if (pr.nodes[i].kind == kind) {
@@ -798,7 +797,7 @@ fn TypeRef resolve_and_get_expr(ParseResult* pr, NodeKind kind, String name = ""
 // Helper: resolve and get type of a named declaration
 fn TypeRef resolve_and_get_decl(ParseResult* pr, String name) {
 	TypeInfo* ti = mem::new(TypeInfo);
-	defer mem::free(ti);
+	defer { types::free_type_info(ti); mem::free(ti); };
 	types::resolve_types(pr, ti);
 	for (uint i = 0; i < pr.node_count; i++) {
 		if (ast::is_declaration(pr.nodes[i].kind) && pr.nodes[i].name == name) {
@@ -1081,7 +1080,7 @@ fn void smart_cast_simple_is_check() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Check the NAME_EXPR 'x' nodes and their resolved types
 		bool found_narrowed_x = false;
@@ -1117,7 +1116,7 @@ fn void smart_cast_and_conjunction() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1613,7 +1612,7 @@ fn void smart_cast_null_check_not_equals() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1635,7 +1634,7 @@ fn void smart_cast_null_check_equals_else() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1654,7 +1653,7 @@ fn void smart_cast_null_check_early_return() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1675,7 +1674,7 @@ fn void smart_cast_null_check_early_return_block() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1694,7 +1693,7 @@ fn void smart_cast_null_check_early_throw() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1722,7 +1721,7 @@ fn void smart_cast_null_check_early_return_in_lambda_with_label() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1742,7 +1741,7 @@ fn void smart_cast_null_check_conjunction() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1759,7 +1758,7 @@ fn void smart_cast_no_null_check_no_narrowing() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1779,7 +1778,7 @@ fn void generic_list_first_returns_element_type() @test {
 				val first = names.first()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "first");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1799,7 +1798,7 @@ fn void generic_list_firstOrNull_returns_nullable_element() @test {
 				val maybe = items.firstOrNull()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "maybe");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1819,7 +1818,7 @@ fn void generic_list_filter_preserves_type_args() @test {
 				val filtered = names.filter()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "filtered");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1841,7 +1840,7 @@ fn void generic_list_sorted_preserves_type_args() @test {
 				val sorted = nums.sorted()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "sorted");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1862,7 +1861,7 @@ fn void generic_chain_filter_first() @test {
 				val result = names.filter().first()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "result");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1880,7 +1879,7 @@ fn void generic_set_preserves_type_args() @test {
 				val unique = items.toSet()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "unique");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1901,7 +1900,7 @@ fn void generic_map_keys_returns_set_of_key_type() @test {
 				val keys = m.keys
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "keys");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1922,7 +1921,7 @@ fn void generic_map_values_returns_collection_of_value_type() @test {
 				val vals = m.values
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "vals");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1943,7 +1942,7 @@ fn void generic_map_get_returns_nullable_value_type() @test {
 				val v = m.get()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "v");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1963,7 +1962,7 @@ fn void generic_map_filter_preserves_kv() @test {
 				val filtered = m.filter()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "filtered");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1985,7 +1984,7 @@ fn void generic_also_preserves_type_args() @test {
 				val same = items.also()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "same");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2006,7 +2005,7 @@ fn void generic_index_returns_element_type() @test {
 				val item = items[0]
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "item");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2024,7 +2023,7 @@ fn void generic_listof_infer_type_arg() @test {
 				val first = names.first()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "first");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2042,7 +2041,7 @@ fn void generic_sequence_preserves_type_args() @test {
 				val seq = items.asSequence()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "seq");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2065,7 +2064,7 @@ fn void lambda_it_let_has_receiver_type() @test {
 				name.let { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the NAME_EXPR for "it"
 		for (uint i = 0; i < r.node_count; i++) {
@@ -2088,7 +2087,7 @@ fn void lambda_it_also_has_receiver_type() @test {
 				x.also { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2110,7 +2109,7 @@ fn void lambda_it_filter_has_element_type() @test {
 				items.filter { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2132,7 +2131,7 @@ fn void lambda_it_forEach_has_element_type() @test {
 				nums.forEach { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2154,7 +2153,7 @@ fn void lambda_it_map_has_element_type() @test {
 				names.map { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2181,7 +2180,7 @@ fn void lambda_it_takeIf_has_receiver_type() @test {
 				items.takeIf { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2204,7 +2203,7 @@ fn void lambda_it_explicit_param_no_inference() @test {
 				items.filter { x -> it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// When lambda has explicit params, `it` should NOT be resolved
 		for (uint i = 0; i < r.node_count; i++) {
@@ -2229,7 +2228,7 @@ fn void lambda_it_string_forEach_returns_char() @test {
 				s.forEach { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2251,7 +2250,7 @@ fn void lambda_it_let_generic_receiver() @test {
 				items.let { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2278,7 +2277,7 @@ fn void lambda_it_inferred_list_filter() @test {
 				names.filter { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2303,7 +2302,7 @@ fn void destructuring_pair_component_types() @test {
 				val (a, b) = pair
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint a_idx = find_decl(r, "a");
 		assert(a_idx > 0, "expected to find decl 'a'");
@@ -2327,7 +2326,7 @@ fn void destructuring_triple_component_types() @test {
 				val (x, y, z) = t
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(r, "x");
 		assert(x_idx > 0, "expected to find decl 'x'");
@@ -2357,7 +2356,7 @@ fn void destructuring_explicit_types_override() @test {
 				val (a: String, b: Int) = pair
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// When explicit types are given, they should be used (Phase 1)
 		uint a_idx = find_decl(r, "a");
@@ -2382,7 +2381,7 @@ fn void destructuring_for_map_iteration() @test {
 				for ((k, v) in map) { }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find PARAM nodes inside FOR_STMT
 		for (uint i = 0; i < r.node_count; i++) {
@@ -2496,7 +2495,7 @@ fun main() {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint a_idx = find_decl(pr, "a");
 		assert(a_idx != 0, "should find 'a'");
@@ -2524,7 +2523,7 @@ fun main() {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint r_idx = find_decl(pr, "r");
 		assert(r_idx != 0, "should find 'r'");
@@ -2548,7 +2547,7 @@ fun main() {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint a_idx = find_decl(pr, "a");
 		assert(a_idx != 0, "should find 'a'");
@@ -2588,7 +2587,7 @@ fn void cross_file_constructor_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint u_idx = find_decl(pr, "u");
 		assert(u_idx != 0, "should find 'u'");
@@ -2617,7 +2616,7 @@ fn void cross_file_dot_member_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint u_idx = find_decl(pr, "u");
 		assert(u_idx != 0, "should find 'u'");
@@ -2651,7 +2650,7 @@ fn void cross_file_method_return_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint g_idx = find_decl(pr, "g");
 		assert(g_idx != 0, "should find 'g'");
@@ -2675,7 +2674,7 @@ fn void cross_file_no_workspace_returns_unknown() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint u_idx = find_decl(pr, "u");
 		assert(u_idx != 0, "should find 'u'");
@@ -2698,7 +2697,7 @@ fn void map_index_returns_value_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "v");
 		assert(v_idx != 0, "should find 'v'");
@@ -2721,7 +2720,7 @@ fn void list_index_returns_element_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -2745,7 +2744,7 @@ fn void to_infix_produces_typed_pair() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint p_idx = find_decl(pr, "p");
 		assert(p_idx != 0, "should find 'p'");
@@ -2775,7 +2774,7 @@ fn void mapof_infers_type_args_from_to() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint m_idx = find_decl(pr, "m");
 		assert(m_idx != 0, "should find 'm'");
@@ -2803,7 +2802,7 @@ fn void try_catch_expr_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(pr, "x");
 		assert(x_idx != 0, "should find 'x'");
@@ -2823,7 +2822,7 @@ fn void try_catch_mixed_types() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(pr, "x");
 		assert(x_idx != 0, "should find 'x'");
@@ -2847,7 +2846,7 @@ fn void map_infers_return_type_from_lambda() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "lengths");
 		assert(v_idx != 0, "should find 'lengths'");
@@ -2873,7 +2872,7 @@ fn void map_chain_preserves_types() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "result");
 		assert(v_idx != 0, "should find 'result'");
@@ -2898,7 +2897,7 @@ fn void let_returns_lambda_body_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "len");
 		assert(v_idx != 0, "should find 'len'");
@@ -2918,7 +2917,7 @@ fn void run_returns_lambda_body_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(pr, "x");
 		assert(x_idx != 0, "should find 'x'");
@@ -2939,7 +2938,7 @@ fn void associate_infers_map_type_from_lambda() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint m_idx = find_decl(pr, "m");
 		assert(m_idx != 0, "should find 'm'");
@@ -2966,7 +2965,7 @@ fn void groupby_infers_map_type_from_lambda() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "grouped");
 		assert(v_idx != 0, "should find 'grouped'");
@@ -2991,7 +2990,7 @@ fn void mapof_chain_index_resolves() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "v");
 		assert(v_idx != 0, "should find 'v'");
@@ -3018,7 +3017,7 @@ fn void when_subject_smart_cast_is_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -3042,7 +3041,7 @@ fn void when_subject_smart_cast_is_int() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint n_idx = find_decl(pr, "n");
 		assert(n_idx != 0, "should find 'n'");
@@ -3065,7 +3064,7 @@ fn void extension_function_workspace_resolution() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint r_idx = find_decl(pr, "r");
 		assert(r_idx != 0, "should find 'r'");
@@ -3087,7 +3086,7 @@ fn void smart_cast_null_check_simple() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -3111,7 +3110,7 @@ fn void smart_cast_null_check_and_conjunction() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -3352,7 +3351,7 @@ fn void dot_call_on_unresolvable_receiver_returns_unknown() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the DOT_EXPR for record.timestamp()
 		for (uint i = 0; i < pr.node_count; i++) {
@@ -3642,7 +3641,7 @@ fn void smart_cast_not_is_else_branch() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the `val y = x` declaration; expect y resolved to String
 		// because in the else branch, `x` is narrowed via `!is`.
@@ -3666,7 +3665,7 @@ fn void when_subject_binding_smart_cast_is() @test {
 			}
 			fun compute(): Any = "hi"`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Look for at least one NAME_EXPR 'x' narrowed to String.
 		bool found_narrowed = false;
