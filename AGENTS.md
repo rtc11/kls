@@ -403,7 +403,7 @@ DONE (Phase 0–2 of Tier-3 refactor):
 
 NOT DONE (deferred):
 1. **`@JvmStatic` / Java-interop semantic effect** — currently displayed cosmetically in `build_signature` (`@JvmStatic`/`@JvmField`/`@JvmOverloads`/`@JvmName` shown in hover). No resolution semantics: workspace already exposes companion members via `from_companion`, deps already get the synthetic static method from kotlinc-emitted bytecode. KLS does not serve Java callers, so no further effect needed.
-2. **Labeled loops parsing + go-to-def** (Kotlin spec §17 labeled statements) — `outer@ for (...)`, `loop@ while (...)`, `block@ do { ... } while`. Currently the `IDENT @` prefix on a loop is dropped during parsing; only labeled lambdas (`label@ { ... }`) and labeled return/break/continue references are stored. Impact: `break@outer` / `continue@outer` resolve to enclosing `fun outer()` if any, otherwise no target. To finish: extend `parse_for_stmt`/`parse_while_stmt`/`parse_do_while_stmt` to accept `IDENT AT` prefix (analogous to `parse_labeled_lambda_expr`), store label in `extra_text`, then add FOR_STMT/WHILE_STMT/DO_STMT cases to `definition::find_label_target`. See inline TODO at `src/kotlin/parser.c3:parse_break_continue`.
+2. **Label references / rename** — labeled loops (`outer@ for`), labeled lambdas (`label@ { ... }`), and implicit fun-name labels resolve via `definition::find_label_target` (go-to-def works). References (`textDocument/references`) and rename for `@label` usages are not yet wired; the existing identifier-based references/rename paths skip `AT label` tokens entirely.
 
 ## Key References
 

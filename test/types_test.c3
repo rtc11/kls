@@ -192,6 +192,27 @@ fn void parse_empty_type() @test {
 	};
 }
 
+fn void parse_definitely_non_nullable_type() @test {
+	@pool() {
+		// Kotlin spec §9.4.4: `T & Any` is the definitely non-nullable type.
+		TypeRef t = types::parse_type_text("T & Any");
+		assert(t.is_dnn, "expected is_dnn=true for `T & Any`");
+		assert(!t.nullable, "DNN type must not be nullable");
+		assert(t.name == "T", "expected name 'T', got '%s'", t.name);
+		String s = types::format_type(&t);
+		assert(s == "T & Any", "expected formatted 'T & Any', got '%s'", s);
+	};
+}
+
+fn void parse_dnn_overrides_nullable() @test {
+	@pool() {
+		// `T? & Any` is the canonical promotion of nullable `T?` to non-null.
+		TypeRef t = types::parse_type_text("T? & Any");
+		assert(t.is_dnn, "expected is_dnn=true");
+		assert(!t.nullable, "DNN must force nullable=false even when input was nullable");
+	};
+}
+
 // ── Type formatting tests ───────────────────────────────────────────
 
 fn void format_simple_type() @test {

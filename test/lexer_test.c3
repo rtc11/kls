@@ -406,6 +406,24 @@ fn void escaped_char() @test {
 	assert(tok.text == `'\n'`);
 }
 
+fn void unicode_escape_exact_4_hex() @test {
+	// Kotlin spec §16.5: \uXXXX requires exactly 4 hex digits.
+	Token tok = first(`'\u1234'`);
+	assert(tok.kind == CHARACTER_LITERAL);
+	assert(tok.text == `'\u1234'`, "expected full literal consumed, got '%s'", tok.text);
+}
+
+fn void unicode_escape_rejects_underscore() @test {
+	// `_` not a valid hex digit inside `\uXXXX`.
+	// We do not validate via diagnostic — strict consumption stops at the `_`,
+	// so the closing `'` is not paired and the token text reflects that.
+	Token tok = first(`'\u1_234'`);
+	assert(tok.kind == CHARACTER_LITERAL);
+	// Lexer must NOT have consumed any of the hex (since first one was followed
+	// by `_` < 4 valid digits). Token must therefore not span all 8 chars.
+	assert(tok.text.len < 9, "expected lexer to reject invalid \\u escape, got '%s'", tok.text);
+}
+
 // ── Operators ───────────────────────────────────────────────────────
 
 fn void dot() @test {

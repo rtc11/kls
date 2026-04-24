@@ -337,6 +337,10 @@ fn uint? find_label_target(ParseResult* pr, String label, uint cursor_offset) {
 		AstNode* n = &pr.nodes[cur];
 		if (n.kind == LAMBDA_EXPR && n.extra_text == label) return cur;
 		if (n.kind == FUN_DECL && n.name == label) return cur;
+		// Labeled loops `outer@ for (...)` (Kotlin spec §17.13). Parser stamps
+		// the label name into FOR_STMT/WHILE_STMT/DO_WHILE_STMT extra_text.
+		if ((n.kind == FOR_STMT || n.kind == WHILE_STMT || n.kind == DO_WHILE_STMT)
+			&& n.extra_text == label) return cur;
 		if (cur == n.parent) break; // FILE node
 		cur = n.parent;
 	}

@@ -4869,3 +4869,103 @@ fn void when_subject_binding_creates_property_decl() @test {
 		assert(found_binding, "expected PROPERTY_DECL child of WHEN_EXPR named 'x'");
 	};
 }
+
+// ── Property accessor modifiers (Kotlin spec §14.3) ─────────────────
+
+fn void property_accessor_private_set() @test {
+	@pool() {
+		// `var x: Int = 0\n  private set` -- accessor with visibility modifier
+		// only (no body). Must parse without consuming next decl.
+		ParseResult* r = do_parse(
+			"class C {\n  var x: Int = 0\n    private set\n  fun next() {}\n}"
+		); defer free_result(r);
+
+		// Find FUN_DECL named "set" with MOD_PRIVATE flag.
+		bool found_set = false;
+		bool found_next = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "set") {
+				assert((r.nodes[i].mod_flags & ast::MOD_PRIVATE) != 0,
+					"expected MOD_PRIVATE on accessor 'set'");
+				found_set = true;
+			}
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "next") {
+				found_next = true;
+			}
+		}
+		assert(found_set, "expected FUN_DECL accessor 'set'");
+		assert(found_next, "expected FUN_DECL 'next' (parser must not over-consume accessor mods)");
+	};
+}
+
+fn void property_accessor_annotation() @test {
+	@pool() {
+		// `@JvmName("x") get` -- annotation before accessor.
+		ParseResult* r = do_parse(
+			"class C {\n  val y: Int\n    @JvmName(\"getY\") get() = 1\n}"
+		); defer free_result(r);
+
+		bool found_get = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "get") {
+				assert(r.nodes[i].annotation_text == "JvmName",
+					"expected annotation_text='JvmName', got '%s'", r.nodes[i].annotation_text);
+				found_get = true;
+			}
+		}
+		assert(found_get, "expected FUN_DECL accessor 'get' with @JvmName");
+	};
+}
+
+// ── Labeled loops (Kotlin spec §17.13) ──────────────────────────────
+
+fn void labeled_for_loop() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f() { outer@ for (i in 1..10) { break@outer } }"
+		); defer free_result(r);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FOR_STMT && r.nodes[i].extra_text == "outer") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected FOR_STMT with extra_text='outer'");
+	};
+}
+
+fn void labeled_while_loop() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f() { loop@ while (true) { continue@loop } }"
+		); defer free_result(r);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHILE_STMT && r.nodes[i].extra_text == "loop") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected WHILE_STMT with extra_text='loop'");
+	};
+}
+
+fn void labeled_do_while_loop() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f() { block@ do { break@block } while (false) }"
+		); defer free_result(r);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == DO_WHILE_STMT && r.nodes[i].extra_text == "block") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected DO_WHILE_STMT with extra_text='block'");
+	};
+}

@@ -247,6 +247,28 @@ fn bool Parser.peek_is_label_at_for_lambda(Parser* self) {
 	return result;
 }
 
+/**
+ * Check if current IDENT is followed by `AT (for|while|do)` on same line.
+ * Used to detect labeled loop statements: `outer@ for (...)`, `loop@ while (...)`,
+ * `block@ do { ... } while (...)`.  Kotlin spec §17.13 (labeled statements).
+ * Returns the loop's TokenKind via out-param, or sentinel EOF on miss.
+ */
+fn bool Parser.peek_is_label_at_for_loop(Parser* self, TokenKind* loop_kind) {
+	if (self.current.kind != IDENTIFIER) return false;
+	Lexer save = self.lexer;
+	Token at_tok = self.lexer.next();
+	bool result = false;
+	if (at_tok.kind == AT && at_tok.line == self.current.line) {
+		Token after = self.lexer.next();
+		if (after.kind == KW_FOR || after.kind == KW_WHILE || after.kind == KW_DO) {
+			result = true;
+			*loop_kind = after.kind;
+		}
+	}
+	self.lexer = save;
+	return result;
+}
+
 fn void Parser.expect(Parser* self, TokenKind kind) {
 	if (self.current.kind == kind) {
 		self.advance();
@@ -1314,8 +1336,11 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	}
 
 	// Property accessors: get() = ..., set(value) { ... }
-	// These are soft keywords, so they appear as KW_GET / KW_SET
-	while (self.at(KW_GET) || self.at(KW_SET)) {
+	// May be preceded by modifiers (private/protected/internal/public/inline/external)
+	// and annotations: `private set`, `@JvmName("getY") get`.
+	// These soft keywords appear as KW_GET / KW_SET.
+	while (self.at(KW_GET) || self.at(KW_SET)
+		|| self.is_accessor_with_modifiers_or_annotations()) {
 		self.parse_property_accessor();
 	}
 
@@ -1861,6 +1886,38 @@ fn void Parser.parse_block(Parser* self) {
  * Returns true if something was parsed, false otherwise.
  */
 fn bool Parser.parse_statement(Parser* self) {
+	// Labeled loop: `outer@ for (...)`, `loop@ while (...)`, `block@ do {...} while`
+	// (Kotlin spec §17.13). Detect before the switch since current token is IDENT.
+	{
+		TokenKind loop_kind;
+		if (self.peek_is_label_at_for_loop(&loop_kind)) {
+			Token label_tok = self.current;
+			self.advance(); // label IDENT
+			self.advance(); // AT
+			uint before = self.result.node_count;
+			switch (loop_kind) {
+				case KW_FOR:   self.parse_for_stmt();
+				case KW_WHILE: self.parse_while_stmt();
+				case KW_DO:    self.parse_do_while_stmt();
+				default: break;
+			}
+			// Stamp label name + extend start to cover the label, mirroring
+			// parse_labeled_lambda_expr. The stmt was just appended at `before`.
+			// Set name_* fields too so go-to-definition reports the label
+			// token position via build_location_from_node.
+			if (self.result.node_count > before) {
+				self.result.nodes[before].extra_text = label_tok.text;
+				self.result.nodes[before].start_offset = label_tok.offset;
+				self.result.nodes[before].name = label_tok.text;
+				self.result.nodes[before].name_offset = label_tok.offset;
+				self.result.nodes[before].name_line = label_tok.line;
+				self.result.nodes[before].name_col = label_tok.col;
+				self.result.nodes[before].name_len = (uint)label_tok.text.len;
+			}
+			return true;
+		}
+	}
+
 	switch (self.current.kind) {
 		case KW_VAL:
 			nextcase;
@@ -2618,14 +2675,10 @@ fn void Parser.parse_break_continue(Parser* self, NodeKind kind) {
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'break' or 'continue'
 
-	// Optional label: @label  -- store name in extra_text
-	// TODO(labeled-loops): go-to-definition for `break@label` / `continue@label`
-	// currently resolves only to enclosing FUN_DECL/LAMBDA_EXPR with matching
-	// name (see definition::find_label_target). Labeled loops `outer@ for ...`
-	// are not yet parsed -- the `outer@` prefix is dropped. Once labeled loops
-	// produce a FOR_STMT/WHILE_STMT/DO_STMT with `extra_text == "outer"`,
-	// extend find_label_target to match those node kinds too.
-	// See AGENTS.md "NOT DONE (deferred)" section for full context.
+	// Optional label: @label  -- store name in extra_text.
+	// Targets resolved by definition::find_label_target which walks enclosing
+	// FUN_DECL/LAMBDA_EXPR/FOR_STMT/WHILE_STMT/DO_WHILE_STMT for matching
+	// `name`/`extra_text`. See Kotlin spec §17.13 (labeled statements).
 	if (self.eat(AT)) {
 		if (self.at_identifier()) {
 			self.result.nodes[idx].extra_text = self.current.text;
@@ -4083,6 +4136,66 @@ fn void Parser.skip_param_default(Parser* self) {
  * Skip a property accessor: get() = ... or set(value) { ... }
  */
 /**
+ * True if `kind` is a modifier keyword that may legally precede a property
+ * accessor (visibility, inline, external). See Kotlin spec §14.3.
+ */
+fn bool is_accessor_modifier_keyword(TokenKind kind) {
+	switch (kind) {
+		case KW_PRIVATE:
+		case KW_PROTECTED:
+		case KW_INTERNAL:
+		case KW_PUBLIC:
+		case KW_INLINE:
+		case KW_EXTERNAL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Lookahead: does the current token start an accessor with leading
+ * modifiers/annotations? Returns true if scanning past modifiers + annotations
+ * lands on KW_GET / KW_SET. Restores parser state in all cases.
+ */
+fn bool Parser.is_accessor_with_modifiers_or_annotations(Parser* self) {
+	if (!self.at(AT) && !is_accessor_modifier_keyword(self.current.kind)) {
+		return false;
+	}
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	uint save_pending = self.pending_ann_count;
+
+	bool found = false;
+	int budget = 16; // bound the scan so we never eat half a decl
+	while (budget-- > 0 && !self.at_eof()) {
+		if (self.at(AT)) {
+			// Skip annotation: @Name(args)?
+			self.advance();
+			if (self.at_identifier()) self.advance();
+			while (self.eat(DOT)) {
+				if (self.at_identifier()) self.advance();
+			}
+			if (self.at(LPAREN)) self.skip_balanced_parens();
+			continue;
+		}
+		if (is_accessor_modifier_keyword(self.current.kind)) {
+			self.advance();
+			continue;
+		}
+		break;
+	}
+	if (self.at(KW_GET) || self.at(KW_SET)) found = true;
+
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.pending_ann_count = save_pending;
+	return found;
+}
+
+/**
  * Parse a property accessor (get/set) into a FUN_DECL child node.
  *
  * Kotlin property accessors:
@@ -4099,6 +4212,23 @@ fn void Parser.parse_property_accessor(Parser* self) {
 	uint idx = self.add_node(FUN_DECL);
 	self.node_start(idx, self.current);
 	uint children_start = self.result.node_count;
+
+	// Optional accessor modifiers / annotations (e.g. `private set`, `@JvmName("x") get`).
+	// Reuses parse_modifiers; populates self.last_annotations + returns flag bits.
+	uint accessor_mods = ast::MOD_NONE;
+	if (self.at(AT) || is_accessor_modifier_keyword(self.current.kind)) {
+		accessor_mods = self.parse_modifiers();
+	}
+	self.result.nodes[idx].mod_flags = accessor_mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
+
+	// After modifiers, must see KW_GET / KW_SET (else silently bail to avoid
+	// consuming tokens belonging to the next declaration).
+	if (!self.at(KW_GET) && !self.at(KW_SET)) {
+		self.adopt_children(idx, children_start);
+		self.node_end(idx);
+		return;
+	}
 
 	// Set name to "get" or "set"
 	self.node_set_name(idx, self.current);

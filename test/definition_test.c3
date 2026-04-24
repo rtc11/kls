@@ -1945,3 +1945,29 @@ fun other_fn(module: String) {
 		assert(line == 7, "expected line 7 (Nob.module), got line %d (likely matched unrelated PARAM)", line);
 	};
 }
+
+// ── Labeled loops (Kotlin spec §17.13) ──────────────────────────────
+
+fn void definition_of_labeled_loop_break() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `break@outer` should resolve to the labeled `for` loop.
+		String content = "fun f() {\n    outer@ for (i in 1..10) {\n        break@outer\n    }\n}";
+		store.open("file:///lbl.kt", "kotlin", 1, content);
+
+		// Cursor on `outer` after `break@` — line 2, col 14
+		Object* params = make_params("file:///lbl.kt", 2, 14);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected location for break@outer label target");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = (int)start.get_int("line")!!;
+		// `outer@ for` starts on line 1 (0-indexed). The label start was
+		// rewound by the parser (start_offset = label IDENT).
+		assert(line == 1, "expected line 1 (labeled for), got %d", line);
+	};
+}

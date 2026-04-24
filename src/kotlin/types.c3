@@ -74,6 +74,7 @@ struct TypeRef {
 	bool nullable;
 	bool is_suspend;          // for function types: suspend (...) -> T
 	bool is_class_ref;        // true when this TypeRef refers to a class/object/interface itself (e.g. `UUID` in `UUID.randomUUID()`), not an instance value
+	bool is_dnn;              // definitely non-nullable: `T & Any` (Kotlin spec §9.4.4)
 
 	// For GENERIC: simple type argument names
 	usz type_arg_count;
@@ -333,6 +334,17 @@ fn TypeRef TypeParser.parse_simple_or_generic_type(TypeParser* self) {
 		}
 	}
 
+	// Definitely non-nullable: T & Any (Kotlin spec §9.4.4).
+	// `&` after a type, followed by `Any`, marks the type as guaranteed
+	// non-nullable. Force `nullable = false` regardless of input.
+	if (self.eat(AMP)) {
+		if (self.at_identifier() && self.current.text == "Any") {
+			self.advance();
+			result.is_dnn = true;
+			result.nullable = false;
+		}
+	}
+
 	result.full_text = self.source;
 	return result;
 }
@@ -364,8 +376,8 @@ fn String format_type(TypeRef* t) {
 	if (t.kind == UNIT) return t.nullable ? "Unit?" : "Unit";
 	if (t.kind == NOTHING) return t.nullable ? "Nothing?" : "Nothing";
 
-	// Fast path: simple type without nullable — return name slice directly
-	if (t.kind == SIMPLE && !t.nullable && t.name.len > 0) return t.name;
+	// Fast path: simple type without nullable/DNN — return name slice directly
+	if (t.kind == SIMPLE && !t.nullable && !t.is_dnn && t.name.len > 0) return t.name;
 
 	DString ds;
 	ds.tinit();
@@ -418,6 +430,9 @@ fn void format_type_into(DString* ds, TypeRef* t) {
 
 	if (t.nullable) {
 		ds.appendf("?");
+	}
+	if (t.is_dnn) {
+		ds.appendf(" & Any");
 	}
 }
 
