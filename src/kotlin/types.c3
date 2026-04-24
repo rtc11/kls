@@ -714,6 +714,35 @@ fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_
 }
 
 /**
+ * Stability gate for smart casts (Kotlin spec §11.3, scoped to locals).
+ *
+ *   - PARAM                          → stable (effective val)
+ *   - PROPERTY_DECL local val        → stable
+ *   - PROPERTY_DECL local var        → stable iff use is in the SAME
+ *                                       function as the declaration
+ *                                       (i.e. not captured by a nested
+ *                                       lambda / anonymous function).
+ *   - Member properties / top-level  → not stable in this phase (property
+ *                                       smart cast is deferred).
+ */
+fn bool is_stable_for_smart_cast(ParseResult* pr, TypeInfo* info, uint decl_idx, uint use_idx) {
+	if (decl_idx >= pr.node_count) return false;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.kind == PARAM) return true;
+	if (decl.kind != PROPERTY_DECL) return false;
+
+	// Local-only: declaration must be inside a function-like scope.
+	uint decl_func = (decl_idx < ast::MAX_NODES) ? info.enclosing_func[decl_idx] : ast::NO_PARENT;
+	if (decl_func == ast::NO_PARENT) return false;
+
+	bool is_var = (decl.mod_flags & ast::MOD_VAR) != 0;
+	if (!is_var) return true;
+
+	uint use_func = (use_idx < ast::MAX_NODES) ? info.enclosing_func[use_idx] : ast::NO_PARENT;
+	return use_func == decl_func;
+}
+
+/**
  * Phase 1: Resolve types from explicit annotations on declarations.
  */
 fn void resolve_declaration_types(ParseResult* pr, TypeInfo* info) {
@@ -1165,13 +1194,9 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
-	// Flow-sensitive smart cast (Phase D): check CFG-based facts.
-	// If a fact narrows the type (is T), return narrowed type.
-	// If a fact proves non-null, fall through and apply non-null to base type.
+	// Flow-sensitive smart cast (Phase D): check CFG-based facts. Stability
+	// gate (Phase E) is applied below once we have located the declaration.
 	flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, node.name);
-	if (fact != null && fact.narrowed.kind != UNKNOWN) {
-		return fact.narrowed;
-	}
 
 	// Special case: implicit lambda parameter `it`
 	if (node.name == "it") {
@@ -1189,9 +1214,21 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			if (!is_typed_declaration(candidate.kind)) continue;
 			if (candidate.name != node.name) continue;
 
+			// Stability gate: only apply smart-cast fact when the binding
+			// is stable. Local val + parameters are always stable. Local
+			// var is stable only when the use site is in the same function
+			// as the declaration (i.e. not captured by a nested lambda /
+			// anonymous function).
+			bool stable = is_stable_for_smart_cast(pr, info, j, idx);
+			flow::Fact* applied = stable ? fact : null;
+
+			if (applied != null && applied.narrowed.kind != UNKNOWN) {
+				return applied.narrowed;
+			}
+
 			if (info.has_type[j]) {
 				TypeRef base = info.node_types[j];
-				if (fact != null && fact.not_null && base.nullable) {
+				if (applied != null && applied.not_null && base.nullable) {
 					base.nullable = false;
 				}
 				return base;
@@ -1202,6 +1239,15 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		AstNode* scope = &pr.nodes[current];
 		if (current == 0 || scope.parent == ast::NO_PARENT) break;
 		current = scope.parent;
+	}
+
+	// Scope walk did not find the declaration (e.g. when-subject `val x`
+	// whose parent is WHEN_EXPR, not a recognized scope). If we have a
+	// flow fact carrying an explicit narrowed type, return it. We cannot
+	// apply the stability gate without a decl_idx; this matches K1
+	// behaviour for these edge cases.
+	if (fact != null && fact.narrowed.kind != UNKNOWN) {
+		return fact.narrowed;
 	}
 
 	// Lambda receiver: resolve as member of lambda's implicit `this` receiver

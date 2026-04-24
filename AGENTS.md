@@ -49,7 +49,7 @@ kls/
       lifecycle.c3            # kls::lsp::lifecycle - initialize, shutdown handlers
       sync.c3                 # kls::lsp::sync - didOpen, didChange, didClose (triggers diagnostics)
       capabilities.c3         # kls::lsp::capabilities - server capability declarations
-      diagnostics.c3          # kls::lsp::diagnostics - publishDiagnostics (lexer + parser errors, unused imports/locals, deprecated usage)
+      diagnostics.c3          # kls::lsp::diagnostics - publishDiagnostics (lexer + parser errors, unused imports/locals, deprecated usage, smart-cast-impossible)
       hover.c3                # kls::lsp::hover - textDocument/hover (keywords, AST signatures, dep docs)
       completion.c3           # kls::lsp::completion - textDocument/completion (keywords, identifiers, cross-file)
       definition.c3           # kls::lsp::definition - textDocument/definition (scope-aware, cross-file, dep sources)
@@ -81,11 +81,13 @@ kls/
       ast.c3                  # kls::kotlin::ast - AST node types, ParseResult, tree queries
       parser.c3               # kls::kotlin::parser - Recursive-descent parser (flat AST with parents)
       symbols.c3              # kls::kotlin::symbols - Lightweight declaration symbol scanner
-      types.c3                # kls::kotlin::types - Type representation (TypeRef, TypeKind), inference/resolution
+      types.c3                # kls::kotlin::types - Type representation (TypeRef, TypeKind), inference/resolution + flow-sensitive smart cast
       stdlib.c3               # kls::kotlin::stdlib - Built-in Kotlin stdlib symbol table for completions/hover
       incremental.c3          # kls::kotlin::incremental - Incremental re-parsing (chunk-based top-level decls)
       token_cache.c3          # kls::kotlin::token_cache - Cached token streams, binary-search splice on edit
       jdk_symbols.c3          # kls::kotlin::jdk_symbols - Hard-coded JDK symbol table (java.lang, java.util)
+      cfg.c3                  # kls::kotlin::cfg - Per-function CFG construction (if/when/while/for/try/return/throw/break/continue)
+      flow.c3                 # kls::kotlin::flow - Dataflow analysis (worklist solver, smart cast facts, cross-lambda inheritance)
     deps/
       classpath.c3            # kls::deps::classpath - Build system detection (Gradle/Maven), JAR resolution
       classfile.c3            # kls::deps::classfile - JVM .class file parser (constant pool, descriptors)
@@ -149,6 +151,9 @@ kls/
     stdlib_test.c3            # Stdlib symbol tests
     kotlin_fallback_test.c3   # Kotlin fallback detection tests
     source_nav_test.c3        # Source navigation tests
+    cfg_test.c3               # CFG construction tests
+    flow_test.c3              # Dataflow analysis tests
+    smart_cast_diagnostic_test.c3 # Smart-cast-impossible diagnostic tests
     cross_file_completion_test.c3  # Cross-file completion tests
     cross_file_hover_test.c3       # Cross-file hover tests
     cross_file_references_test.c3  # Cross-file references tests
@@ -175,6 +180,16 @@ kls/
 **LSP Handlers** (`lsp/`): Each feature in own file. Cross-file features use workspace index + dep symbols.
 
 **DAP Debug Adapter** (`dap/`): `--dap` mode runs DapServer instead of LSP Server. Same Content-Length framing (reuses json_rpc). Spawns/attaches JVM with JDWP agent. JDWP binary protocol over TCP for breakpoints, stepping, variable inspection. IdManager maps between JDWP 8-byte IDs and DAP integer IDs. Poll loop multiplexes stdin (DAP messages) + JDWP socket (VM events) + process output.
+
+### Flow Analysis (smart casts)
+
+**CFG** (`kotlin/cfg.c3`): Per-function control-flow graphs covering `if`/`when`/`while`/`do-while`/`for`/`try`/`return`/`throw`/`break`/`continue`. Built once per function-like declaration (FUN_DECL, CONSTRUCTOR_DECL, INIT_BLOCK, LAMBDA_EXPR, ANONYMOUS_FUN_EXPR). Each AST stmt gets a CFG STATEMENT node; conditions get COND nodes with `succ[0]` = true branch, `succ[1]` = false branch. `Cfg.cfg_node_for(ast_idx)` looks up the CFG node owning a given AST node.
+
+**Dataflow** (`kotlin/flow.c3`): Worklist solver over the CFG with `FlowState` carrying up to `MAX_FACTS_PER_STATE` per-name `Fact`s. Transfer functions extract narrowing facts from `x is T` / `x !is T` / `x == null` / `x != null` (with conjunction/disjunction support), `x!!`, `requireNotNull(x)`, `x ?: return …`. Meet-over-paths fixpoint with TOP/BOTTOM lattice. `analyze_with_entry(pr, cfg, initial)` seeds the entry state from a caller-supplied snapshot — used to inherit enclosing-function facts into nested lambda CFGs at the lambda's lexical position so labeled-return null guards propagate across lambda boundaries.
+
+**Wiring** (`kotlin/types.c3`): Phase 9 of `resolve_types` calls `build_function_flows` to construct one `FunctionFlow {cfg, fa}` per function-like decl plus an `enclosing_func` map for every AST node. Phase 10 clears NAME_EXPR/DOT_EXPR `has_type` bits and re-runs expression + initializer + destructuring resolution so val/var bindings see narrowed types. `resolve_name_expr_type` calls `lookup_smart_cast_fact` then applies the **stability gate** (`is_stable_for_smart_cast`): PARAM and local val are always stable; local var is stable only when the use site is in the same function as the declaration (i.e. not captured by a nested lambda). Member properties / top-level bindings are not yet narrowed (property smart cast is deferred). Memory: every `mem::free(*.cached_types)` must be preceded by `types::free_type_info(...)` which calls `clear_flow` to release the per-function `Cfg`/`FlowAnalysis`.
+
+**Diagnostic** (`lsp/diagnostics.c3`): `add_smart_cast_impossible_diagnostics` walks NAME_EXPR uses; if a flow fact would narrow the name but `is_stable_for_smart_cast` returns false, emits a Warning ("Smart cast to T is impossible…"). Gated by `config::smart_cast_diagnostic` (default true, key: `smartCastDiagnostic` in initializationOptions).
 
 ## C3 Coding Conventions
 

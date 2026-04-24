@@ -15,6 +15,8 @@ import kls::kotlin::symbols;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::log;
+import kls::config;
+import kls::kotlin::flow;
 
 /**
  * Run the lexer on content and return a JSON array of LSP Diagnostic
@@ -137,6 +139,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	if (lexer_error_count == 0 && ast != null && ast.error_count == 0) {
 		if (type_info != null) {
 			add_type_mismatch_diagnostics(diagnostics, ast, type_info, workspace);
+			add_smart_cast_impossible_diagnostics(diagnostics, ast, type_info);
 		}
 		add_unreachable_code_diagnostics(diagnostics, ast);
 	}
@@ -1909,4 +1912,106 @@ fn bool find_val_in_scope(ParseResult* ast, uint assignment_idx, String name) {
 	}
 
 	return false;
+}
+
+// ── Smart cast impossible (Warning) ──────────────────────────────
+//
+// When a flow fact would narrow `x` at a use site but the binding fails
+// the stability gate (e.g. captured local var, custom-getter property),
+// surface a warning so the user knows why their code still requires a
+// `?.` / `!!` / explicit cast.
+//
+// Gated by config::smart_cast_diagnostic_enabled().
+
+/**
+ * Walk every NAME_EXPR in the file. If a flow fact exists for the name
+ * at that use site AND the resolved declaration is unstable, emit a
+ * Warning-severity diagnostic.
+ */
+fn void add_smart_cast_impossible_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (!config::smart_cast_diagnostic_enabled()) return;
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != NAME_EXPR) continue;
+		if (node.name.len == 0) continue;
+
+		flow::Fact* fact = types::lookup_smart_cast_fact(ast, type_info, i, node.name);
+		if (fact == null) continue;
+		// Only flag facts that would actually narrow something.
+		if (fact.narrowed.kind == types::TypeKind.UNKNOWN && !fact.not_null) continue;
+
+		uint decl_idx = find_decl_for_name(ast, i, node.name);
+		if (decl_idx == ast::NO_PARENT) continue;
+		if (types::is_stable_for_smart_cast(ast, type_info, decl_idx, i)) continue;
+
+		// Build the diagnostic.
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end = object::new_obj(tmem);
+		end.set("line", (int)node.start_line);
+		end.set("character", (int)(node.start_col + node.name.len));
+		range.set("start", start);
+		range.set("end", end);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // DiagnosticSeverity.Warning
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		if (fact.narrowed.kind != types::TypeKind.UNKNOWN) {
+			String narrowed_text = types::format_type(&fact.narrowed);
+			message.appendf("Smart cast to '%s' is impossible, because '%s' is a mutable property that could have been changed by this time",
+				narrowed_text, node.name);
+		} else {
+			message.appendf("Smart cast to non-null is impossible, because '%s' is a mutable property that could have been changed by this time",
+				node.name);
+		}
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+/**
+ * Locate the AST declaration index for `name` as seen from `use_idx`.
+ * Mirrors the scope walk in `types::resolve_name_expr_type` but returns
+ * the index instead of the type. Returns NO_PARENT when not found.
+ */
+fn uint find_decl_for_name(ParseResult* ast, uint use_idx, String name) {
+	uint scope_idx = 0;
+	uint offset = ast.nodes[use_idx].start_offset;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FILE && n.kind != FUN_DECL && n.kind != BLOCK
+			&& n.kind != FOR_STMT && n.kind != LAMBDA_EXPR
+			&& n.kind != CLASS_DECL && n.kind != INTERFACE_DECL
+			&& n.kind != OBJECT_DECL && n.kind != COMPANION_OBJECT_DECL
+			&& n.kind != INIT_BLOCK) continue;
+		if (offset >= n.start_offset && offset < n.end_offset) {
+			scope_idx = i;
+		}
+	}
+
+	uint current = scope_idx;
+	while (true) {
+		for (uint j = 0; j < ast.node_count; j++) {
+			AstNode* candidate = &ast.nodes[j];
+			if (candidate.parent != current) continue;
+			if (candidate.kind != PROPERTY_DECL && candidate.kind != PARAM) continue;
+			if (candidate.name != name) continue;
+			return j;
+		}
+		if (current == 0) break;
+		AstNode* scope = &ast.nodes[current];
+		if (scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+	return ast::NO_PARENT;
 }

@@ -19,10 +19,14 @@ import kls::log;
 
 struct ServerConfig {
 	bool hover_docs_from_source;   // extract Javadoc/KDoc from src.zip / -sources.jar
+	bool smart_cast_diagnostic;    // emit "smart cast to T is impossible" warnings
 }
 
 // Module-level global with defaults
-ServerConfig g_config = { .hover_docs_from_source = true };
+ServerConfig g_config = {
+	.hover_docs_from_source = true,
+	.smart_cast_diagnostic = true,
+};
 
 /**
  * Apply initializationOptions received from the client.
@@ -38,6 +42,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.hover_docs_from_source ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("smartCastDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.smart_cast_diagnostic = val.b;
+			log::debug("[kls] config: smartCastDiagnostic = %s",
+				g_config.smart_cast_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -46,6 +58,15 @@ fn void apply_init_options(Object* opts) {
  */
 fn bool hover_docs_enabled() {
 	return g_config.hover_docs_from_source;
+}
+
+/**
+ * Whether to emit "smart cast to T is impossible" diagnostics when a
+ * use site requests narrowing but the binding fails the stability gate
+ * (e.g. captured local var, mutable property).
+ */
+fn bool smart_cast_diagnostic_enabled() {
+	return g_config.smart_cast_diagnostic;
 }
 
 /**

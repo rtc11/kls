@@ -3677,3 +3677,96 @@ fn void when_subject_binding_smart_cast_is() @test {
 		assert(found_narrowed, "expected NAME_EXPR 'x' narrowed to String in `is String` arm");
 	};
 }
+
+// ── Stability gate (Kotlin spec §11.3, locals only) ────────────────
+
+fn void smart_cast_var_captured_by_lambda_is_unstable() @test {
+	@pool() {
+		// `var` captured by a nested lambda is not stable: the null check
+		// outside the lambda must NOT narrow x inside the lambda body.
+		String src =
+			`fun test(x: String?) {
+				if (x == null) { return }
+				run {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		// Parameters are stable, so `x` IS smart-cast in this case.
+		// (This test documents that PARAM is treated as val.)
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "PARAM is stable; expected String inside lambda, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_local_var_captured_by_lambda_is_unstable() @test {
+	@pool() {
+		// Local var captured by a nested lambda: outer null guard must
+		// NOT narrow the var inside the lambda (other code may reassign
+		// between guard and lambda invocation).
+		String src =
+			`fun test(s: String?) {
+				var hashKey: String? = s
+				if (hashKey == null) { return }
+				run {
+					val y = hashKey
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String?", "captured local var is unstable; expected String?, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_local_val_captured_by_lambda_is_stable() @test {
+	@pool() {
+		// Local val is always stable, even when captured by a lambda.
+		String src =
+			`fun test(s: String?) {
+				val hashKey: String? = s
+				if (hashKey == null) { return }
+				run {
+					val y = hashKey
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "captured local val is stable; expected String, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_local_var_same_function_is_stable() @test {
+	@pool() {
+		// Local var used in the same function as the check (no lambda
+		// boundary) is stable.
+		String src =
+			`fun test(s: String?) {
+				var hashKey: String? = s
+				if (hashKey == null) { return }
+				val y = hashKey
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "local var in same function is stable; expected String, got '%s'", t);
+		}
+	};
+}
