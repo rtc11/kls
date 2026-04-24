@@ -2,6 +2,7 @@ module kls::test::parser_test;
 
 import kls::kotlin::parser;
 import kls::kotlin::ast;
+import std::io;
 
 // ── Helper ──────────────────────────────────────────────────────────
 
@@ -4723,5 +4724,148 @@ fn void param_default_multiple_params() @test {
 		assert(defaults[0] == "1", "first default expected '1', got '%s'", defaults[0]);
 		assert(defaults[1].len == 0, "middle param has no default, got '%s'", defaults[1]);
 		assert(defaults[2] == "3", "third default expected '3', got '%s'", defaults[2]);
+	};
+}
+
+// ── Labeled return / break / continue + labeled lambdas (Kotlin spec §16.32) ──
+
+fn void return_label_stored_in_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { return@foo }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == RETURN_EXPR) {
+				assert(r.nodes[i].extra_text == "foo",
+					"expected RETURN_EXPR.extra_text='foo', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected RETURN_EXPR node");
+	};
+}
+
+fn void break_label_stored_in_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { while (true) { break@outer } }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == BREAK_EXPR) {
+				assert(r.nodes[i].extra_text == "outer",
+					"expected BREAK_EXPR.extra_text='outer', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected BREAK_EXPR node");
+	};
+}
+
+fn void continue_label_stored_in_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { while (true) { continue@loop } }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CONTINUE_EXPR) {
+				assert(r.nodes[i].extra_text == "loop",
+					"expected CONTINUE_EXPR.extra_text='loop', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected CONTINUE_EXPR node");
+	};
+}
+
+fn void labeled_lambda_label_stored_in_extra_text() @test {
+	@pool() {
+		// `name@ { ... }` -- label name stored on the LAMBDA_EXPR
+		ParseResult* r = do_parse("fun f() { val x = block@ { 42 } }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == LAMBDA_EXPR) {
+				assert(r.nodes[i].extra_text == "block",
+					"expected LAMBDA_EXPR.extra_text='block', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected LAMBDA_EXPR node");
+	};
+}
+
+fn void unlabeled_return_has_empty_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { return }"); defer free_result(r);
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == RETURN_EXPR) {
+				assert(r.nodes[i].extra_text.len == 0,
+					"expected empty extra_text for unlabeled return, got '%s'", r.nodes[i].extra_text);
+			}
+		}
+	};
+}
+
+// ── User-defined infix calls (Kotlin spec §17.5) ─────────────────
+
+fn void same_file_infix_recognized_in_pratt() @test {
+	@pool() {
+		// `combine` is declared `infix fun` in this file -- the Pratt loop
+		// must recognize `a combine b` as a binary infix call and produce
+		// a BINARY_EXPR wrapping it (not two separate expression statements).
+		ParseResult* r = do_parse(
+			"infix fun Int.combine(other: Int): Int = this + other\nfun main() { val z = 1 combine 2 }"
+		); defer free_result(r);
+
+		bool found_combine_binary = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == BINARY_EXPR && r.nodes[i].extra_text == "combine") {
+				found_combine_binary = true;
+				break;
+			}
+		}
+		assert(found_combine_binary,
+			"expected BINARY_EXPR with extra_text='combine' for `1 combine 2`");
+	};
+}
+
+fn void unknown_infix_not_recognized() @test {
+	@pool() {
+		// `bogus` is not defined as `infix fun` in this file -- must NOT
+		// be treated as infix (would otherwise consume `2` as RHS).
+		ParseResult* r = do_parse(
+			"fun main() { val z = 1 }\nfun bogus(): Int = 0"
+		); defer free_result(r);
+
+		// No BINARY_EXPR with extra_text="bogus" should appear.
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == BINARY_EXPR) {
+				assert(r.nodes[i].extra_text != "bogus",
+					"unexpected BINARY_EXPR with extra_text='bogus' (not infix)");
+			}
+		}
+	};
+}
+
+// ── when (val x = expr) subject binding (Kotlin spec §17.6) ─────────
+
+fn void when_subject_binding_creates_property_decl() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f(): Int { return when (val x = compute()) { 1 -> x; else -> 0 } }"
+		); defer free_result(r);
+		// Find WHEN_EXPR, then look for PROPERTY_DECL child named "x"
+		bool found_when = false;
+		bool found_binding = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHEN_EXPR) {
+				found_when = true;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == PROPERTY_DECL) {
+						assert(r.nodes[j].name == "x",
+							"expected PROPERTY_DECL name='x', got '%s'", r.nodes[j].name);
+						found_binding = true;
+					}
+				}
+			}
+		}
+		assert(found_when, "expected WHEN_EXPR");
+		assert(found_binding, "expected PROPERTY_DECL child of WHEN_EXPR named 'x'");
 	};
 }

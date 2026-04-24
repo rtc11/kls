@@ -335,6 +335,20 @@ fn void scientific_with_f_suffix() @test {
 	assert(tok.text == "1.5e-3f");
 }
 
+fn void scientific_underscore_in_exponent() @test {
+	// Kotlin spec §1.4: numeric literals allow `_` as visual separator,
+	// including inside the exponent.
+	Token tok = first("1.5e1_0");
+	assert(tok.kind == FLOAT_LITERAL, "expected FLOAT_LITERAL, got %d", (int)tok.kind);
+	assert(tok.text == "1.5e1_0", "expected '1.5e1_0', got '%s'", tok.text);
+}
+
+fn void scientific_underscore_in_signed_exponent() @test {
+	Token tok = first("2.5E-1_2");
+	assert(tok.kind == FLOAT_LITERAL);
+	assert(tok.text == "2.5E-1_2");
+}
+
 // ── String Literals ─────────────────────────────────────────────────
 
 fn void simple_string() @test {

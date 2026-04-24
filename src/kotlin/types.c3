@@ -1422,6 +1422,10 @@ fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, Stri
 				// Check for `x == null` in condition -> else branch has non-nullable
 				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, false);
 				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
+
+				// Check for `x !is Type` in condition -> else branch has narrowed type
+				TypeRef is_narrowed = find_not_is_check_in_condition(pr, parent_idx, name);
+				if (is_narrowed.kind != UNKNOWN) return is_narrowed;
 			}
 		}
 
@@ -1446,6 +1450,11 @@ fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, Stri
 								break;
 							}
 						}
+						break;
+					}
+					// Subject binding: when (val x = expr) -- bound name is the subject
+					if (pr.nodes[j].kind == PROPERTY_DECL) {
+						subject_name = pr.nodes[j].name;
 						break;
 					}
 					break;
@@ -1610,9 +1619,30 @@ fn TypeRef find_is_check_in_condition(ParseResult* pr, uint if_idx, String name)
 }
 
 /**
- * Get the variable name being checked in a TYPE_CHECK_EXPR.
- * Returns the name if the first child is a simple NAME_EXPR.
+ * Search the condition (first child) of an IF_EXPR for a `!is Type` check
+ * on `name`. Used for else-branch narrowing: `if (x !is String) ... else { x.length }`.
+ * In the else branch, x is known to be Type.
+ * Does NOT walk && (in else, && does not narrow uniformly).
  */
+fn TypeRef find_not_is_check_in_condition(ParseResult* pr, uint if_idx, String name) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != if_idx) continue;
+
+		AstNode* cond = &pr.nodes[j];
+
+		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "!is") {
+			if (try checked = get_is_check_variable_name(pr, j)) {
+				if (checked == name && cond.type_text.len > 0) {
+					return parse_type_text(cond.type_text);
+				}
+			}
+		}
+
+		break; // Only first child (the condition)
+	}
+
+	return TYPE_UNKNOWN;
+}
 fn String? get_is_check_variable_name(ParseResult* pr, uint check_idx) {
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent == check_idx && pr.nodes[j].kind == NAME_EXPR) {

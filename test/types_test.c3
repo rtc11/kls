@@ -3607,3 +3607,53 @@ fn void substitute_non_placeholder_unchanged() @test {
 		assert(subst.name == "String", "non-placeholder should be unchanged");
 	};
 }
+
+// ── !is else-branch narrowing (Kotlin spec §11.3) ─────────────────
+
+fn void smart_cast_not_is_else_branch() @test {
+	@pool() {
+		String src =
+			`fun test(x: Any) {
+				if (x !is String) {
+					val a = 0
+				} else {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		// Find the `val y = x` declaration; expect y resolved to String
+		// because in the else branch, `x` is narrowed via `!is`.
+		uint y_idx = find_decl(r, "y");
+		assert(y_idx > 0, "expected to find decl 'y'");
+		assert(ti.has_type[y_idx], "expected y to have a resolved type");
+		String t = types::format_type(&ti.node_types[y_idx]);
+		assert(t == "String", "!is else-branch should narrow x to String, got '%s'", t);
+	};
+}
+
+// ── when (val x = expr) smart-cast subject (Kotlin spec §17.6) ─────
+
+fn void when_subject_binding_smart_cast_is() @test {
+	@pool() {
+		// `val x` bound in when-subject; inside `is String` arm, x: String.
+		String src =
+			`fun test(): Int = when (val x = compute()) {
+				is String -> x.length
+				else -> 0
+			}
+			fun compute(): Any = "hi"`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+
+		// Look for at least one NAME_EXPR 'x' narrowed to String.
+		bool found_narrowed = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "x" && ti.has_type[i]) {
+				if (ti.node_types[i].name == "String") found_narrowed = true;
+			}
+		}
+		assert(found_narrowed, "expected NAME_EXPR 'x' narrowed to String in `is String` arm");
+	};
+}

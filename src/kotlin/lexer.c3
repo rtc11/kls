@@ -444,7 +444,7 @@ fn Token Lexer.lex_number(Lexer* self, usz start, uint start_line, uint start_co
 		if (self.pos < self.source.len && (self.peek() == '+' || self.peek() == '-')) {
 			self.advance();
 		}
-		while (self.pos < self.source.len && is_digit(self.peek())) {
+		while (self.pos < self.source.len && (is_digit(self.peek()) || self.peek() == '_')) {
 			self.advance();
 		}
 	}

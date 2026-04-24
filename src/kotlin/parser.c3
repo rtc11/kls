@@ -3,6 +3,7 @@ module kls::kotlin::parser;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import std::collections::list;
 
 // ── Parser struct ──────────────────────────────────────────────────
 
@@ -15,6 +16,13 @@ struct Parser {
 	String last_annotations;  // set by parse_modifiers, read by declaration parsers
 	bool allow_angle_comparison;  // when true, treat < > as comparison in expressions
 	bool is_script;  // when true, allow top-level statements/expressions (.kts files)
+
+	// User-defined infix function names. Populated by `parse()` from a quick
+	// pre-scan over `source` (same-file infix funs) AND from caller-provided
+	// workspace-wide infix names. Used by `is_user_defined_infix` to recognize
+	// `a foo b` style calls in the Pratt loop. Both slices are tcopy/tinit.
+	String[] same_file_infix;
+	String[] workspace_infix;
 
 	// Pending annotation source ranges captured by parse_modifiers, flushed
 	// into ANNOTATION_ENTRY child nodes by the declaration parser via
@@ -39,8 +47,15 @@ struct AnnotationRange {
 /**
  * Parse a complete Kotlin source file into the given ParseResult.
  * The result's node_count and error_count are reset to 0 before parsing.
+ *
+ * `workspace_infix`: optional slice of infix function names from other
+ * workspace files. Combined with same-file infix names (auto-detected
+ * by a pre-scan) so the Pratt loop recognizes user-defined infix calls
+ * like `a customOp b`. Default empty (parser uses only the hard-coded
+ * stdlib infix whitelist).
  */
-fn void parse(String source, ParseResult* result, bool is_script = false) {
+fn void parse(String source, ParseResult* result, bool is_script = false,
+		String[] workspace_infix = {}) {
 	result.node_count = 0;
 	result.error_count = 0;
 	result.is_script = is_script;
@@ -50,12 +65,80 @@ fn void parse(String source, ParseResult* result, bool is_script = false) {
 		.lexer = lexer::init(source),
 		.result = result,
 		.is_script = is_script,
+		.same_file_infix = scan_same_file_infix_names(source),
+		.workspace_infix = workspace_infix,
 	};
 
 	// Prime the parser with the first token
 	p.current = p.lexer.next();
 
 	p.parse_file();
+}
+
+/**
+ * One-pass scan over `source` collecting names of `infix fun` declarations.
+ * Used to populate Parser.same_file_infix so the Pratt loop can recognize
+ * forward-referenced infix calls inside the same file. Result allocated
+ * with tmem (request-scoped); caller must be inside a temp-allocator pool.
+ */
+fn String[] scan_same_file_infix_names(String source) {
+	List{String} names;
+	names.tinit();
+	Lexer lex = lexer::init(source);
+	bool saw_infix = false;
+	while (true) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) break;
+		switch (tok.kind) {
+			case KW_INFIX:
+				saw_infix = true;
+			case KW_FUN:
+				if (saw_infix) {
+					// Skip optional `<T>` type params, optional `Receiver.`, then name.
+					Token t = lex.next();
+					if (t.kind == LANGLE) {
+						int depth = 1;
+						while (depth > 0) {
+							t = lex.next();
+							if (t.kind == EOF) return names.array_view();
+							if (t.kind == LANGLE) {
+								depth++;
+							} else if (t.kind == RANGLE) {
+								depth--;
+							}
+						}
+						t = lex.next();
+					}
+					// Skip receiver `Foo.` if present
+					if (t.kind == IDENTIFIER) {
+						Lexer save = lex;
+						Token after = lex.next();
+						if (after.kind == DOT) {
+							t = lex.next();
+						} else {
+							lex = save;
+						}
+					}
+					if (t.kind == IDENTIFIER) {
+						names.push(t.text);
+					}
+				}
+				saw_infix = false;
+			case KW_VAL:
+				nextcase;
+			case KW_VAR:
+				nextcase;
+			case KW_CLASS:
+				nextcase;
+			case KW_INTERFACE:
+				nextcase;
+			case KW_OBJECT:
+				saw_infix = false;
+			default:
+				break;
+		}
+	}
+	return names.array_view();
 }
 
 /**
@@ -141,6 +224,27 @@ fn bool Parser.peek_is_constructor(Parser* self) {
 	Token next = self.lexer.next();
 	self.lexer = save;
 	return next.kind == KW_CONSTRUCTOR;
+}
+
+/**
+ * Check if current IDENT is followed by `AT LCURL` on the same line.
+ * Used to detect labeled lambda expressions: `label@ { ... }`.
+ * Per Kotlin spec, no whitespace allowed between IDENT and `@`, but we
+ * relax to same-line check since the lexer emits a single AT token.
+ */
+fn bool Parser.peek_is_label_at_for_lambda(Parser* self) {
+	if (self.current.kind != IDENTIFIER) return false;
+	Lexer save = self.lexer;
+	Token at_tok = self.lexer.next();
+	bool result = false;
+	if (at_tok.kind == AT && at_tok.line == self.current.line) {
+		Token after = self.lexer.next();
+		if (after.kind == LCURL && after.line == at_tok.line) {
+			result = true;
+		}
+	}
+	self.lexer = save;
+	return result;
 }
 
 fn void Parser.expect(Parser* self, TokenKind kind) {
@@ -1945,7 +2049,10 @@ fn void Parser.parse_when_expr(Parser* self) {
 		usz save_error_count = self.result.error_count;
 
 		self.advance(); // consume '('
-		if (!self.at(RPAREN) && !self.at_eof()) {
+		if (self.at(KW_VAL) || self.at(KW_VAR)) {
+			// when (val x = expr) -- subject binding (Kotlin spec §16.30)
+			self.parse_property_decl(ast::MOD_NONE);
+		} else if (!self.at(RPAREN) && !self.at_eof()) {
 			self.parse_expression(0);
 		}
 
@@ -2330,7 +2437,7 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
 			uint save_node_count = self.result.node_count;
 			usz save_error_count = self.result.error_count;
 
-			self.advance(); // consume '('
+		self.advance(); // consume '('
 			if (!self.at(RPAREN) && !self.at_eof()) {
 				self.parse_expression(0);
 			}
@@ -2338,33 +2445,33 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
 			if (self.at(RPAREN)) {
 				// Expression parsing consumed the condition correctly
 				self.advance(); // consume ')'
-		} else {
-			// Rollback and retry with < > as comparison operators
-			self.lexer = save_lexer;
-			self.current = save_current;
-			self.previous = save_previous;
-			self.result.node_count = save_node_count;
-			self.result.error_count = save_error_count;
-
-			self.allow_angle_comparison = true;
-			self.advance(); // consume '('
-			if (!self.at(RPAREN) && !self.at_eof()) {
-				self.parse_expression(0);
-			}
-			self.allow_angle_comparison = false;
-
-			if (self.at(RPAREN)) {
-				self.advance(); // consume ')'
 			} else {
-				// Still can't parse -- final fallback to skipping
+				// Rollback and retry with < > as comparison operators
 				self.lexer = save_lexer;
 				self.current = save_current;
 				self.previous = save_previous;
 				self.result.node_count = save_node_count;
 				self.result.error_count = save_error_count;
-				self.skip_balanced_parens();
+
+				self.allow_angle_comparison = true;
+				self.advance(); // consume '('
+				if (!self.at(RPAREN) && !self.at_eof()) {
+					self.parse_expression(0);
+				}
+				self.allow_angle_comparison = false;
+
+				if (self.at(RPAREN)) {
+					self.advance(); // consume ')'
+				} else {
+					// Still can't parse -- final fallback to skipping
+					self.lexer = save_lexer;
+					self.current = save_current;
+					self.previous = save_previous;
+					self.result.node_count = save_node_count;
+					self.result.error_count = save_error_count;
+					self.skip_balanced_parens();
+				}
 			}
-		}
 		}
 	}
 
@@ -2457,9 +2564,10 @@ fn uint Parser.parse_return_expr(Parser* self) {
 	self.advance(); // consume 'return'
 	uint children_start = self.result.node_count;
 
-	// Optional label: @label
+	// Optional label: @label  -- store name in extra_text for go-to-def
 	if (self.eat(AT)) {
 		if (self.at_identifier()) {
+			self.result.nodes[idx].extra_text = self.current.text;
 			self.advance();
 		}
 	}
@@ -2510,9 +2618,17 @@ fn void Parser.parse_break_continue(Parser* self, NodeKind kind) {
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'break' or 'continue'
 
-	// Optional label: @label
+	// Optional label: @label  -- store name in extra_text
+	// TODO(labeled-loops): go-to-definition for `break@label` / `continue@label`
+	// currently resolves only to enclosing FUN_DECL/LAMBDA_EXPR with matching
+	// name (see definition::find_label_target). Labeled loops `outer@ for ...`
+	// are not yet parsed -- the `outer@` prefix is dropped. Once labeled loops
+	// produce a FOR_STMT/WHILE_STMT/DO_STMT with `extra_text == "outer"`,
+	// extend find_label_target to match those node kinds too.
+	// See AGENTS.md "NOT DONE (deferred)" section for full context.
 	if (self.eat(AT)) {
 		if (self.at_identifier()) {
+			self.result.nodes[idx].extra_text = self.current.text;
 			self.advance();
 		}
 	}
@@ -2665,7 +2781,7 @@ fn uint Parser.parse_expression(Parser* self, int min_prec) {
 		// Only recognize a few well-known infix functions to avoid
 		// mistakenly treating statement-initial identifiers as infix calls.
 		if (prec == PREC_NONE && PREC_INFIX_CALL >= min_prec
-			&& is_known_infix_function(self.current.text)) {
+			&& self.is_user_or_known_infix(self.current.text)) {
 			prec = PREC_INFIX_CALL;
 		}
 
@@ -2781,6 +2897,10 @@ fn uint Parser.parse_spread_expr(Parser* self) {
 fn uint Parser.parse_primary(Parser* self) {
 	switch (self.current.kind) {
 		case IDENTIFIER:
+			// Detect labeled lambda: `label@ { ... }` -- IDENT AT LCURL on same line.
+			if (self.peek_is_label_at_for_lambda()) {
+				return self.parse_labeled_lambda_expr();
+			}
 			return self.parse_name_expr();
 
 		case INTEGER_LITERAL:
@@ -2993,6 +3113,23 @@ fn uint Parser.parse_paren_expr(Parser* self) {
 	self.expect(RPAREN);
 	self.adopt_children(idx, children_start);
 	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse a labeled lambda expression: `label@ { ... }`.
+ * Caller has already verified via `peek_is_label_at_for_lambda` that the
+ * current IDENT is followed by `AT LCURL` on the same line.
+ * Stores the label name in `LAMBDA_EXPR.extra_text` for `return@label` resolution.
+ */
+fn uint Parser.parse_labeled_lambda_expr(Parser* self) {
+	Token label_tok = self.current;
+	self.advance(); // consume label IDENT
+	self.advance(); // consume AT
+	uint idx = self.parse_lambda_expr();
+	self.result.nodes[idx].extra_text = label_tok.text;
+	// Extend start to cover the label so highlights/folds include it.
+	self.result.nodes[idx].start_offset = label_tok.offset;
 	return idx;
 }
 
@@ -4138,6 +4275,21 @@ fn bool is_known_infix_function(String text) {
 		case "step":     return true;
 		default:         return false;
 	}
+}
+
+/**
+ * Recognize a name as an infix call: hard-coded stdlib whitelist OR
+ * user-defined `infix fun` from same file or workspace.
+ */
+fn bool Parser.is_user_or_known_infix(Parser* self, String text) {
+	if (is_known_infix_function(text)) return true;
+	for (usz i = 0; i < self.same_file_infix.len; i++) {
+		if (self.same_file_infix[i] == text) return true;
+	}
+	for (usz i = 0; i < self.workspace_infix.len; i++) {
+		if (self.workspace_infix[i] == text) return true;
+	}
+	return false;
 }
 
 /**

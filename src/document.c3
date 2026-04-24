@@ -407,7 +407,15 @@ fn ParseResult*? DocumentStore.get_ast(DocumentStore* self, String uri) {
 
 	if (doc.cached_ast == null) {
 		doc.cached_ast = mem::new(ParseResult);
-		parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"));
+
+		// Collect workspace-wide infix function names (other files only;
+		// same-file is auto-detected by parser pre-scan). Temp-allocated.
+		String[] ws_infix = {};
+		if (self.workspace != null) {
+			ws_infix = collect_workspace_infix_names(self.workspace, uri);
+		}
+
+		parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"), ws_infix);
 
 		// Build chunk map for incremental parsing
 		if (doc.cached_chunks == null) {
@@ -438,7 +446,11 @@ fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
 		// Ensure AST is available first
 		if (doc.cached_ast == null) {
 			doc.cached_ast = mem::new(ParseResult);
-			parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"));
+			String[] ws_infix = {};
+			if (self.workspace != null) {
+				ws_infix = collect_workspace_infix_names(self.workspace, uri);
+			}
+			parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"), ws_infix);
 		}
 		doc.cached_types = mem::new(TypeInfo);
 		if (self.workspace != null) {
@@ -449,4 +461,27 @@ fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
 	}
 
 	return doc.cached_types;
+}
+
+/**
+ * Collect names of `infix fun` declarations from across the workspace,
+ * excluding the file currently being parsed (its own infix fns are
+ * already discovered by the parser's same-file pre-scan).
+ *
+ * Returns a tmem-allocated slice; caller must hold a temp pool open.
+ * Used to inform `parser::parse` about cross-file user-defined infix
+ * operators so `a customOp b` is recognized in the Pratt loop.
+ */
+fn String[] collect_workspace_infix_names(WorkspaceIndex* ws, String exclude_uri) {
+	if (ws == null) return {};
+	List{String} names;
+	names.tinit();
+	for (usz i = 0; i < ws.symbols.len(); i++) {
+		WorkspaceSymbol* sym = &ws.symbols[i];
+		if (sym.name.len == 0) continue;       // tombstone
+		if (!sym.is_infix) continue;
+		if (sym.uri == exclude_uri) continue;  // same-file scanned by parser
+		names.push(sym.name);
+	}
+	return names.array_view();
 }

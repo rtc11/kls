@@ -286,6 +286,80 @@ fn Object*? resolve_bare_identifier(ResolutionContext* ctx) {
  * retry handles cases where the AST didn't classify the token as a
  * dot-member but text-based detection still applies (e.g., partial AST).
  */
+
+/**
+ * Detect if the cursor IDENT is a label reference in `return@L` /
+ * `break@L` / `continue@L`. Re-lexes from offset 0 and looks at the
+ * two tokens preceding the cursor IDENT.
+ */
+fn bool detect_labeled_jump(String content, uint cursor_offset) {
+	Lexer lex = lexer::init(content);
+	Token prev2 = { .kind = EOF };
+	Token prev1 = { .kind = EOF };
+	while (true) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) break;
+		if (tok.offset == cursor_offset && tok.kind == IDENTIFIER) {
+			return prev1.kind == AT &&
+				(prev2.kind == KW_RETURN || prev2.kind == KW_BREAK || prev2.kind == KW_CONTINUE);
+		}
+		if (tok.offset > cursor_offset) break;
+		prev2 = prev1;
+		prev1 = tok;
+	}
+	return false;
+}
+
+/**
+ * Walk up the AST from the cursor offset, finding the nearest enclosing
+ * LAMBDA_EXPR with `extra_text == label` (explicit lambda label like
+ * `foo@ { return@foo }`) or FUN_DECL with `name == label` (implicit
+ * fn-name label like `fun foo() { ... return@foo }`).
+ */
+fn uint? find_label_target(ParseResult* pr, String label, uint cursor_offset) {
+	uint best = 0;
+	uint best_size = uint.max;
+	bool found = false;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) continue;
+		uint size = n.end_offset - n.start_offset;
+		if (size < best_size) {
+			best = i;
+			best_size = size;
+			found = true;
+		}
+	}
+	if (!found) return NOT_FOUND_BY_IMPORT~;
+
+	uint cur = best;
+	while (true) {
+		AstNode* n = &pr.nodes[cur];
+		if (n.kind == LAMBDA_EXPR && n.extra_text == label) return cur;
+		if (n.kind == FUN_DECL && n.name == label) return cur;
+		if (cur == n.parent) break; // FILE node
+		cur = n.parent;
+	}
+	return NOT_FOUND_BY_IMPORT~;
+}
+
+/**
+ * Resolve a labeled jump (`return@L` / `break@L` / `continue@L`) to its
+ * target lambda or function. Spec §16.32.
+ */
+fn Object*? resolve_labeled_jump(ResolutionContext* ctx) {
+	if (!detect_labeled_jump(ctx.doc.content, ctx.cursor_offset)) {
+		return NOT_FOUND_BY_IMPORT~;
+	}
+	if (try idx = find_label_target(ctx.pr, ctx.target_name, ctx.cursor_offset)) {
+		return build_location_from_node(ctx.uri, &ctx.pr.nodes[idx]);
+	}
+	// Recognized as label but no enclosing match — return null to suppress
+	// fallback to bare-identifier resolver (which would incorrectly try
+	// to find a value named `label`).
+	return null;
+}
+
 fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	Object* td = params.get("textDocument")!;
 	String uri = td.get_string("uri")!;
@@ -302,6 +376,15 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	}
 
 	log::debug("[def] target='%s' line=%d col=%d uri=%s", ctx.target_name, line, character, ctx.uri);
+
+	// ── Labeled jump dispatch (return@L / break@L / continue@L) ──
+	// Spec §16.32: labels reference enclosing lambdas (explicit @label
+	// or implicit fn-name) or labeled loops. Detected by re-lexing
+	// the two tokens preceding the cursor IDENT.
+	if (try result = resolve_labeled_jump(&ctx)) {
+		log::debug("[def] dispatch: labeled jump");
+		return result;
+	}
 
 	// ── Dot-member dispatch ──────────────────────────────────────
 	// Member access (`receiver.member`) is type-directed. MUST run before
@@ -782,6 +865,7 @@ fn bool is_scope_node(NodeKind kind) {
 		case FOR_STMT:
 		case CATCH_CLAUSE:
 		case LAMBDA_EXPR:
+		case WHEN_EXPR:
 			return true;
 		default:
 			return false;

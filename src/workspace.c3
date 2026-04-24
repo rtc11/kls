@@ -25,6 +25,7 @@ struct WorkspaceSymbol {
 	uint col;              // 0-based column
 	uint name_len;         // length of name for range building
 	bool is_private;       // declared with 'private' modifier (not importable)
+	bool is_infix;         // declared with 'infix' modifier (functions)
 	String[symbols::MAX_SUPERTYPES] supertypes;  // heap-copied supertype names
 	usz supertype_count;
 }
@@ -727,6 +728,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			.col = buf[i].col,
 			.name_len = buf[i].len,
 			.is_private = buf[i].is_private,
+			.is_infix = buf[i].is_infix,
 			.supertype_count = buf[i].supertype_count,
 		};
 
@@ -1112,6 +1114,25 @@ fn usz WorkspaceIndex.symbol_count(WorkspaceIndex* self) {
 		if (self.symbols[i].name.len > 0) count++;
 	}
 	return count;
+}
+
+/**
+ * Check if any indexed symbol with the given name is an `infix fun`.
+ * Used by parser to recognize cross-file user-defined infix calls in
+ * Pratt expression parsing (`a foo b`). O(matches) via name_index.
+ */
+fn bool WorkspaceIndex.is_infix_name(WorkspaceIndex* self, String name) {
+	if (try list_ref = self.name_index.get_ref(name)) {
+		List{usz}* list = list_ref;
+		for (usz i = 0; i < list.len(); i++) {
+			usz idx = (*list)[i];
+			if (idx >= self.symbols.len()) continue;
+			WorkspaceSymbol* sym = &self.symbols[idx];
+			if (sym.name.len == 0) continue; // tombstone
+			if (sym.kind == FUNCTION && sym.is_infix) return true;
+		}
+	}
+	return false;
 }
 
 // ── Workspace scanning ─────────────────────────────────────────────
