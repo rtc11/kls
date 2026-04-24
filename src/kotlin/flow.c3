@@ -1,0 +1,761 @@
+module kls::kotlin::flow;
+
+import kls::kotlin::ast;
+import kls::kotlin::cfg;
+import kls::kotlin::types;
+
+// ── Flow-sensitive smart-cast analysis ─────────────────────────────
+//
+// Per-function dataflow over the CFG built by `cfg::build_cfg`. Each
+// CFG edge carries a FlowState describing facts that hold along that
+// edge. Facts identify a variable (by AST decl index) and the narrowed
+// type proven at this point.
+//
+// Transfer functions (Phase C):
+//   * COND nodes inspecting `x is T` / `x !is T` / `x == null` / `x != null`
+//     branch facts onto succ[0] (true) / succ[1] (false).
+//   * STATEMENT nodes scan their AST sub-tree for:
+//       - `x!!`  (POSTFIX_EXPR with operator "!!")
+//       - `requireNotNull(x)` / `checkNotNull(x)`
+//       - `require(x != null)` / `check(x != null)`
+//       - `x ?: return ...` (ELVIS BINARY_EXPR with right = RETURN/THROW)
+//     Facts asserted post-statement.
+//   * ASSIGNMENT_EXPR kills facts about the assigned name.
+//
+// Stability gating is deferred to Phase E.
+
+const usz MAX_FACTS_PER_STATE = 16;
+const usz MAX_FLOW_NODES = cfg::MAX_CFG_NODES;
+
+struct Fact {
+	uint decl_idx;          // AST decl index this fact constrains (NO_PARENT for "this")
+	String name;            // variable name (used when decl_idx is NO_PARENT)
+	TypeRef narrowed;       // narrowed type
+	bool not_null;          // proven non-null
+	bool occupied;
+}
+
+struct FlowState {
+	Fact[MAX_FACTS_PER_STATE] facts;
+	uint count;
+	bool unreachable;       // BOTTOM
+	bool top;               // TOP — used as initial state for non-entry nodes
+}
+
+struct FlowAnalysis {
+	FlowState[MAX_FLOW_NODES] in_state;
+	FlowState[MAX_FLOW_NODES] out_state;
+	bool[MAX_FLOW_NODES] in_worklist;
+	uint[MAX_FLOW_NODES] worklist;
+	uint worklist_head;
+	uint worklist_tail;
+}
+
+// ── State helpers ──────────────────────────────────────────────────
+
+fn FlowState empty_state() {
+	FlowState s;
+	s.count = 0;
+	s.unreachable = false;
+	s.top = false;
+	for (uint i = 0; i < MAX_FACTS_PER_STATE; i++) s.facts[i].occupied = false;
+	return s;
+}
+
+fn FlowState top_state() {
+	FlowState s = empty_state();
+	s.top = true;
+	return s;
+}
+
+fn FlowState bottom_state() {
+	FlowState s = empty_state();
+	s.unreachable = true;
+	return s;
+}
+
+fn void FlowState.add_fact(FlowState* self, uint decl_idx, String name, TypeRef narrowed, bool not_null) {
+	// Replace existing fact for same decl_idx/name.
+	for (uint i = 0; i < self.count; i++) {
+		if (self.facts[i].occupied
+			&& self.facts[i].decl_idx == decl_idx
+			&& self.facts[i].name == name) {
+			self.facts[i].narrowed = narrowed;
+			self.facts[i].not_null = self.facts[i].not_null || not_null;
+			return;
+		}
+	}
+	if (self.count >= MAX_FACTS_PER_STATE) return;
+	self.facts[self.count] = {
+		.decl_idx = decl_idx,
+		.name = name,
+		.narrowed = narrowed,
+		.not_null = not_null,
+		.occupied = true
+	};
+	self.count++;
+}
+
+fn void FlowState.kill_name(FlowState* self, String name) {
+	for (uint i = 0; i < self.count; i++) {
+		if (self.facts[i].occupied && self.facts[i].name == name) {
+			self.facts[i].occupied = false;
+		}
+	}
+}
+
+/**
+ * Look up a fact by name (preferred) or decl_idx. Returns null if absent.
+ */
+fn Fact* FlowState.lookup(FlowState* self, String name) {
+	if (self.unreachable || self.top) return null;
+	for (uint i = 0; i < self.count; i++) {
+		if (self.facts[i].occupied && self.facts[i].name == name) {
+			return &self.facts[i];
+		}
+	}
+	return null;
+}
+
+/**
+ * Meet (intersect) two states: a fact survives only if both states agree.
+ * TOP meets X = X. BOTTOM meets X = X.
+ *
+ * For agreement on the narrowed type: same TypeKind + same name. Otherwise
+ * we drop the type narrowing but may keep `not_null` if both prove non-null.
+ */
+fn FlowState meet(FlowState* a, FlowState* b) {
+	if (a.unreachable) return *b;
+	if (b.unreachable) return *a;
+	if (a.top) return *b;
+	if (b.top) return *a;
+
+	FlowState out = empty_state();
+	for (uint i = 0; i < a.count; i++) {
+		if (!a.facts[i].occupied) continue;
+		Fact* af = &a.facts[i];
+		// Find matching fact in b
+		Fact* bf = null;
+		for (uint j = 0; j < b.count; j++) {
+			if (!b.facts[j].occupied) continue;
+			if (b.facts[j].name == af.name) {
+				bf = &b.facts[j];
+				break;
+			}
+		}
+		if (bf == null) continue;
+		bool same_type = af.narrowed.kind == bf.narrowed.kind
+			&& af.narrowed.name == bf.narrowed.name
+			&& af.narrowed.nullable == bf.narrowed.nullable;
+		bool both_not_null = af.not_null && bf.not_null;
+		if (same_type) {
+			out.add_fact(af.decl_idx, af.name, af.narrowed, both_not_null);
+		} else if (both_not_null) {
+			// Different narrowings but both prove non-null — preserve not_null only.
+			TypeRef nn = af.narrowed;
+			nn.nullable = false;
+			out.add_fact(af.decl_idx, af.name, nn, true);
+		}
+	}
+	return out;
+}
+
+/**
+ * Returns true when `b` adds anything to `a` (set inclusion check).
+ */
+fn bool changed(FlowState* a, FlowState* b) {
+	if (a.unreachable != b.unreachable) return true;
+	if (a.top != b.top) return true;
+	if (a.unreachable || a.top) return false;
+	if (a.count != b.count) return true;
+	for (uint i = 0; i < a.count; i++) {
+		if (a.facts[i].occupied != b.facts[i].occupied) return true;
+		if (!a.facts[i].occupied) continue;
+		if (a.facts[i].name != b.facts[i].name) return true;
+		if (a.facts[i].not_null != b.facts[i].not_null) return true;
+		if (a.facts[i].narrowed.kind != b.facts[i].narrowed.kind) return true;
+		if (a.facts[i].narrowed.name != b.facts[i].narrowed.name) return true;
+		if (a.facts[i].narrowed.nullable != b.facts[i].narrowed.nullable) return true;
+	}
+	return false;
+}
+
+// ── AST helpers for transfer functions ─────────────────────────────
+
+/**
+ * Walk through PAREN_EXPR / "!" PREFIX_EXPR wrappers to find the underlying
+ * condition node. Returns (final_idx, negated_count). Caller XORs negation
+ * into branch direction.
+ */
+fn uint unwrap_negation(ParseResult* pr, uint idx, bool* negated) {
+	*negated = false;
+	while (idx < pr.node_count) {
+		AstNode* n = &pr.nodes[idx];
+		if (n.kind == PAREN_EXPR) {
+			uint inner = first_child(pr, idx);
+			if (inner == ast::NO_PARENT) return idx;
+			idx = inner;
+			continue;
+		}
+		if (n.kind == PREFIX_EXPR && n.extra_text == "!") {
+			uint inner = first_child(pr, idx);
+			if (inner == ast::NO_PARENT) return idx;
+			*negated = !*negated;
+			idx = inner;
+			continue;
+		}
+		return idx;
+	}
+	return idx;
+}
+
+fn uint first_child(ParseResult* pr, uint parent_idx) {
+	if (parent_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* p = &pr.nodes[parent_idx];
+	if (p.child_count == 0) return ast::NO_PARENT;
+	for (uint i = p.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent == parent_idx) return i;
+	}
+	return ast::NO_PARENT;
+}
+
+fn uint nth_child(ParseResult* pr, uint parent_idx, uint n) {
+	if (parent_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* p = &pr.nodes[parent_idx];
+	if (p.child_count <= n) return ast::NO_PARENT;
+	uint pos = 0;
+	for (uint i = p.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent == parent_idx) {
+			if (pos == n) return i;
+			pos++;
+		}
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * If `expr_idx` is a NAME_EXPR, return its name; else "".
+ * Handles wrapping PAREN_EXPR.
+ */
+fn String name_of_expr(ParseResult* pr, uint expr_idx) {
+	if (expr_idx >= pr.node_count) return "";
+	AstNode* n = &pr.nodes[expr_idx];
+	if (n.kind == PAREN_EXPR) {
+		return name_of_expr(pr, first_child(pr, expr_idx));
+	}
+	if (n.kind == NAME_EXPR) return n.name;
+	if (n.kind == THIS_EXPR) return "this";
+	return "";
+}
+
+/**
+ * Check if `expr_idx` is a LITERAL_EXPR null.
+ */
+fn bool is_null_literal(ParseResult* pr, uint expr_idx) {
+	if (expr_idx >= pr.node_count) return false;
+	AstNode* n = &pr.nodes[expr_idx];
+	if (n.kind == PAREN_EXPR) return is_null_literal(pr, first_child(pr, expr_idx));
+	if (n.kind == LITERAL_EXPR && n.extra_text == "null") return true;
+	return false;
+}
+
+/**
+ * Try to extract an `is`/`!is` check on a name. Sets *out_name and
+ * *out_type_text. Returns "is" or "!is" or "" when not a type check.
+ * Handles the (negated, original) shape transparently — caller XORs.
+ */
+fn String parse_type_check(ParseResult* pr, uint expr_idx, String* out_name, String* out_type_text) {
+	if (expr_idx >= pr.node_count) return "";
+	AstNode* n = &pr.nodes[expr_idx];
+	if (n.kind != TYPE_CHECK_EXPR) return "";
+	uint subj_idx = first_child(pr, expr_idx);
+	String subj = name_of_expr(pr, subj_idx);
+	if (subj.len == 0) return "";
+	*out_name = subj;
+	*out_type_text = n.type_text;
+	return n.extra_text;
+}
+
+/**
+ * Try to extract a null comparison: returns "==null", "!=null", or "".
+ * On match, sets *out_name to the variable being compared.
+ */
+fn String parse_null_check(ParseResult* pr, uint expr_idx, String* out_name) {
+	if (expr_idx >= pr.node_count) return "";
+	AstNode* n = &pr.nodes[expr_idx];
+	if (n.kind != BINARY_EXPR) return "";
+	if (n.extra_text != "==" && n.extra_text != "!=") return "";
+	uint l = first_child(pr, expr_idx);
+	uint r = nth_child(pr, expr_idx, 1);
+	String lname = name_of_expr(pr, l);
+	String rname = name_of_expr(pr, r);
+	if (lname.len > 0 && is_null_literal(pr, r)) {
+		*out_name = lname;
+		return n.extra_text == "==" ? "==null" : "!=null";
+	}
+	if (rname.len > 0 && is_null_literal(pr, l)) {
+		*out_name = rname;
+		return n.extra_text == "==" ? "==null" : "!=null";
+	}
+	return "";
+}
+
+// ── Transfer functions ─────────────────────────────────────────────
+
+/**
+ * Compute branch facts for a COND node: returns (true_state, false_state).
+ *
+ * Walks the COND's AST node looking for:
+ *   - `x is T`  → true:{x narrow T}    false:{x narrow Not(T) — not modeled}
+ *   - `x !is T` → true:{x narrow Not(T)}  false:{x narrow T}
+ *   - `x == null` → true:{} false:{x not_null}
+ *   - `x != null` → true:{x not_null} false:{}
+ *   - `a && b` → true: both true facts; false: nothing (need disjoint analysis)
+ *   - `a || b` → false: both false facts; true: nothing
+ *   - `!a` → swap (handled via unwrap_negation)
+ */
+fn void compute_cond_facts(ParseResult* pr, uint cond_ast_idx, FlowState* in_s,
+		FlowState* true_out, FlowState* false_out) {
+	*true_out = *in_s;
+	*false_out = *in_s;
+	if (in_s.unreachable || in_s.top) return;
+	apply_cond_facts(pr, cond_ast_idx, true_out, false_out);
+}
+
+fn void apply_cond_facts(ParseResult* pr, uint cond_idx, FlowState* true_out, FlowState* false_out) {
+	if (cond_idx >= pr.node_count) return;
+
+	// WHEN_ENTRY: COND nodes for `when` arms point at the WHEN_ENTRY directly.
+	// Derive the subject name (from enclosing WHEN_EXPR) and look for `is T`
+	// conditions inside the entry's children.
+	if (pr.nodes[cond_idx].kind == WHEN_ENTRY) {
+		apply_when_entry_facts(pr, cond_idx, true_out, false_out);
+		return;
+	}
+
+	bool negated = false;
+	uint idx = unwrap_negation(pr, cond_idx, &negated);
+	AstNode* n = &pr.nodes[idx];
+
+	String name;
+	String type_text;
+	String op = parse_type_check(pr, idx, &name, &type_text);
+	if (op.len > 0) {
+		bool is_pos = op == "is";
+		if (negated) is_pos = !is_pos;
+		TypeRef t = types::parse_type_text(type_text);
+		if (is_pos) {
+			true_out.add_fact(ast::NO_PARENT, name, t, !t.nullable);
+			// false branch: we don't model "not T" narrowing
+		} else {
+			false_out.add_fact(ast::NO_PARENT, name, t, !t.nullable);
+		}
+		return;
+	}
+
+	String null_op = parse_null_check(pr, idx, &name);
+	if (null_op.len > 0) {
+		bool is_eq = null_op == "==null";
+		if (negated) is_eq = !is_eq;
+		// narrowed type stays UNKNOWN — only the not_null bit matters; the
+		// declared type is looked up by the caller and has nullable cleared.
+		TypeRef nn = types::TYPE_UNKNOWN;
+		if (is_eq) {
+			// `x == null`: false-branch proves x not-null
+			false_out.add_fact(ast::NO_PARENT, name, nn, true);
+		} else {
+			// `x != null`: true-branch proves x not-null
+			true_out.add_fact(ast::NO_PARENT, name, nn, true);
+		}
+		return;
+	}
+
+	// Conjunction / disjunction
+	if (n.kind == BINARY_EXPR) {
+		String op2 = n.extra_text;
+		if (op2 == "&&" || op2 == "||") {
+			uint l = first_child(pr, idx);
+			uint r = nth_child(pr, idx, 1);
+			FlowState lt = empty_state();
+			FlowState lf = empty_state();
+			FlowState rt = empty_state();
+			FlowState rf = empty_state();
+			apply_cond_facts(pr, l, &lt, &lf);
+			apply_cond_facts(pr, r, &rt, &rf);
+			if (op2 == "&&") {
+				// true-branch: both must be true (union narrow)
+				merge_facts_into(true_out, &lt);
+				merge_facts_into(true_out, &rt);
+				// false-branch: indeterminate (could be l-false or r-false)
+				// Skip narrowing on false branch for &&.
+				if (negated) {
+					// !(a && b) — flip
+					FlowState tmp = *true_out;
+					*true_out = *false_out;
+					*false_out = tmp;
+				}
+			} else {
+				// ||  true-branch: indeterminate.
+				// false-branch: both must be false (union narrow).
+				merge_facts_into(false_out, &lf);
+				merge_facts_into(false_out, &rf);
+				if (negated) {
+					FlowState tmp = *true_out;
+					*true_out = *false_out;
+					*false_out = tmp;
+				}
+			}
+			return;
+		}
+	}
+}
+
+fn void merge_facts_into(FlowState* dest, FlowState* src) {
+	if (src.unreachable || src.top) return;
+	for (uint i = 0; i < src.count; i++) {
+		if (!src.facts[i].occupied) continue;
+		Fact* f = &src.facts[i];
+		dest.add_fact(f.decl_idx, f.name, f.narrowed, f.not_null);
+	}
+}
+
+/**
+ * WHEN_ENTRY → branch facts. The COND for a `when` arm points at the
+ * WHEN_ENTRY node. Subject name comes from the enclosing WHEN_EXPR; the
+ * entry's first non-body child is the condition.
+ *
+ * Supported patterns:
+ *   when (x) { is String -> ... }   → narrow x to String on true
+ *   when (x) { null -> ... }        → x not-null on false
+ *   when (x) { val y = expr; ... }  → subject binding (skipped)
+ *
+ * `else` arms have no condition; we treat them as unconditional pass-through
+ * (true_out unchanged, false_out unreachable handled by solver).
+ */
+fn void apply_when_entry_facts(ParseResult* pr, uint entry_idx, FlowState* true_out, FlowState* false_out) {
+	AstNode* entry = &pr.nodes[entry_idx];
+	if (entry.extra_text == "else") return;
+
+	// Find enclosing WHEN_EXPR
+	uint when_idx = entry.parent;
+	if (when_idx >= pr.node_count || pr.nodes[when_idx].kind != WHEN_EXPR) return;
+
+	// Subject name: first child of WHEN_EXPR
+	String subject_name = "";
+	for (uint i = pr.nodes[when_idx].children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != when_idx) continue;
+		if (pr.nodes[i].kind == WHEN_ENTRY) break;
+		AstNode* sub = &pr.nodes[i];
+		if (sub.kind == NAME_EXPR) {
+			subject_name = sub.name;
+			break;
+		}
+		if (sub.kind == PROPERTY_DECL) {
+			subject_name = sub.name;
+			break;
+		}
+		if (sub.kind == PAREN_EXPR) {
+			uint inner = first_child(pr, i);
+			if (inner != ast::NO_PARENT && pr.nodes[inner].kind == NAME_EXPR) {
+				subject_name = pr.nodes[inner].name;
+			}
+			break;
+		}
+		break;
+	}
+	if (subject_name.len == 0) return;
+
+	// Walk entry children: first child is the condition; following children
+	// are body. (For multi-condition arms `is A, is B -> ...` we only narrow
+	// when all conditions agree on the same type — TODO.)
+	uint cond_child = ast::NO_PARENT;
+	for (uint i = pr.nodes[entry_idx].children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != entry_idx) continue;
+		cond_child = i;
+		break;
+	}
+	if (cond_child == ast::NO_PARENT) return;
+
+	AstNode* cn = &pr.nodes[cond_child];
+
+	// `is T` / `!is T` arm
+	if (cn.kind == TYPE_CHECK_EXPR) {
+		bool is_pos = cn.extra_text == "is";
+		TypeRef t = types::parse_type_text(cn.type_text);
+		if (is_pos) {
+			true_out.add_fact(ast::NO_PARENT, subject_name, t, !t.nullable);
+		} else {
+			false_out.add_fact(ast::NO_PARENT, subject_name, t, !t.nullable);
+		}
+		return;
+	}
+
+	// `null` literal arm: when (x) { null -> ... }
+	if (cn.kind == LITERAL_EXPR && cn.extra_text == "null") {
+		// true: x is null (no useful fact). false: x is non-null.
+		false_out.add_fact(ast::NO_PARENT, subject_name, types::TYPE_UNKNOWN, true);
+		return;
+	}
+}
+
+/**
+ * Walk a STATEMENT's sub-AST looking for guard effects:
+ *   - `x!!` → assert x non-null
+ *   - `requireNotNull(x)` / `checkNotNull(x)` → assert x non-null
+ *   - `require(x != null)` / `check(x != null)` → assert x non-null
+ *   - `x ?: return` / `x ?: throw` → assert x non-null (ELVIS with right diverges)
+ *   - assignment `x = ...` → kill facts about x
+ */
+fn void apply_stmt_effects(ParseResult* pr, uint stmt_idx, FlowState* state) {
+	if (stmt_idx >= pr.node_count) return;
+	if (state.unreachable || state.top) return;
+	scan_node(pr, stmt_idx, state);
+}
+
+fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
+	if (idx >= pr.node_count) return;
+	AstNode* n = &pr.nodes[idx];
+
+	switch (n.kind) {
+		case ASSIGNMENT_EXPR:
+			// LHS is first child; if NAME_EXPR, kill facts.
+			uint lhs = first_child(pr, idx);
+			String lname = name_of_expr(pr, lhs);
+			if (lname.len > 0) state.kill_name(lname);
+			// Continue scanning RHS.
+			break;
+
+		case POSTFIX_EXPR:
+			if (n.extra_text == "!!") {
+				uint inner = first_child(pr, idx);
+				String name = name_of_expr(pr, inner);
+				if (name.len > 0) {
+					TypeRef nn = types::TYPE_UNKNOWN;
+					state.add_fact(ast::NO_PARENT, name, nn, true);
+				}
+			}
+			break;
+
+		case BINARY_EXPR:
+			if (n.extra_text == "?:") {
+				// Elvis: if right side is RETURN/THROW, left becomes non-null after.
+				uint l = first_child(pr, idx);
+				uint r = nth_child(pr, idx, 1);
+				if (r != ast::NO_PARENT) {
+					AstNode* rn = &pr.nodes[r];
+					bool diverges = rn.kind == RETURN_EXPR
+						|| rn.kind == THROW_EXPR
+						|| (rn.kind == BLOCK && block_diverges(pr, r));
+					if (diverges) {
+						String lname = name_of_expr(pr, l);
+						if (lname.len > 0) {
+							TypeRef nn = types::TYPE_UNKNOWN;
+							state.add_fact(ast::NO_PARENT, lname, nn, true);
+						}
+					}
+				}
+			}
+			break;
+
+		case CALL_EXPR:
+			// requireNotNull(x), checkNotNull(x), require(x != null), check(x != null)
+			if (n.name == "requireNotNull" || n.name == "checkNotNull") {
+				uint arg = first_arg_expr(pr, idx);
+				String name = name_of_expr(pr, arg);
+				if (name.len > 0) {
+					TypeRef nn = types::TYPE_UNKNOWN;
+					state.add_fact(ast::NO_PARENT, name, nn, true);
+				}
+			} else if (n.name == "require" || n.name == "check") {
+				uint arg = first_arg_expr(pr, idx);
+				String name;
+				String op = parse_null_check(pr, arg, &name);
+				if (op == "!=null" && name.len > 0) {
+					TypeRef nn = types::TYPE_UNKNOWN;
+					state.add_fact(ast::NO_PARENT, name, nn, true);
+				}
+			}
+			break;
+
+		default:
+			break;
+	}
+
+	// Recurse into children — facts accumulate left-to-right.
+	if (n.child_count == 0) return;
+	for (uint i = n.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent == idx) {
+			scan_node(pr, i, state);
+		}
+	}
+}
+
+fn uint first_arg_expr(ParseResult* pr, uint call_idx) {
+	if (call_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* call = &pr.nodes[call_idx];
+	if (call.child_count == 0) return ast::NO_PARENT;
+	for (uint i = call.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != call_idx) continue;
+		if (pr.nodes[i].kind == VALUE_ARGUMENT) {
+			return ast::get_arg_expr_idx(pr, i);
+		}
+	}
+	return ast::NO_PARENT;
+}
+
+fn bool block_diverges(ParseResult* pr, uint block_idx) {
+	if (block_idx >= pr.node_count) return false;
+	AstNode* b = &pr.nodes[block_idx];
+	if (b.child_count == 0) return false;
+	for (uint i = b.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent == block_idx) {
+			NodeKind k = pr.nodes[i].kind;
+			if (k == RETURN_EXPR || k == THROW_EXPR) return true;
+		}
+	}
+	return false;
+}
+
+// ── Worklist solver ────────────────────────────────────────────────
+
+fn void enqueue(FlowAnalysis* fa, uint idx) {
+	if (fa.in_worklist[idx]) return;
+	if (fa.worklist_tail >= MAX_FLOW_NODES) return;
+	fa.worklist[fa.worklist_tail] = idx;
+	fa.worklist_tail++;
+	fa.in_worklist[idx] = true;
+}
+
+fn uint dequeue(FlowAnalysis* fa) {
+	if (fa.worklist_head >= fa.worklist_tail) return cfg::NO_CFG;
+	uint idx = fa.worklist[fa.worklist_head];
+	fa.worklist_head++;
+	fa.in_worklist[idx] = false;
+	return idx;
+}
+
+/**
+ * Run forward dataflow over the CFG. Returns a heap-allocated FlowAnalysis
+ * the caller must free with `free(fa)`.
+ *
+ * Initial: in[entry]=empty, all others=top (so first meet adopts incoming).
+ * Standard meet-over-paths fixpoint.
+ */
+fn FlowAnalysis* analyze(ParseResult* pr, Cfg* cfg) {
+	FlowState empty = empty_state();
+	return analyze_with_entry(pr, cfg, &empty);
+}
+
+/**
+ * Like `analyze` but seeds the entry state from `initial`. Used for
+ * lambda CFGs nested inside an enclosing function: the lambda inherits
+ * the enclosing function's flow facts at the lambda's lexical position.
+ */
+fn FlowAnalysis* analyze_with_entry(ParseResult* pr, Cfg* cfg, FlowState* initial) {
+	FlowAnalysis* fa = mem::new(FlowAnalysis);
+	for (uint i = 0; i < cfg.node_count; i++) {
+		fa.in_state[i] = top_state();
+		fa.out_state[i] = top_state();
+		fa.in_worklist[i] = false;
+	}
+	fa.worklist_head = 0;
+	fa.worklist_tail = 0;
+
+	fa.in_state[cfg.entry] = *initial;
+	enqueue(fa, cfg.entry);
+
+	uint iterations = 0;
+	const uint MAX_ITER = 100000;
+	while (fa.worklist_head < fa.worklist_tail && iterations < MAX_ITER) {
+		iterations++;
+		uint idx = dequeue(fa);
+		if (idx == cfg::NO_CFG) break;
+
+		FlowState new_out = transfer(pr, cfg, idx, &fa.in_state[idx]);
+		FlowState new_out_false = bottom_state();
+		if (cfg.nodes[idx].kind == COND) {
+			new_out_false = empty_state();
+			new_out = empty_state();
+			compute_cond_facts(pr, cfg.nodes[idx].ast_idx, &fa.in_state[idx], &new_out, &new_out_false);
+		}
+
+		fa.out_state[idx] = new_out;
+
+		CfgNode* node = &cfg.nodes[idx];
+		for (uint k = 0; k < node.succ_count; k++) {
+			uint succ = node.succ[k];
+			FlowState* edge = &new_out;
+			if (node.kind == COND && k == 1) edge = &new_out_false;
+			FlowState merged = meet(&fa.in_state[succ], edge);
+			if (changed(&fa.in_state[succ], &merged)) {
+				fa.in_state[succ] = merged;
+				enqueue(fa, succ);
+			}
+		}
+	}
+	return fa;
+}
+
+/**
+ * Transfer function for a single CFG node. For STATEMENT nodes: scans
+ * the AST for guard effects. For terminator / structural nodes: pass
+ * through. COND is handled separately by the solver via compute_cond_facts.
+ */
+fn FlowState transfer(ParseResult* pr, Cfg* cfg, uint cfg_idx, FlowState* in_s) {
+	CfgNode* node = &cfg.nodes[cfg_idx];
+	FlowState s = *in_s;
+	if (s.unreachable || s.top) return s;
+	switch (node.kind) {
+		case STATEMENT:
+			apply_stmt_effects(pr, node.ast_idx, &s);
+			return s;
+		case RETURN:
+		case THROW:
+		case BREAK:
+		case CONTINUE:
+			// Side-effects of the operand expression first
+			apply_stmt_effects(pr, node.ast_idx, &s);
+			return s;
+		default:
+			return s;
+	}
+}
+
+/**
+ * Look up the smart-cast fact for a NAME_EXPR usage at AST node idx.
+ * Walks up the AST to find the enclosing CFG-mapped node and reads
+ * its IN-state. Returns null if no fact applies.
+ */
+fn Fact* FlowAnalysis.fact_at(FlowAnalysis* self, ParseResult* pr, Cfg* cfg, uint ast_idx, String name) {
+	uint cur = ast_idx;
+	while (cur != ast::NO_PARENT && cur < pr.node_count) {
+		uint cfg_idx = cfg.cfg_node_for(cur);
+		if (cfg_idx != cfg::NO_CFG) {
+			return self.in_state[cfg_idx].lookup(name);
+		}
+		cur = pr.nodes[cur].parent;
+	}
+	return null;
+}
+
+/**
+ * Snapshot of the in-state at the CFG node enclosing `ast_idx`. Used to
+ * seed a nested lambda's CFG with facts that hold at its lexical position
+ * in the enclosing function. Returns empty_state() if no enclosing CFG
+ * node is found.
+ */
+fn FlowState FlowAnalysis.state_at(FlowAnalysis* self, ParseResult* pr, Cfg* cfg, uint ast_idx) {
+	uint cur = ast_idx;
+	while (cur != ast::NO_PARENT && cur < pr.node_count) {
+		uint cfg_idx = cfg.cfg_node_for(cur);
+		if (cfg_idx != cfg::NO_CFG) {
+			return self.in_state[cfg_idx];
+		}
+		cur = pr.nodes[cur].parent;
+	}
+	return empty_state();
+}
+
+fn void FlowAnalysis.free(FlowAnalysis* self) {
+	mem::free(self);
+}
