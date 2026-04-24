@@ -728,31 +728,18 @@ fn void check_argument_type_mismatch(Object* diagnostics, ParseResult* ast, Type
 	String call_name = n.name;
 	if (call_name.len == 0) return;
 
-	// Collect argument nodes (expression children of CALL_EXPR, skip first = callee)
+	// Collect argument expression indices via VALUE_ARGUMENT wrappers.
+	// Trailing lambdas (direct LAMBDA_EXPR children of CALL_EXPR) are
+	// not part of the parenthesized list — skip them here.
 	uint[16] arg_indices;
 	usz arg_count = 0;
-	bool skipped_callee = false;
 	for (uint j = 0; j < ast.node_count; j++) {
 		if (ast.nodes[j].parent != idx) continue;
-		AstNode* child = &ast.nodes[j];
-		// Skip non-expression nodes
-		if (child.kind == NAME_EXPR || child.kind == LITERAL_EXPR ||
-		    child.kind == CALL_EXPR || child.kind == DOT_EXPR ||
-		    child.kind == BINARY_EXPR || child.kind == PREFIX_EXPR ||
-		    child.kind == STRING_TEMPLATE_EXPR || child.kind == LAMBDA_EXPR ||
-		    child.kind == THIS_EXPR || child.kind == SUPER_EXPR ||
-		    child.kind == PAREN_EXPR || child.kind == INDEX_EXPR ||
-		    child.kind == CALLABLE_REF_EXPR || child.kind == OBJECT_EXPR ||
-		    child.kind == TYPE_CAST_EXPR || child.kind == IF_EXPR ||
-		    child.kind == WHEN_EXPR || child.kind == TYPE_CHECK_EXPR) {
-			// Skip the first child (callee: NAME_EXPR or DOT_EXPR)
-			if (!skipped_callee) {
-				skipped_callee = true;
-				continue;
-			}
-			if (arg_count < 16) {
-				arg_indices[arg_count++] = j;
-			}
+		if (ast.nodes[j].kind != VALUE_ARGUMENT) continue;
+		uint expr_idx = ast::get_arg_expr_idx(ast, j);
+		if (expr_idx == uint.max) continue;
+		if (arg_count < 16) {
+			arg_indices[arg_count++] = expr_idx;
 		}
 	}
 	if (arg_count == 0) return;
@@ -1011,14 +998,7 @@ fn uint find_lambda_ancestor(ParseResult* ast, uint node_idx) {
  * Returns the CALL_EXPR index, or ast::NO_PARENT if not found.
  */
 fn uint find_call_parent_of_lambda(ParseResult* ast, uint lambda_idx) {
-	AstNode* lambda = &ast.nodes[lambda_idx];
-	if (lambda.parent == ast::NO_PARENT) return ast::NO_PARENT;
-
-	AstNode* parent = &ast.nodes[lambda.parent];
-	if (parent.kind == CALL_EXPR) {
-		return lambda.parent;
-	}
-	return ast::NO_PARENT;
+	return ast::find_call_for_lambda(ast, lambda_idx);
 }
 
 /**

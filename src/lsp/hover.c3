@@ -484,6 +484,9 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 				if (child.type_text.len > 0) {
 					ds.appendf(": %s", child.type_text);
 				}
+				if (ast::param_has_default(child)) {
+					ds.appendf(" = %s", ast::param_default_text(child));
+				}
 			}
 			ds.appendf(")");
 			if (node.type_text.len > 0) {
@@ -555,6 +558,9 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 				if (child.type_text.len > 0) {
 					ds.appendf(": %s", child.type_text);
 				}
+				if (ast::param_has_default(child)) {
+					ds.appendf(" = %s", ast::param_default_text(child));
+				}
 			}
 			ds.appendf(")");
 
@@ -573,6 +579,9 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 				if (inferred.len > 0 && inferred != node.name) {
 					ds.appendf(": %s", inferred);
 				}
+			}
+			if (ast::param_has_default(node)) {
+				ds.appendf(" = %s", ast::param_default_text(node));
 			}
 
 		default:

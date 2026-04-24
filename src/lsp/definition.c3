@@ -347,15 +347,9 @@ fn int find_call_arg_count(ParseResult* pr, String target_name, uint cursor_offs
 		if (n.name != target_name) continue;
 		if (cursor_offset < n.start_offset || cursor_offset >= n.end_offset) continue;
 
-		// Count arguments (skip callee NAME_EXPR and trailing LAMBDA_EXPR)
-		uint count = 0;
-		for (uint j = 0; j < pr.node_count; j++) {
-			AstNode* child = &pr.nodes[j];
-			if (child.parent != i) continue;
-			if (child.kind == NAME_EXPR && child.name == target_name) continue;
-			if (child.kind == LAMBDA_EXPR) continue;
-			count++;
-		}
+		// Count VALUE_ARGUMENT children. Trailing lambdas (LAMBDA_EXPR
+		// direct children) are excluded since they aren't VALUE_ARGUMENTs.
+		uint count = ast::count_call_args(pr, i);
 		return (int)count;
 	}
 	return -1;
@@ -378,12 +372,13 @@ fn usz find_call_arg_types(ParseResult* pr, TypeInfo* ti, String target_name, ui
 		for (uint j = 0; j < pr.node_count; j++) {
 			AstNode* child = &pr.nodes[j];
 			if (child.parent != i) continue;
-			if (child.kind == NAME_EXPR && child.name == target_name) continue;
-			if (child.kind == LAMBDA_EXPR) continue;
+			if (child.kind != VALUE_ARGUMENT) continue;
 			if (count >= out_types.len) break;
 
-			if (ti.has_type[j]) {
-				out_types[count] = ti.node_types[j].name;
+			// Type lives on the inner expression child of VALUE_ARGUMENT.
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx != uint.max && ti.has_type[expr_idx]) {
+				out_types[count] = ti.node_types[expr_idx].name;
 			} else {
 				out_types[count] = "";
 			}
@@ -498,19 +493,11 @@ fn usz find_call_named_args(ParseResult* pr, String target_name, uint cursor_off
 		for (uint j = 0; j < pr.node_count; j++) {
 			AstNode* child = &pr.nodes[j];
 			if (child.parent != i) continue;
-			if (child.kind != ASSIGNMENT_EXPR) continue;
-
-			// First child of ASSIGNMENT_EXPR is the name
-			for (uint k = 0; k < pr.node_count; k++) {
-				if (pr.nodes[k].parent != j) continue;
-				if (pr.nodes[k].kind == NAME_EXPR && pr.nodes[k].name.len > 0) {
-					if (count < out_names.len) {
-						out_names[count] = pr.nodes[k].name;
-						count++;
-					}
-				}
-				break; // only first child
-			}
+			if (child.kind != VALUE_ARGUMENT) continue;
+			if (child.name.len == 0) continue; // positional, skip
+			if (count >= out_names.len) break;
+			out_names[count] = child.name;
+			count++;
 		}
 		return count;
 	}
@@ -2486,11 +2473,7 @@ fn uint find_lambda_ancestor_def(ParseResult* pr, uint node_idx) {
  * Find the CALL_EXPR parent of a LAMBDA_EXPR (trailing lambdas are direct children).
  */
 fn uint find_call_parent_of_lambda_def(ParseResult* pr, uint lambda_idx) {
-	AstNode* lambda = &pr.nodes[lambda_idx];
-	if (lambda.parent == ast::NO_PARENT) return ast::NO_PARENT;
-	AstNode* parent = &pr.nodes[lambda.parent];
-	if (parent.kind == CALL_EXPR) return lambda.parent;
-	return ast::NO_PARENT;
+	return ast::find_call_for_lambda(pr, lambda_idx);
 }
 
 /**

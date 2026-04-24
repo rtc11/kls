@@ -1080,15 +1080,8 @@ fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx
 	}
 
 	// Walk up from the LAMBDA_EXPR to find the enclosing CALL_EXPR
-	// The lambda can be a direct child of a CALL_EXPR (trailing lambda),
-	// or nested further
-	uint call_idx = ast::NO_PARENT;
-	uint parent_of_lambda = pr.nodes[lambda_idx].parent;
-	if (parent_of_lambda != ast::NO_PARENT) {
-		if (pr.nodes[parent_of_lambda].kind == CALL_EXPR) {
-			call_idx = parent_of_lambda;
-		}
-	}
+	// (handles both direct child and VALUE_ARGUMENT-wrapped forms).
+	uint call_idx = ast::find_call_for_lambda(pr, lambda_idx);
 	if (call_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
 
 	String method_name = pr.nodes[call_idx].name;
@@ -1157,14 +1150,8 @@ fn TypeRef resolve_lambda_receiver_member(ParseResult* pr, TypeInfo* info, uint 
 	}
 	if (lambda_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
 
-	// Find enclosing CALL_EXPR
-	uint call_idx = ast::NO_PARENT;
-	uint parent_of_lambda = pr.nodes[lambda_idx].parent;
-	if (parent_of_lambda != ast::NO_PARENT) {
-		if (pr.nodes[parent_of_lambda].kind == CALL_EXPR) {
-			call_idx = parent_of_lambda;
-		}
-	}
+	// Find enclosing CALL_EXPR (handles VALUE_ARGUMENT wrap).
+	uint call_idx = ast::find_call_for_lambda(pr, lambda_idx);
 	if (call_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
 
 	String method_name = pr.nodes[call_idx].name;
@@ -1758,17 +1745,17 @@ fn TypeRef check_null_comparison(ParseResult* pr, TypeInfo* info, uint expr_idx,
 
 /**
  * Count the number of arguments in a CALL_EXPR node.
- * Skips the callee NAME_EXPR and trailing LAMBDA_EXPR.
+ * Skips the callee NAME_EXPR and trailing lambda VALUE_ARGUMENT.
  */
 fn uint count_call_args(ParseResult* pr, uint call_idx, String callee_name) {
 	uint count = 0;
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* child = &pr.nodes[i];
 		if (child.parent != call_idx) continue;
-		// Skip the callee NAME_EXPR
-		if (child.kind == NAME_EXPR && child.name == callee_name) continue;
-		// Skip trailing lambdas (they count as a parameter but not a positional arg)
-		if (child.kind == LAMBDA_EXPR) continue;
+		// Only count VALUE_ARGUMENT children (parenthesized args)
+		if (child.kind != VALUE_ARGUMENT) continue;
+		// Skip trailing lambda (it counts as a parameter but not a positional arg)
+		if (child.extra_text == "trailing") continue;
 		count++;
 	}
 	return count;
@@ -1903,16 +1890,15 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 	for (uint j = 0; j < pr.node_count; j++) {
 		AstNode* child = &pr.nodes[j];
 		if (child.parent != call_idx) continue;
-		// Skip the callee NAME_EXPR (usually the first child)
-		if (child.kind == NAME_EXPR && child.name == pr.nodes[call_idx].name) continue;
-		// Skip lambda arguments
-		if (child.kind == LAMBDA_EXPR) continue;
+		if (child.kind != VALUE_ARGUMENT) continue;
+		uint expr_idx = ast::get_arg_expr_idx(pr, j);
+		if (expr_idx == uint.max) continue;
 
-		if (info.has_type[j]) {
+		if (info.has_type[expr_idx]) {
 			if (arg_count == 0) {
-				first_arg_type = info.node_types[j];
+				first_arg_type = info.node_types[expr_idx];
 			} else if (arg_count == 1) {
-				second_arg_type = info.node_types[j];
+				second_arg_type = info.node_types[expr_idx];
 			}
 		}
 		arg_count++;
@@ -2000,7 +1986,8 @@ fn TypeRef resolve_known_call(String name) {
  * Find the trailing LAMBDA_EXPR sibling of a DOT_EXPR inside a CALL_EXPR.
  * Returns the type of the lambda's last expression (body return type).
  *
- * AST structure: CALL_EXPR → { DOT_EXPR, LAMBDA_EXPR }
+ * AST structure: CALL_EXPR → { DOT_EXPR, VALUE_ARGUMENT(trailing) → LAMBDA_EXPR }
+ *   (older synthesized form may have a direct LAMBDA_EXPR child).
  */
 fn TypeRef find_trailing_lambda_body_type(ParseResult* pr, TypeInfo* info, uint dot_idx) {
 	uint parent = pr.nodes[dot_idx].parent;
@@ -2008,8 +1995,16 @@ fn TypeRef find_trailing_lambda_body_type(ParseResult* pr, TypeInfo* info, uint 
 
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent != parent) continue;
+		// Direct lambda child (legacy synthesized form)
 		if (pr.nodes[j].kind == LAMBDA_EXPR) {
 			return last_expr_type_in(pr, info, j, true);
+		}
+		// Trailing lambda wrapped in VALUE_ARGUMENT(extra_text="trailing")
+		if (pr.nodes[j].kind == VALUE_ARGUMENT && pr.nodes[j].extra_text == "trailing") {
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx != uint.max && pr.nodes[expr_idx].kind == LAMBDA_EXPR) {
+				return last_expr_type_in(pr, info, expr_idx, true);
+			}
 		}
 	}
 	return TYPE_UNKNOWN;
