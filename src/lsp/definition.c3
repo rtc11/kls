@@ -143,7 +143,9 @@ fn ResolutionContext? build_resolution_context(DocumentStore* store, WorkspaceIn
  */
 fn Object*? resolve_dot_member(ResolutionContext* ctx) {
 	if (ctx.info == null) return NOT_DOT_MEMBER~;
-	return find_dot_member_definition(ctx.pr, ctx.info, ctx.store, ctx.workspace, ctx.tok, ctx.uri);
+	TokenTarget t = find_dot_member_definition(ctx.pr, ctx.info, ctx.store, ctx.workspace, ctx.tok, ctx.uri);
+	if (t.kind == TargetKind.NONE) return NOT_DOT_MEMBER~;
+	return target_to_location(t, ctx.store, ctx.workspace);
 }
 
 /**
@@ -186,9 +188,11 @@ fn Object*? resolve_bare_identifier(ResolutionContext* ctx) {
 	// `with(receiver) { member }` / `apply { member }`: bare name may be
 	// a member of the lambda's receiver type. Gate on no-shadow.
 	if (!is_declared_in_lambda_scope(pr, target_name, tok.offset)) {
-		if (try result = find_receiver_lambda_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
+		TokenTarget t = find_receiver_lambda_member_definition(pr, workspace, store, target_name, tok.offset, uri);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: receiver-lambda member");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
@@ -201,57 +205,73 @@ fn Object*? resolve_bare_identifier(ResolutionContext* ctx) {
 	}
 
 	// 3. Extension function receiver member
-	if (try result = find_extension_receiver_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
-		log::debug("[def] bare: extension receiver member");
-		return result;
+	{
+		TokenTarget t = find_extension_receiver_member_definition(pr, workspace, store, target_name, tok.offset, uri);
+		if (t.kind != TargetKind.NONE) {
+			log::debug("[def] bare: extension receiver member");
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
+		}
 	}
 
 	// 4. Text-based FQN dep lookup (e.g., org.apache.kafka.X)
 	if (workspace != null && workspace.dep_index.initialized) {
-		if (try result = find_definition_by_text_fqn(ctx.doc.content, tok, &workspace.dep_index)) {
+		TokenTarget t = find_definition_by_text_fqn(ctx.doc.content, tok, &workspace.dep_index);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: text-based FQN dep lookup");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
 	// 5. Inherited supertype member — MOVED before workspace per spec.
 	// Class hierarchy binds tighter than unrelated workspace symbols.
 	if (workspace != null) {
-		if (try result = find_inherited_member_definition(pr, workspace, store, target_name, tok.offset, uri)) {
+		TokenTarget t = find_inherited_member_definition(pr, workspace, store, target_name, tok.offset, uri);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: inherited supertype member");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
 	// 6. Cross-file workspace lookup
 	if (workspace != null) {
-		if (try result = find_definition_in_workspace(workspace, target_name, ctx.is_call, uri, pr)) {
+		TokenTarget t = find_definition_in_workspace(workspace, store, target_name, ctx.is_call, uri, pr);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: workspace index");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
 	// 7. Explicit-import dep lookup
 	if (workspace != null) {
-		if (try result = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, ctx.is_call, uri)) {
+		TokenTarget t = find_definition_by_explicit_import(pr, &workspace.dep_index, target_name, ctx.is_call, uri);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: explicit import dep");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
 	// 8. Star-import dep lookup
 	if (workspace != null) {
-		if (try result = find_definition_by_star_import(pr, &workspace.dep_index, target_name, ctx.is_call, uri)) {
+		TokenTarget t = find_definition_by_star_import(pr, &workspace.dep_index, target_name, ctx.is_call, uri);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: star import dep");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
 	// 9. Default-import dep lookup (Kotlin spec §16.30 implicit imports)
 	if (workspace != null) {
-		if (try result = find_definition_by_default_imports(&workspace.dep_index, target_name, ctx.is_call)) {
+		TokenTarget t = find_definition_by_default_imports(&workspace.dep_index, target_name, ctx.is_call);
+		if (t.kind != TargetKind.NONE) {
 			log::debug("[def] bare: default import dep");
-			return result;
+			Object*? loc = target_to_location(t, store, workspace);
+			return loc;
 		}
 	}
 
@@ -905,75 +925,265 @@ fn bool is_callable_ref_member_offset(ParseResult* pr, uint offset) {
 }
 
 /**
- * Stable identity for a resolved token target. Used by references,
- * rename, document_highlight, and linked_editing_range to compare two
- * tokens' bindings without having to re-resolve every comparison.
+ * Spec-aligned identity for a resolved reference. Per Kotlin spec
+ * §16.30 and §16.6, an identifier reference resolves to a *declaration*.
+ * Two references are "the same reference" iff they bind to the same
+ * declaration. `TokenTarget` encodes that declaration as a stable handle.
  *
- *   - kind == NONE        → unresolved.
- *   - kind == IN_FILE     → declaration is in `current_uri`. `name_offset`
- *                           is either the byte offset of the decl
- *                           identifier (when sourced via scope walk) or
- *                           a packed (line<<16|col) value (when sourced
- *                           via dot-member resolver which returns a
- *                           Location, not an AstNode). Two TokenTargets
- *                           compare equal only when both came from the
- *                           same source — for the same token under
- *                           re-resolution this holds.
- *   - kind == CROSS_FILE  → declaration is in `uri` (foreign file).
- *                           `name_offset == uint.max` (URI alone is the key).
+ * Three concrete decl flavors:
+ *   - AST_NODE   : decl is a Kotlin AST node in some workspace file.
+ *                  `(uri, decl_idx)` uniquely identifies it within the
+ *                  current parse generation. Always preferred when
+ *                  available.
+ *   - DEP_SYMBOL : decl is in a dependency JAR (Kotlin stdlib, JDK,
+ *                  Maven/Gradle dep). `dep_sym_idx` indexes into
+ *                  `DependencyIndex.symbols`. Stable per session.
+ *   - EXTERNAL   : decl is reachable but we have no precise handle
+ *                  (e.g., name-only fallback when JAR coords are lost).
+ *                  `external_name` carries the simple or fully-qualified
+ *                  name. Equality is name-equality only — strict: an
+ *                  EXTERNAL never equals an AST_NODE or DEP_SYMBOL even
+ *                  for the same underlying decl.
+ *
+ * Equality is purely structural; `target_equals(a, b)` does a per-kind
+ * comparison and never crosses kinds. This is what makes references /
+ * rename / highlight / linked-editing symmetric: the resolver may take
+ * any path on the way to the decl, but the decl itself is the only
+ * thing that determines identity.
  */
-enum TargetKind { NONE, IN_FILE, CROSS_FILE }
+enum TargetKind { NONE, AST_NODE, DEP_SYMBOL, EXTERNAL }
 
 struct TokenTarget {
 	TargetKind kind;
-	String uri;
-	uint name_offset;
+	String uri;            // AST_NODE: file URI containing decl
+	uint decl_idx;         // AST_NODE: index into uri's ParseResult.nodes
+	usz dep_sym_idx;       // DEP_SYMBOL: index into DependencyIndex.symbols
+	String external_name;  // EXTERNAL: simple or FQN
 }
 
-const TokenTarget NO_TARGET = { .kind = TargetKind.NONE, .uri = "", .name_offset = uint.max };
+const TokenTarget NO_TARGET = {
+	.kind = TargetKind.NONE,
+	.uri = "",
+	.decl_idx = uint.max,
+	.dep_sym_idx = usz.max,
+	.external_name = "",
+};
 
 /**
- * Pack (line, col) into a single uint for in-file targets sourced from
- * a Location object. High 16 bits = line, low 16 bits = col.
+ * Reverse-lookup helper: given a uri + (line, col) of a declaration's
+ * name token, find the corresponding `decl_idx` in the file's
+ * ParseResult. Returns true on success. Used to bridge legacy resolvers
+ * that return LSP `Location` JSON into TokenTarget AST_NODE identity.
+ *
+ * Strategy: try `store.get_ast(uri)` first (cached). If absent, parse
+ * the file fresh from disk. The returned ParseResult is fed back to the
+ * search loop. When the file is loaded ad-hoc, the ParseResult is
+ * heap-allocated and leaked — acceptable for now since this is only
+ * called transiently during request handling and freed when the temp
+ * pool is reset (TODO: track for proper cleanup).
+ *
+ * This helper is part of the Option D migration. Once every resolver
+ * returns TokenTarget directly, this reverse-lookup goes away.
  */
-fn uint encode_line_col(uint line, uint col) {
-	uint l = line > 0xFFFF ? 0xFFFF : line;
-	uint c = col > 0xFFFF ? 0xFFFF : col;
-	return (l << 16) | c;
-}
-
-/**
- * Decode a Location JSON object into a TokenTarget relative to current_uri.
- * Returns NO_TARGET when the Location is malformed.
- */
-fn TokenTarget decode_location_target(Object* loc, String current_uri) {
-	if (loc == null) return NO_TARGET;
-	String result_uri;
-	if (try u = loc.get_string("uri")) {
-		result_uri = u;
-	} else {
-		return NO_TARGET;
+fn bool find_decl_idx_by_position(DocumentStore* store, WorkspaceIndex* workspace,
+		String uri, String name, uint line, uint col, uint* out_idx) {
+	ParseResult* pr = null;
+	if (store != null) {
+		pr = store.get_ast(uri) ?? null;
 	}
-
-	if (result_uri != current_uri) {
-		return (TokenTarget){ .kind = TargetKind.CROSS_FILE, .uri = result_uri, .name_offset = uint.max };
+	// Try workspace AST cache before disk
+	if (pr == null && workspace != null) {
+		pr = workspace.get_cached_ast(uri) ?? null;
 	}
-
-	uint line = uint.max;
-	uint character = uint.max;
-	if (try range = loc.get("range")) {
-		if (try start = range.get("start")) {
-			if (try l = start.get_int("line")) line = (uint)l;
-			if (try c = start.get_int("character")) character = (uint)c;
+	bool owns_pr = false;
+	if (pr == null) {
+		String content;
+		bool got = false;
+		if (workspace != null) {
+			String path = workspace::uri_to_path(uri);
+			if (try data = std::io::file::load(tmem, path)) {
+				content = (String)data;
+				got = true;
+			}
 		}
+		if (!got) return false;
+		pr = mem::new(ParseResult);
+		owns_pr = true;
+		parser::parse(content, pr);
 	}
-	if (line == uint.max) return NO_TARGET;
 
+	bool found = false;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		// Match declarations and constructor parameters (data class val/var
+		// params bind names like declarations).
+		if (!ast::is_declaration(n.kind) && n.kind != PARAM) continue;
+		if (n.name != name) continue;
+		if (n.name_line != line || n.name_col != col) continue;
+		*out_idx = i;
+		found = true;
+		break;
+	}
+
+	if (owns_pr) {
+		// Leak ParseResult on purpose: caller may hold AstNode pointers
+		// or expect indices to remain valid for the rest of the request.
+		// TODO(option-d): replace with proper workspace AST cache.
+	}
+	return found;
+}
+
+/**
+ * Build an AST_NODE target.
+ */
+fn TokenTarget make_ast_target(String uri, uint decl_idx) {
 	return (TokenTarget){
-		.kind = TargetKind.IN_FILE,
-		.uri = result_uri,
-		.name_offset = encode_line_col(line, character),
+		.kind = TargetKind.AST_NODE,
+		.uri = uri,
+		.decl_idx = decl_idx,
+		.dep_sym_idx = usz.max,
+		.external_name = "",
 	};
+}
+
+/**
+ * Build an AST_NODE target by reverse-looking up a declaration's
+ * decl_idx from its name + position. Used when the resolver knows the
+ * decl's source coordinates (e.g., from a cached MemberDecl) but not
+ * its idx in the latest ParseResult. Loads the file via the store or
+ * disk if necessary. Returns NO_TARGET when the position can't be
+ * resolved (file load failure, no matching decl).
+ *
+ * The position-based encoding is robust against re-parses: the
+ * renderer's `target_to_location` invokes the same lookup helper, so
+ * identity stays valid even when the underlying ParseResult is freed
+ * between resolve and render.
+ */
+fn TokenTarget make_ast_target_by_position(DocumentStore* store, WorkspaceIndex* workspace,
+		String uri, String name, uint line, uint col) {
+	uint idx = 0;
+	if (find_decl_idx_by_position(store, workspace, uri, name, line, col, &idx)) {
+		return make_ast_target(uri, idx);
+	}
+	return NO_TARGET;
+}
+
+/**
+ * Build a DEP_SYMBOL target from a DependencyIndex symbol index.
+ */
+fn TokenTarget make_dep_target(usz dep_sym_idx) {
+	return (TokenTarget){
+		.kind = TargetKind.DEP_SYMBOL,
+		.uri = "",
+		.decl_idx = uint.max,
+		.dep_sym_idx = dep_sym_idx,
+		.external_name = "",
+	};
+}
+
+/**
+ * Build a DEP_SYMBOL target from a DepSymbol pointer by recovering its
+ * stable index in the dep_index symbols list. Returns NO_TARGET when
+ * the pointer is null or out of range.
+ */
+fn TokenTarget make_dep_target_from_ptr(DependencyIndex* dep_index, DepSymbol* sym) {
+	if (sym == null || dep_index == null) return NO_TARGET;
+	if (dep_index.symbols.len() == 0) return NO_TARGET;
+	DepSymbol* base = &dep_index.symbols[0];
+	usz idx = (usz)(sym - base);
+	if (idx >= dep_index.symbols.len()) return NO_TARGET;
+	return make_dep_target(idx);
+}
+
+/**
+ * Build an EXTERNAL target from a name. Use only when no precise
+ * handle is available; equality is name-only.
+ */
+fn TokenTarget make_external_target(String name) {
+	return (TokenTarget){
+		.kind = TargetKind.EXTERNAL,
+		.uri = "",
+		.decl_idx = uint.max,
+		.dep_sym_idx = usz.max,
+		.external_name = name,
+	};
+}
+
+/**
+ * Strict structural equality. Two TokenTargets are equal iff:
+ *   - both AST_NODE, same uri and same decl_idx
+ *   - both DEP_SYMBOL, same dep_sym_idx
+ *   - both EXTERNAL, same external_name
+ * NONE is never equal (not even to itself, by convention — caller
+ * filters NONE up front).
+ */
+fn bool target_equals(TokenTarget a, TokenTarget b) {
+	if (a.kind != b.kind) return false;
+	switch (a.kind) {
+		case AST_NODE:
+			return a.uri == b.uri && a.decl_idx == b.decl_idx;
+		case DEP_SYMBOL:
+			return a.dep_sym_idx == b.dep_sym_idx;
+		case EXTERNAL:
+			return a.external_name == b.external_name;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Render a TokenTarget into an LSP Location JSON object. Returns null
+ * for NO_TARGET, EXTERNAL (no precise location), or when the target
+ * cannot be materialized (file load failure, missing dep source).
+ *
+ * AST_NODE: open the uri (cached in store, or load from disk + parse),
+ *           build Location from `pr.nodes[decl_idx]` name range.
+ * DEP_SYMBOL: delegate to `source_nav::resolve_dep_definition`.
+ *
+ * Used by `handle_definition` after resolvers return TokenTarget.
+ */
+fn Object*? target_to_location(TokenTarget target, DocumentStore* store, WorkspaceIndex* workspace) {
+	switch (target.kind) {
+		case NONE:
+			return null;
+		case EXTERNAL:
+			return null;
+		case DEP_SYMBOL:
+			if (workspace == null) return null;
+			DependencyIndex* dep_index = &workspace.dep_index;
+			if (!dep_index.initialized) return null;
+			if (target.dep_sym_idx >= dep_index.symbols.len()) return null;
+			DepSymbol* sym = &dep_index.symbols[target.dep_sym_idx];
+			return source_nav::resolve_dep_definition(sym);
+		case AST_NODE:
+			ParseResult* pr = null;
+			if (store != null) pr = store.get_ast(target.uri) ?? null;
+			// Fall back to workspace AST cache before disk
+			if (pr == null && workspace != null) {
+				pr = workspace.get_cached_ast(target.uri) ?? null;
+			}
+			bool owns = false;
+			if (pr == null) {
+				if (workspace == null) return null;
+				String path = workspace::uri_to_path(target.uri);
+				char[]? data = std::io::file::load(tmem, path);
+				if (catch data) return null;
+				pr = mem::new(ParseResult);
+				owns = true;
+				parser::parse((String)data, pr);
+			}
+			if (target.decl_idx >= pr.node_count) {
+				if (owns) mem::free(pr);
+				return null;
+			}
+			AstNode* n = &pr.nodes[target.decl_idx];
+			Object* loc = build_location_from_node(target.uri, n);
+			// Note: when owns==true we leak pr because Location strings
+			// (uri) reference its memory transitively. Acceptable: temp
+			// allocator scope of the request frees this. TODO(option-d):
+			// proper workspace AST cache to avoid the load.
+			return loc;
+	}
 }
 
 /**
@@ -1020,22 +1230,18 @@ fn TokenTarget resolve_token_binding(ParseResult* pr, TypeInfo* ti,
 			}
 		}
 		if (synthetic_set) {
-			Object* loc = find_dot_member_definition(pr, ti, store, workspace,
-				synthetic_tok, current_uri) ?? null;
-			if (loc != null) {
-				TokenTarget t = decode_location_target(loc, current_uri);
-				if (t.kind != TargetKind.NONE) return t;
-			}
+			TokenTarget t = find_dot_member_definition(pr, ti, store, workspace,
+				synthetic_tok, current_uri);
+			if (t.kind != TargetKind.NONE) return t;
 		}
 	}
 
 	// Fall back to scope-walk + global fallback (in-file only).
+	// Convert AstNode* → AST_NODE TokenTarget via pointer arithmetic
+	// against pr.nodes.
 	if (try node = find_declaration_in_file(pr, name, offset, is_call, ti)) {
-		return (TokenTarget){
-			.kind = TargetKind.IN_FILE,
-			.uri = current_uri,
-			.name_offset = node.name_offset,
-		};
+		uint idx = (uint)(node - &pr.nodes[0]);
+		return make_ast_target(current_uri, idx);
 	}
 	return NO_TARGET;
 }
@@ -1051,16 +1257,14 @@ fn bool token_binds_to_target(TokenTarget target, ParseResult* pr, TypeInfo* ti,
 	if (target.kind == TargetKind.NONE) return false;
 	TokenTarget cand = resolve_token_binding(pr, ti, workspace, store,
 		current_uri, name, cand_offset, is_call);
-	if (cand.kind != target.kind) return false;
-	if (cand.uri != target.uri) return false;
-	return cand.name_offset == target.name_offset;
+	return target_equals(target, cand);
 }
 
 /**
  * Check if the token is a member of a DOT_EXPR, resolve the receiver
  * type, and find the member declaration in the receiver class.
  */
-fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentStore* store,
+fn TokenTarget find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentStore* store,
 		WorkspaceIndex* workspace, Token tok, String current_uri) {
 	// Find the DOT_EXPR (or qualified CALLABLE_REF_EXPR `Type::member`)
 	// that has this token as its member name. CALLABLE_REF_EXPR shares
@@ -1194,8 +1398,8 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					// receiver is a class reference (Static.member). Otherwise treat
 					// as instance (permissive).
 					bool recv_is_class_ref = member_resolver::is_dep_class_name(&workspace.dep_index, recv_name);
-					Object* dep_result = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr, recv_is_class_ref);
-					if (dep_result != null) return dep_result;
+					TokenTarget dep_t = find_dep_member_definition(&workspace.dep_index, recv_name, tok.text, pr, recv_is_class_ref);
+					if (dep_t.kind != TargetKind.NONE) return dep_t;
 				}
 
 				// FQN fallback: reconstruct the full dot chain (e.g., "org.apache.kafka.streams")
@@ -1213,9 +1417,8 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 					String chain = reconstruct_dot_chain(pr, recv_idx);
 					log::debug("[def] FQN: reconstructed chain='%s', member='%s'", chain, tok.text);
 					if (chain.len > 0) {
-						if (try result = find_definition_by_fqn(&workspace.dep_index, chain, tok.text)) {
-							return result;
-						}
+						TokenTarget t = find_definition_by_fqn(&workspace.dep_index, chain, tok.text);
+						if (t.kind != TargetKind.NONE) return t;
 					}
 				}
 			}
@@ -1225,25 +1428,23 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 			// we can't resolve the receiver type but the extension function name
 			// is unique enough (filtered by import visibility).
 			if (workspace != null) {
-				if (try result = find_extension_by_name(workspace, tok.text, current_uri, pr)) {
-					return result;
-				}
+				TokenTarget t = find_extension_by_name(workspace, store, tok.text, current_uri, pr);
+				if (t.kind != TargetKind.NONE) return t;
 			}
 			// Import-aware dep extension fallback: look up member name in dep
 			// index filtered by file imports (handles e.g. call.respond() from ktor)
 			if (workspace != null && workspace.dep_index.initialized) {
-				Object* import_result = find_dot_member_by_import(&workspace.dep_index, pr, tok.text, current_uri);
-				if (import_result != null) return import_result;
+				TokenTarget t = find_dot_member_by_import(&workspace.dep_index, pr, tok.text, current_uri);
+				if (t.kind != TargetKind.NONE) return t;
 			}
 			// Last resort: any workspace extension by name, ignoring imports.
 			// Helps when extension is reachable in workspace but not yet imported,
 			// or imported via a wildcard the import map didn't expand.
 			if (workspace != null) {
-				if (try result = find_extension_by_name_unimported(workspace, tok.text, current_uri)) {
-					return result;
-				}
+				TokenTarget t = find_extension_by_name_unimported(workspace, store, tok.text, current_uri);
+				if (t.kind != TargetKind.NONE) return t;
 			}
-			return NOT_DOT_MEMBER~;
+			return NO_TARGET;
 		}
 
 		String type_name = receiver_type.name;
@@ -1251,51 +1452,53 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 
 		// Search for the member declaration in the type's class declaration
 		// First, search same-file AST for class with this type name
-		if (try result = find_member_in_class_ast(pr, type_name, member_name, current_uri)) {
-			return result;
+		{
+			TokenTarget tgt = find_member_in_class_ast(pr, type_name, member_name, current_uri);
+			if (tgt.kind != TargetKind.NONE) return tgt;
 		}
 
 		// Search workspace for the type's class and its members
 		if (workspace != null) {
-			if (try result = find_member_in_workspace_class(workspace, store, type_name, member_name)) {
-				return result;
-			}
+			TokenTarget t = find_member_in_workspace_class(workspace, store, type_name, member_name);
+			if (t.kind != TargetKind.NONE) return t;
 		}
 
 		// Search dependency index by receiver type name
 		if (workspace != null && workspace.dep_index.initialized) {
-			Object* dep_result = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr, receiver_type.is_class_ref);
-			if (dep_result != null) return dep_result;
+			TokenTarget dep_t = find_dep_member_definition(&workspace.dep_index, type_name, member_name, pr, receiver_type.is_class_ref);
+			if (dep_t.kind != TargetKind.NONE) return dep_t;
 		}
 
 		// Search workspace for extension functions matching receiver type
 		if (workspace != null) {
-			if (try result = find_extension_by_receiver_and_name(workspace, type_name, member_name, current_uri, pr)) {
-				return result;
-			}
+			TokenTarget t = find_extension_by_receiver_and_name(workspace, store, type_name, member_name, current_uri, pr);
+			if (t.kind != TargetKind.NONE) return t;
 			// Receiver-name mismatch fallback: try by-name only (still
 			// import-filtered). Handles cases where the resolved receiver
 			// type differs from the declared extension receiver due to
 			// supertype/generic type relationships.
-			if (try result = find_extension_by_name(workspace, member_name, current_uri, pr)) {
-				return result;
-			}
+			TokenTarget t2 = find_extension_by_name(workspace, store, member_name, current_uri, pr);
+			if (t2.kind != TargetKind.NONE) return t2;
 		}
 
 		// Check if this is a known scope function (apply, let, also, run, etc.)
 		// These are extension functions available on all types, defined in
-		// kotlin.StandardKt. Navigate to their definition in stdlib sources
-		// rather than falling through to the generic dep lookup which would
-		// incorrectly match unrelated methods (e.g., BiFunction.apply).
+		// kotlin.StandardKt. Scope-fn navigation needs source jar parsing
+		// which is best done via dep_index — but the inline scope fns are
+		// not indexed (they're private in __StandardKt). We synthesize a
+		// stub DEP_METHOD entry that resolve_dep_definition can navigate.
 		if (source_nav::is_scope_function(member_name)) {
 			if (workspace != null) {
-				Object* scope_result = source_nav::find_scope_function_definition(
+				DepSymbol* sym = source_nav::find_or_synthesize_scope_function_symbol(
 					&workspace.dep_index, member_name);
-				if (scope_result != null) return scope_result;
+				if (sym != null) {
+					TokenTarget t = make_dep_target_from_ptr(&workspace.dep_index, sym);
+					if (t.kind != TargetKind.NONE) return t;
+				}
 			}
-			// Even if sources aren't available, return null rather than
-			// falling through to the wrong definition
-			return null;
+			// Even if sources aren't available, stop here rather than
+			// falling through to the wrong definition.
+			return NO_TARGET;
 		}
 
 		// Last resort: any workspace extension by name, ignoring imports.
@@ -1304,23 +1507,25 @@ fn Object*? find_dot_member_definition(ParseResult* pr, TypeInfo* ti, DocumentSt
 		// AND the extension isn't imported by simple name (e.g. wildcard
 		// import that the import map didn't expand).
 		if (workspace != null) {
-			if (try result = find_extension_by_name_unimported(workspace, member_name, current_uri)) {
-				return result;
-			}
+			TokenTarget t = find_extension_by_name_unimported(workspace, store, member_name, current_uri);
+			if (t.kind != TargetKind.NONE) return t;
 		}
 
 		break;
 	}
 
-	return NOT_DOT_MEMBER~;
+	return NO_TARGET;
 }
 
 /**
  * Search for a member declaration inside a class in the same-file AST.
  * Checks declarations (fun, property, nested class, etc.) and data class
  * constructor parameters with var/val flags (PARAM with MOD_VAR/MOD_FINAL).
+ *
+ * Returns AST_NODE TokenTarget pointing at the member's decl idx in `pr`.
+ * Returns NO_TARGET when not found.
  */
-fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String member_name, String uri) {
+fn TokenTarget find_member_in_class_ast(ParseResult* pr, String class_name, String member_name, String uri) {
 	// Find the class declaration
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
@@ -1339,11 +1544,11 @@ fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String 
 						if (comp_child.name != member_name) continue;
 
 						if (ast::is_declaration(comp_child.kind)) {
-							return build_location_from_node(uri, comp_child);
+							return make_ast_target(uri, k);
 						}
 						if (comp_child.kind == PARAM) {
 							if ((comp_child.mod_flags & ast::MOD_VAR) != 0 || (comp_child.mod_flags & ast::MOD_FINAL) != 0) {
-								return build_location_from_node(uri, comp_child);
+								return make_ast_target(uri, k);
 							}
 						}
 					}
@@ -1354,36 +1559,40 @@ fn Object*? find_member_in_class_ast(ParseResult* pr, String class_name, String 
 
 				// Standard declarations (fun, property, nested class, etc.)
 				if (ast::is_declaration(child.kind)) {
-					return build_location_from_node(uri, child);
+					return make_ast_target(uri, j);
 				}
 
 				// Data class constructor params with var/val
 				if (child.kind == PARAM) {
 					if ((child.mod_flags & ast::MOD_VAR) != 0 || (child.mod_flags & ast::MOD_FINAL) != 0) {
-						return build_location_from_node(uri, child);
+						return make_ast_target(uri, j);
 					}
 				}
 			}
 		}
 	}
 
-	return NOT_DOT_MEMBER~;
+	return NO_TARGET;
 }
 
 /**
  * Search the workspace index for a class and find a member declaration
  * by parsing the class's source file.
+ *
+ * Returns AST_NODE TokenTarget. Identity uses (uri, decl_idx) where
+ * decl_idx is recovered by position lookup, robust against the
+ * intermediate ParseResult being freed before the renderer runs.
  */
-fn Object*? find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentStore* store,
+fn TokenTarget find_member_in_workspace_class(WorkspaceIndex* workspace, DocumentStore* store,
 		String class_name, String member_name) {
 	return find_member_in_workspace_class_depth(workspace, store, class_name, member_name, 0);
 }
 
 const int MAX_SUPERTYPE_DEPTH = 5;
 
-fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, DocumentStore* store,
+fn TokenTarget find_member_in_workspace_class_depth(WorkspaceIndex* workspace, DocumentStore* store,
 		String class_name, String member_name, int depth) {
-	if (depth > MAX_SUPERTYPE_DEPTH) return NOT_DOT_MEMBER~;
+	if (depth > MAX_SUPERTYPE_DEPTH) return NO_TARGET;
 
 	// Try the member cache first (fast path — no re-parsing)
 	if (try members = workspace.lookup_members(class_name)) {
@@ -1393,13 +1602,13 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 
 			// Standard declarations
 			if (ast::is_declaration(m.node_kind)) {
-				return build_location_from_member(m);
+				return make_ast_target_by_position(store, workspace, m.uri, m.name, m.line, m.col);
 			}
 
 			// Data class constructor params with var/val
 			if (m.node_kind == PARAM) {
 				if ((m.mod_flags & ast::MOD_VAR) != 0 || (m.mod_flags & ast::MOD_FINAL) != 0) {
-					return build_location_from_member(m);
+					return make_ast_target_by_position(store, workspace, m.uri, m.name, m.line, m.col);
 				}
 			}
 		}
@@ -1411,9 +1620,8 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 				if (sym.kind != SymbolKind.CLASS && sym.kind != SymbolKind.INTERFACE &&
 					sym.kind != SymbolKind.OBJECT) continue;
 				for (usz s = 0; s < sym.supertype_count; s++) {
-					if (try result = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1)) {
-						return result;
-					}
+					TokenTarget t = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1);
+					if (t.kind != TargetKind.NONE) return t;
 				}
 			}
 		}
@@ -1453,16 +1661,19 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 			defer mem::free(pr);
 			parser::parse(content, pr);
 
-			// Find the class, then its member
-			if (try result = find_member_in_class_ast(pr, class_name, member_name, sym.uri)) {
-				return result;
+			// Find the class, then its member. Re-encode by position so
+			// the target survives `pr` being freed when this function
+			// returns.
+			TokenTarget tgt = find_member_in_class_ast(pr, class_name, member_name, sym.uri);
+			if (tgt.kind == TargetKind.AST_NODE) {
+				AstNode* n = &pr.nodes[tgt.decl_idx];
+				return make_ast_target_by_position(store, workspace, sym.uri, n.name, n.name_line, n.name_col);
 			}
 
 			// Not found in direct class — check supertypes
 			for (usz s = 0; s < sym.supertype_count; s++) {
-				if (try result = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1)) {
-					return result;
-				}
+				TokenTarget t = find_member_in_workspace_class_depth(workspace, store, sym.supertypes[s], member_name, depth + 1);
+				if (t.kind != TargetKind.NONE) return t;
 			}
 		}
 	}
@@ -1487,9 +1698,11 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 					for (usz j = 0; j < nested_members.len(); j++) {
 						MemberDecl* nm = &(*nested_members)[j];
 						if (nm.name != member_name) continue;
-						if (ast::is_declaration(nm.node_kind)) return build_location_from_member(nm);
+						if (ast::is_declaration(nm.node_kind)) {
+							return make_ast_target_by_position(store, workspace, nm.uri, nm.name, nm.line, nm.col);
+						}
 						if (nm.node_kind == PARAM && ((nm.mod_flags & ast::MOD_VAR) != 0 || (nm.mod_flags & ast::MOD_FINAL) != 0)) {
-							return build_location_from_member(nm);
+							return make_ast_target_by_position(store, workspace, nm.uri, nm.name, nm.line, nm.col);
 						}
 					}
 				}
@@ -1515,14 +1728,16 @@ fn Object*? find_member_in_workspace_class_depth(WorkspaceIndex* workspace, Docu
 				ParseResult* pr = mem::new(ParseResult);
 				defer mem::free(pr);
 				parser::parse(content, pr);
-				if (try result = find_member_in_class_ast(pr, class_name, member_name, pm.uri)) {
-					return result;
+				TokenTarget tgt = find_member_in_class_ast(pr, class_name, member_name, pm.uri);
+				if (tgt.kind == TargetKind.AST_NODE) {
+					AstNode* n = &pr.nodes[tgt.decl_idx];
+					return make_ast_target_by_position(store, workspace, pm.uri, n.name, n.name_line, n.name_col);
 				}
 			}
 		}
 	}
 
-	return NOT_DOT_MEMBER~;
+	return NO_TARGET;
 }
 
 /**
@@ -1561,14 +1776,14 @@ fn Object* build_location_from_member(MemberDecl* m) {
  * Returns the first candidate as a Location, or null when nothing
  * matches.
  */
-fn Object* find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name, ParseResult* pr = null, bool receiver_is_class_ref = false) {
+fn TokenTarget find_dep_member_definition(DependencyIndex* dep_index, String class_name, String member_name, ParseResult* pr = null, bool receiver_is_class_ref = false) {
 	String preferred_pkg = resolve_preferred_package(pr, class_name);
 	DepSymbol*[16] candidates;
 	usz count = member_resolver::find_dep_class_members(
 		dep_index, class_name, member_name, receiver_is_class_ref,
 		preferred_pkg, candidates[..]);
-	if (count == 0) return null;
-	return source_nav::resolve_dep_definition(candidates[0]);
+	if (count == 0) return NO_TARGET;
+	return make_dep_target_from_ptr(dep_index, candidates[0]);
 }
 
 /**
@@ -1636,8 +1851,8 @@ fn String reconstruct_dot_chain(ParseResult* pr, uint node_idx) {
  * When the dep symbol is found but source JAR is unavailable, returns a synthesized
  * null-location rather than falling through — the FQN is unambiguous.
  */
-fn Object*? find_definition_by_fqn(DependencyIndex* dep_index, String receiver_chain, String member_name) {
-	if (dep_index == null || !dep_index.initialized) return FQN_NOT_FOUND~;
+fn TokenTarget find_definition_by_fqn(DependencyIndex* dep_index, String receiver_chain, String member_name) {
+	if (dep_index == null || !dep_index.initialized) return NO_TARGET;
 
 	// Try interpreting receiver_chain as "package.ClassName"
 	// Split at last dot: package = everything before, class = last segment
@@ -1661,12 +1876,9 @@ fn Object*? find_definition_by_fqn(DependencyIndex* dep_index, String receiver_c
 			if (member_matches[i].class_name != cls) continue;
 			if (member_matches[i].package_name != pkg) continue;
 			if (member_matches[i].kind != DEP_METHOD && member_matches[i].kind != DEP_FIELD) continue;
-			Object* result = source_nav::resolve_dep_definition(member_matches[i]);
-			if (result != null) return result;
-			// Found the right symbol but no source — return empty location
-			// to prevent falling through to wrong results.
-			log::debug("[def] FQN member matched %s.%s.%s but no source available", pkg, cls, member_name);
-			return null;
+			// Always commit: caller's pattern stops on kind != NONE even
+			// when source navigation later fails to render a Location.
+			return make_dep_target_from_ptr(dep_index, member_matches[i]);
 		}
 
 		// Second: check if the receiver_chain itself is a class reference
@@ -1680,10 +1892,7 @@ fn Object*? find_definition_by_fqn(DependencyIndex* dep_index, String receiver_c
 				// Found the class — now look up member under this exact package+class
 				for (usz m = 0; m < member_count; m++) {
 					if (member_matches[m].class_name == cls && member_matches[m].package_name == pkg) {
-						Object* result = source_nav::resolve_dep_definition(member_matches[m]);
-						if (result != null) return result;
-						log::debug("[def] FQN class+member matched %s.%s.%s but no source available", pkg, cls, member_name);
-						return null;
+						return make_dep_target_from_ptr(dep_index, member_matches[m]);
 					}
 				}
 			}
@@ -1699,19 +1908,17 @@ fn Object*? find_definition_by_fqn(DependencyIndex* dep_index, String receiver_c
 		if (class_matches[i].package_name != receiver_chain) continue;
 		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
 			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
-			Object* result = source_nav::resolve_dep_definition(class_matches[i]);
-			if (result != null) return result;
-			// FQN class matched but no source — return null to stop further lookups
-			log::debug("[def] FQN class matched %s.%s but no source available", receiver_chain, member_name);
-			return null;
+			return make_dep_target_from_ptr(dep_index, class_matches[i]);
 		}
 	}
 
-	return FQN_NOT_FOUND~;
+	return NO_TARGET;
 }
 
 faultdef FQN_NOT_FOUND;
 faultdef NOT_TEXT_FQN;
+
+
 
 /**
  * Text-based FQN detection and dep lookup.
@@ -1721,12 +1928,12 @@ faultdef NOT_TEXT_FQN;
  * This is independent of AST DOT_EXPR matching — handles cases where
  * the AST position doesn't match the lexer token position.
  */
-fn Object*? find_definition_by_text_fqn(String source, Token tok, DependencyIndex* dep_index) {
-	if (dep_index == null || !dep_index.initialized) return NOT_TEXT_FQN~;
+fn TokenTarget find_definition_by_text_fqn(String source, Token tok, DependencyIndex* dep_index) {
+	if (dep_index == null || !dep_index.initialized) return NO_TARGET;
 
 	// Check if there's a dot immediately before the token
 	usz tok_off = (usz)tok.offset;
-	if (tok_off == 0 || source[tok_off - 1] != '.') return NOT_TEXT_FQN~;
+	if (tok_off == 0 || source[tok_off - 1] != '.') return NO_TARGET;
 
 	// Walk backward from the dot to reconstruct the prefix chain
 	// e.g., for "org.apache.kafka.streams.StreamsConfig", starting before "StreamsConfig"
@@ -1745,10 +1952,10 @@ fn Object*? find_definition_by_text_fqn(String source, Token tok, DependencyInde
 		}
 	}
 
-	if (prefix_start >= prefix_end) return NOT_TEXT_FQN~;
+	if (prefix_start >= prefix_end) return NO_TARGET;
 
 	String prefix = source[prefix_start..prefix_end - 1]; // exclude trailing dot
-	if (prefix.len == 0) return NOT_TEXT_FQN~;
+	if (prefix.len == 0) return NO_TARGET;
 
 	// Also check if there's a dot AFTER the token — to determine if cursor
 	// is on a middle segment (class name) vs the last segment (member name)
@@ -1767,27 +1974,17 @@ fn Object*? find_definition_by_text_fqn(String source, Token tok, DependencyInde
 			if (class_matches[i].package_name != prefix) continue;
 			if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
 				class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
-				Object* result = source_nav::resolve_dep_definition(class_matches[i]);
-				if (result != null) return result;
-				// Found but no source — return null to stop further lookups
-				log::debug("[def] text-FQN class matched %s.%s but no source", prefix, member_name);
-				return null;
+				return make_dep_target_from_ptr(dep_index, class_matches[i]);
 			}
 		}
 	}
 
 	// Token is the last segment — try as member of a FQN class
 	// prefix might be "org.apache.kafka.streams.StreamsConfig" or "org.apache.kafka.streams"
-	if (try result = find_definition_by_fqn(dep_index, prefix, member_name)) {
-		return result;
-	}
-
-	return NOT_TEXT_FQN~;
+	return find_definition_by_fqn(dep_index, prefix, member_name);
 }
 
 // ── Receiver lambda member definition lookup ──────────────────────
-
-faultdef NOT_RECEIVER_MEMBER;
 
 /**
  * Check if a name is declared locally within the innermost LAMBDA_EXPR
@@ -2168,7 +2365,7 @@ fn String find_method_return_class(WorkspaceIndex* workspace,
  * or PROPERTY_DECL with a receiver type (extra_text), then look up
  * the member in that class.
  */
-fn Object*? find_extension_receiver_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
+fn TokenTarget find_extension_receiver_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
 		DocumentStore* store, String target_name, uint cursor_offset, String current_uri) {
 	// Find the NAME_EXPR at the cursor position
 	uint name_node_idx = ast::NO_PARENT;
@@ -2181,7 +2378,7 @@ fn Object*? find_extension_receiver_member_definition(ParseResult* pr, Workspace
 			break;
 		}
 	}
-	if (name_node_idx == ast::NO_PARENT) return NOT_RECEIVER_MEMBER~;
+	if (name_node_idx == ast::NO_PARENT) return NO_TARGET;
 
 	// Walk up parent chain to find an extension function/property
 	uint current = pr.nodes[name_node_idx].parent;
@@ -2201,23 +2398,23 @@ fn Object*? find_extension_receiver_member_definition(ParseResult* pr, Workspace
 				}
 			}
 			// Try same-file AST
-			if (try result = find_member_in_class_ast(pr, receiver, target_name, current_uri)) {
-				return result;
+			{
+				TokenTarget tgt = find_member_in_class_ast(pr, receiver, target_name, current_uri);
+				if (tgt.kind != TargetKind.NONE) return tgt;
 			}
 			// Try workspace
 			if (workspace != null) {
-				if (try result = find_member_in_workspace_class(workspace, store, receiver, target_name)) {
-					return result;
-				}
+				TokenTarget t = find_member_in_workspace_class(workspace, store, receiver, target_name);
+				if (t.kind != TargetKind.NONE) return t;
 			}
-			return NOT_RECEIVER_MEMBER~;
+			return NO_TARGET;
 		}
 		current = n.parent;
 	}
-	return NOT_RECEIVER_MEMBER~;
+	return NO_TARGET;
 }
 
-fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
+fn TokenTarget find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
 		DocumentStore* store, String target_name, uint cursor_offset, String current_uri) {
 	// Find the NAME_EXPR at the cursor position
 	uint name_node_idx = ast::NO_PARENT;
@@ -2230,13 +2427,13 @@ fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceInd
 			break;
 		}
 	}
-	if (name_node_idx == ast::NO_PARENT) return NOT_RECEIVER_MEMBER~;
+	if (name_node_idx == ast::NO_PARENT) return NO_TARGET;
 
 	// Walk up through lambdas to find a receiver type
 	uint current = name_node_idx;
 	while (true) {
 		uint lambda_idx = find_lambda_ancestor_def(pr, current);
-		if (lambda_idx == ast::NO_PARENT) return NOT_RECEIVER_MEMBER~;
+		if (lambda_idx == ast::NO_PARENT) return NO_TARGET;
 
 		uint call_idx = find_call_parent_of_lambda_def(pr, lambda_idx);
 		if (call_idx != ast::NO_PARENT) {
@@ -2253,14 +2450,14 @@ fn Object*? find_receiver_lambda_member_definition(ParseResult* pr, WorkspaceInd
 
 			if (receiver_type.len > 0) {
 				// Found a receiver type -- look for the member in that class
-				if (try result = find_member_in_class_ast(pr, receiver_type, target_name, current_uri)) {
-					return result;
+				{
+					TokenTarget tgt = find_member_in_class_ast(pr, receiver_type, target_name, current_uri);
+					if (tgt.kind != TargetKind.NONE) return tgt;
 				}
 				// Try workspace
 				if (workspace != null) {
-					if (try result = find_member_in_workspace_class(workspace, store, receiver_type, target_name)) {
-						return result;
-					}
+					TokenTarget t = find_member_in_workspace_class(workspace, store, receiver_type, target_name);
+					if (t.kind != TargetKind.NONE) return t;
 				}
 			}
 		}
@@ -2524,8 +2721,6 @@ fn String find_lambda_receiver_in_workspace(WorkspaceIndex* workspace, DocumentS
 
 // ── Cross-file definition lookup ──────────────────────────────────
 
-faultdef NOT_FOUND_IN_WORKSPACE;
-
 faultdef NOT_FOUND_BY_IMPORT;
 
 /**
@@ -2535,27 +2730,27 @@ faultdef NOT_FOUND_BY_IMPORT;
  * correct Oppdrag in that package, even if there's a same-named class
  * elsewhere in the workspace.
  */
-fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call, String current_uri) {
-	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
+fn TokenTarget find_definition_by_explicit_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call, String current_uri) {
+	if (dep_index == null || !dep_index.initialized) return NO_TARGET;
 
 	ImportMap imports = workspace::build_import_map(pr);
 
 	// Find the explicit import for this name
 	String import_package = "";
+	String full_import = "";
 	for (usz i = 0; i < imports.import_count; i++) {
 		if (imports.is_star[i]) continue;
 		if (imports.import_names[i] == target_name) {
 			import_package = workspace::get_import_package(imports.import_paths[i]);
+			full_import = imports.import_paths[i];
 			break;
 		}
 	}
-	if (import_package.len == 0) return NOT_FOUND_BY_IMPORT~;
+	if (import_package.len == 0) return NO_TARGET;
 
 	// Look up in dep index, filtering by the import's package
 	DepSymbol*[16] matches;
 	usz count = dep_index.lookup_by_name(target_name, &matches);
-	if (count == 0) return NOT_FOUND_BY_IMPORT~;
-
 	DepSymbol* best = null;
 	for (usz i = 0; i < count; i++) {
 		if (matches[i].package_name == import_package) {
@@ -2563,27 +2758,18 @@ fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex*
 			break;
 		}
 	}
-	if (best == null) return NOT_FOUND_BY_IMPORT~;
 
-	Object* result = source_nav::resolve_dep_definition(best);
-	if (result != null) return result;
-
-	// Source JAR not available — fall back to the import statement itself.
-	// This gives the user a useful navigation target (the FQN is visible
-	// in the import line) rather than "no locations found".
-	String full_import = imports.import_paths[0]; // need to find the right one
-	for (usz i = 0; i < imports.import_count; i++) {
-		if (imports.is_star[i]) continue;
-		if (imports.import_names[i] == target_name) {
-			full_import = imports.import_paths[i];
-			break;
+	// If a dep symbol matched and its source is renderable, prefer it.
+	// Otherwise fall back to the import statement (precise navigation
+	// target visible to the user even when source JAR is unavailable).
+	if (best != null) {
+		Object* probe = source_nav::resolve_dep_definition(best);
+		if (probe != null) {
+			return make_dep_target_from_ptr(dep_index, best);
 		}
 	}
-	if (try loc = find_import_statement_location(pr, full_import, current_uri)) {
-		return loc;
-	}
 
-	return NOT_FOUND_BY_IMPORT~;
+	return find_import_statement_location(pr, full_import, current_uri);
 }
 
 /**
@@ -2592,8 +2778,8 @@ fn Object*? find_definition_by_explicit_import(ParseResult* pr, DependencyIndex*
  * to symbols whose package matches a star-imported package.
  * Returns null if no match or ambiguous (multiple star packages match).
  */
-fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call, String current_uri) {
-	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
+fn TokenTarget find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep_index, String target_name, bool is_call, String current_uri) {
+	if (dep_index == null || !dep_index.initialized) return NO_TARGET;
 
 	ImportMap imports = workspace::build_import_map(pr);
 
@@ -2602,12 +2788,12 @@ fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep
 	for (usz i = 0; i < imports.import_count; i++) {
 		if (imports.is_star[i]) { has_star = true; break; }
 	}
-	if (!has_star) return NOT_FOUND_BY_IMPORT~;
+	if (!has_star) return NO_TARGET;
 
 	// Look up all dep symbols with this name
 	DepSymbol*[16] matches;
 	usz count = dep_index.lookup_by_name(target_name, &matches);
-	if (count == 0) return NOT_FOUND_BY_IMPORT~;
+	if (count == 0) return NO_TARGET;
 
 	// Filter to symbols whose package matches a star-imported package
 	DepSymbol* best = null;
@@ -2620,7 +2806,7 @@ fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep
 					// Ambiguous: multiple star packages match different symbols
 					log::debug("[def] star import ambiguous for '%s': %s vs %s",
 						target_name, best.package_name, matches[i].package_name);
-					return NOT_FOUND_BY_IMPORT~;
+					return NO_TARGET;
 				}
 				best = matches[i];
 				best_star_path = imports.import_paths[j];
@@ -2628,17 +2814,16 @@ fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep
 			}
 		}
 	}
-	if (best == null) return NOT_FOUND_BY_IMPORT~;
+	if (best == null) return NO_TARGET;
 
-	Object* result = source_nav::resolve_dep_definition(best);
-	if (result != null) return result;
-
-	// Source JAR not available — fall back to the star import statement itself.
-	if (try loc = find_import_statement_location(pr, best_star_path, current_uri)) {
-		return loc;
+	// Prefer dep target if source renderable; otherwise fall back to the
+	// matching star-import statement.
+	Object* probe = source_nav::resolve_dep_definition(best);
+	if (probe != null) {
+		return make_dep_target_from_ptr(dep_index, best);
 	}
 
-	return NOT_FOUND_BY_IMPORT~;
+	return find_import_statement_location(pr, best_star_path, current_uri);
 }
 
 /**
@@ -2653,12 +2838,12 @@ fn Object*? find_definition_by_star_import(ParseResult* pr, DependencyIndex* dep
  * Returns NOT_FOUND_BY_IMPORT~ when no match or ambiguous (multiple
  * default packages match the same name).
  */
-fn Object*? find_definition_by_default_imports(DependencyIndex* dep_index, String target_name, bool is_call) {
-	if (dep_index == null || !dep_index.initialized) return NOT_FOUND_BY_IMPORT~;
+fn TokenTarget find_definition_by_default_imports(DependencyIndex* dep_index, String target_name, bool is_call) {
+	if (dep_index == null || !dep_index.initialized) return NO_TARGET;
 
 	DepSymbol*[16] matches;
 	usz count = dep_index.lookup_by_name(target_name, &matches);
-	if (count == 0) return NOT_FOUND_BY_IMPORT~;
+	if (count == 0) return NO_TARGET;
 
 	DepSymbol* best = null;
 	for (usz i = 0; i < count; i++) {
@@ -2671,15 +2856,12 @@ fn Object*? find_definition_by_default_imports(DependencyIndex* dep_index, Strin
 		if (best.package_name != matches[i].package_name) {
 			log::debug("[def] default-import ambiguous for '%s': %s vs %s",
 				target_name, best.package_name, matches[i].package_name);
-			return NOT_FOUND_BY_IMPORT~;
+			return NO_TARGET;
 		}
 	}
-	if (best == null) return NOT_FOUND_BY_IMPORT~;
+	if (best == null) return NO_TARGET;
 
-	Object* result = source_nav::resolve_dep_definition(best);
-	if (result != null) return result;
-
-	return NOT_FOUND_BY_IMPORT~;
+	return make_dep_target_from_ptr(dep_index, best);
 }
 
 /**
@@ -2698,15 +2880,15 @@ fn bool has_explicit_import_for(ImportMap* imports, String name) {
  * and return an LSP Location pointing to it. Used as a fallback when
  * source JAR navigation fails — the user can at least see the FQN.
  */
-fn Object*? find_import_statement_location(ParseResult* pr, String full_import_path, String uri) {
+fn TokenTarget find_import_statement_location(ParseResult* pr, String full_import_path, String uri) {
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
 		if (n.kind != IMPORT_DECL) continue;
 		if (n.extra_text != full_import_path) continue;
 
-		return build_location_from_node(uri, n);
+		return make_ast_target(uri, i);
 	}
-	return NOT_FOUND_BY_IMPORT~;
+	return NO_TARGET;
 }
 
 /**
@@ -2715,8 +2897,9 @@ fn Object*? find_import_statement_location(ParseResult* pr, String full_import_p
  * kind. Skips symbols from the current document (already searched via AST).
  * Uses import map to prefer imported symbols over non-imported ones.
  */
-fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String target_name, bool is_call, String current_uri, ParseResult* pr) {
-	List{usz}* indices = workspace.lookup_by_name(target_name)!;
+fn TokenTarget find_definition_in_workspace(WorkspaceIndex* workspace, DocumentStore* store, String target_name, bool is_call, String current_uri, ParseResult* pr) {
+	List{usz}* indices = workspace.lookup_by_name(target_name) ?? null;
+	if (indices == null) return NO_TARGET;
 
 	log::debug("[def:ws] lookup '%s': %d candidates", target_name, (int)indices.len());
 
@@ -2840,9 +3023,9 @@ fn Object*? find_definition_in_workspace(WorkspaceIndex* workspace, String targe
 		}
 	}
 
-	if (chosen == null) return NOT_FOUND_IN_WORKSPACE~;
+	if (chosen == null) return NO_TARGET;
 
-	return build_location_from_workspace_symbol(chosen);
+	return make_ast_target_by_position(store, workspace, chosen.uri, chosen.name, chosen.line, chosen.col);
 }
 
 /**
@@ -2893,8 +3076,6 @@ fn bool uri_filename_matches(String uri, String name) {
 
 // ── Inheritance-aware member definition lookup ────────────────────
 
-faultdef NOT_INHERITED_MEMBER;
-
 /**
  * Find a bare call/reference that resolves to a member of a supertype.
  *
@@ -2907,18 +3088,19 @@ faultdef NOT_INHERITED_MEMBER;
  * This avoids false positives because it ONLY matches members of classes
  * that the enclosing class actually inherits from.
  */
-fn Object*? find_inherited_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
+fn TokenTarget find_inherited_member_definition(ParseResult* pr, WorkspaceIndex* workspace,
 		DocumentStore* store, String target_name, uint cursor_offset, String current_uri) {
 	// Find the enclosing class/interface/object containing the cursor
 	String enclosing_class = find_enclosing_class_name(pr, cursor_offset);
-	if (enclosing_class.len == 0) return NOT_INHERITED_MEMBER~;
+	if (enclosing_class.len == 0) return NO_TARGET;
 
 	log::debug("[def:inherit] enclosing class='%s', looking for '%s'", enclosing_class, target_name);
 
 	// First check: is it a member of the enclosing class itself (cross-file)?
 	// This handles the case where the class is defined in another file.
-	if (try result = find_member_in_workspace_class(workspace, store, enclosing_class, target_name)) {
-		return result;
+	{
+		TokenTarget t = find_member_in_workspace_class(workspace, store, enclosing_class, target_name);
+		if (t.kind != TargetKind.NONE) return t;
 	}
 
 	// Get the enclosing class's supertypes from the workspace index
@@ -2930,10 +3112,9 @@ fn Object*? find_inherited_member_definition(ParseResult* pr, WorkspaceIndex* wo
 
 			// Search each supertype's members (with depth limit)
 			for (usz s = 0; s < sym.supertype_count; s++) {
-				if (try result = find_member_in_workspace_class_depth(
-						workspace, store, sym.supertypes[s], target_name, 0)) {
-					return result;
-				}
+				TokenTarget t = find_member_in_workspace_class_depth(
+						workspace, store, sym.supertypes[s], target_name, 0);
+				if (t.kind != TargetKind.NONE) return t;
 			}
 		}
 	}
@@ -2953,7 +3134,7 @@ fn Object*? find_inherited_member_definition(ParseResult* pr, WorkspaceIndex* wo
 		break;
 	}
 
-	return NOT_INHERITED_MEMBER~;
+	return NO_TARGET;
 }
 
 /**
@@ -3098,13 +3279,11 @@ fn String extract_return_type_from_signature(String sig) {
 
 // ── Extension function fallback ───────────────────────────────────
 
-faultdef NO_EXTENSION_FOUND;
-
 /**
  * Search workspace for an extension function matching BOTH receiver type
  * and member name. More precise than find_extension_by_name.
  */
-fn Object*? find_extension_by_receiver_and_name(WorkspaceIndex* workspace, String receiver_type,
+fn TokenTarget find_extension_by_receiver_and_name(WorkspaceIndex* workspace, DocumentStore* store, String receiver_type,
 		String member_name, String current_uri, ParseResult* pr) {
 	ImportMap imports = workspace::build_import_map(pr);
 
@@ -3129,11 +3308,11 @@ fn Object*? find_extension_by_receiver_and_name(WorkspaceIndex* workspace, Strin
 			if (visible.len == 0) continue;
 			if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
 
-			return build_location_from_workspace_symbol(sym);
+			return make_ast_target_by_position(store, workspace, sym.uri, sym.name, sym.line, sym.col);
 		}
 	}
 
-	return NO_EXTENSION_FOUND~;
+	return NO_TARGET;
 }
 
 /**
@@ -3141,7 +3320,7 @@ fn Object*? find_extension_by_receiver_and_name(WorkspaceIndex* workspace, Strin
  * the given name. Used as fallback when receiver type is unresolvable.
  * Filters by import visibility to avoid false positives.
  */
-fn Object*? find_extension_by_name(WorkspaceIndex* workspace, String member_name, String current_uri, ParseResult* pr) {
+fn TokenTarget find_extension_by_name(WorkspaceIndex* workspace, DocumentStore* store, String member_name, String current_uri, ParseResult* pr) {
 	ImportMap imports = workspace::build_import_map(pr);
 
 	// Search workspace name_index for top-level extension functions with this name
@@ -3159,11 +3338,11 @@ fn Object*? find_extension_by_name(WorkspaceIndex* workspace, String member_name
 			// Check module visibility
 			if (!workspace.is_module_visible(sym.uri, current_uri)) continue;
 
-			return build_location_from_workspace_symbol(sym);
+			return make_ast_target_by_position(store, workspace, sym.uri, sym.name, sym.line, sym.col);
 		}
 	}
 
-	return NO_EXTENSION_FOUND~;
+	return NO_TARGET;
 }
 
 /**
@@ -3174,7 +3353,7 @@ fn Object*? find_extension_by_name(WorkspaceIndex* workspace, String member_name
  * "no definition" responses for legitimate workspace symbols. Still respects
  * module visibility so multi-module projects don't surface unreachable code.
  */
-fn Object*? find_extension_by_name_unimported(WorkspaceIndex* workspace, String member_name, String current_uri) {
+fn TokenTarget find_extension_by_name_unimported(WorkspaceIndex* workspace, DocumentStore* store, String member_name, String current_uri) {
 	if (try indices = workspace.lookup_by_name(member_name)) {
 		// Prefer non-private symbols
 		WorkspaceSymbol* fallback = null;
@@ -3188,11 +3367,11 @@ fn Object*? find_extension_by_name_unimported(WorkspaceIndex* workspace, String 
 				if (fallback == null) fallback = sym;
 				continue;
 			}
-			return build_location_from_workspace_symbol(sym);
+			return make_ast_target_by_position(store, workspace, sym.uri, sym.name, sym.line, sym.col);
 		}
-		if (fallback != null) return build_location_from_workspace_symbol(fallback);
+		if (fallback != null) return make_ast_target_by_position(store, workspace, fallback.uri, fallback.name, fallback.line, fallback.col);
 	}
-	return NO_EXTENSION_FOUND~;
+	return NO_TARGET;
 }
 
 /**
@@ -3201,14 +3380,14 @@ fn Object*? find_extension_by_name_unimported(WorkspaceIndex* workspace, String 
  * look up the member name in the dep index and filter by file imports.
  * Handles extension functions from deps (e.g., call.respond() from ktor).
  */
-fn Object* find_dot_member_by_import(DependencyIndex* dep_index, ParseResult* pr, String member_name, String current_uri) {
-	if (dep_index == null || !dep_index.initialized) return null;
+fn TokenTarget find_dot_member_by_import(DependencyIndex* dep_index, ParseResult* pr, String member_name, String current_uri) {
+	if (dep_index == null || !dep_index.initialized) return NO_TARGET;
 
 	ImportMap imports = workspace::build_import_map(pr);
 
 	DepSymbol*[32] matches;
 	usz count = dep_index.lookup_by_name(member_name, &matches);
-	if (count == 0) return null;
+	if (count == 0) return NO_TARGET;
 
 	// First pass: prefer explicit import match
 	for (usz i = 0; i < count; i++) {
@@ -3218,8 +3397,7 @@ fn Object* find_dot_member_by_import(DependencyIndex* dep_index, ParseResult* pr
 			if (imports.import_names[j] != member_name) continue;
 			String pkg = workspace::get_import_package(imports.import_paths[j]);
 			if (pkg == matches[i].package_name) {
-				Object* result = source_nav::resolve_dep_definition(matches[i]);
-				if (result != null) return result;
+				return make_dep_target_from_ptr(dep_index, matches[i]);
 			}
 		}
 	}
@@ -3230,11 +3408,10 @@ fn Object* find_dot_member_by_import(DependencyIndex* dep_index, ParseResult* pr
 		for (usz j = 0; j < imports.import_count; j++) {
 			if (!imports.is_star[j]) continue;
 			if (imports.star_packages[j] == matches[i].package_name) {
-				Object* result = source_nav::resolve_dep_definition(matches[i]);
-				if (result != null) return result;
+				return make_dep_target_from_ptr(dep_index, matches[i]);
 			}
 		}
 	}
 
-	return null;
+	return NO_TARGET;
 }

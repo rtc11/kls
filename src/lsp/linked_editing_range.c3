@@ -55,34 +55,19 @@ fn Object*? handle_linked_editing_range(DocumentStore* store, WorkspaceIndex* wo
 	TokenTarget target = definition::NO_TARGET;
 	if (pr != null) {
 		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
-		if (target.kind == TargetKind.NONE && references::is_declaration_name(pr, tok.offset)) {
-			target = (TokenTarget){
-				.kind = TargetKind.IN_FILE,
-				.uri = uri,
-				.name_offset = tok.offset,
-			};
+		if (target.kind == TargetKind.NONE) {
+			uint decl_idx_self = 0;
+			if (references::find_decl_idx_at_offset(pr, target_name, tok.offset, &decl_idx_self)) {
+				target = definition::make_ast_target(uri, decl_idx_self);
+			}
 		}
 	}
 
-	// For decoded line/col targets (sourced from dot-member resolver), prepare
-	// alternative comparison.
-	bool target_is_encoded = false;
-	uint enc_line = 0;
-	uint enc_col = 0;
-	if (pr != null && target.kind == TargetKind.IN_FILE) {
-		bool is_byte_offset = false;
-		for (uint i = 0; i < pr.node_count; i++) {
-			AstNode* n = &pr.nodes[i];
-			if (n.name_offset == target.name_offset && n.name == target_name && ast::is_declaration(n.kind)) {
-				is_byte_offset = true;
-				break;
-			}
-		}
-		if (!is_byte_offset) {
-			target_is_encoded = true;
-			enc_line = target.name_offset >> 16;
-			enc_col = target.name_offset & 0xFFFF;
-		}
+	// Precompute the in-file decl token offset (if AST_NODE points at this file).
+	bool target_in_this_file = (pr != null && target.kind == TargetKind.AST_NODE && target.uri == uri);
+	uint decl_byte_offset = uint.max;
+	if (target_in_this_file && target.decl_idx < pr.node_count) {
+		decl_byte_offset = pr.nodes[target.decl_idx].name_offset;
 	}
 
 	// Collect matching IDENTIFIER tokens that bind to the same target
@@ -95,17 +80,16 @@ fn Object*? handle_linked_editing_range(DocumentStore* store, WorkspaceIndex* wo
 		if (t.kind != IDENTIFIER) continue;
 		if (t.text != target_name) continue;
 
-		if (pr != null && target.kind == TargetKind.IN_FILE) {
-			bool is_decl_site = (!target_is_encoded && t.offset == target.name_offset)
-				|| (target_is_encoded && t.line == enc_line && t.col == enc_col);
+		if (pr != null && target_in_this_file) {
+			bool is_decl_site = (decl_byte_offset != uint.max && t.offset == decl_byte_offset);
 			if (!is_decl_site) {
 				if (!definition::token_binds_to_target(target, pr, ti, workspace, store, uri, target_name, t.offset, is_call)) {
 					continue;
 				}
 			}
-		} else if (pr != null && target.kind == TargetKind.CROSS_FILE) {
+		} else if (pr != null && target.kind != TargetKind.NONE) {
 			TokenTarget cand = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, t.offset, is_call);
-			if (cand.kind != TargetKind.CROSS_FILE || cand.uri != target.uri) continue;
+			if (!definition::target_equals(target, cand)) continue;
 		} else if (pr != null) {
 			// Fallback: enclosing scope comparison
 			uint cursor_scope = find_enclosing_scope(pr, tok.offset);

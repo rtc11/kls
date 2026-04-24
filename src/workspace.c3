@@ -61,6 +61,18 @@ struct WorkspaceFile {
 	usz symbol_count;      // number of symbols from this file
 }
 
+// ── Cached parse result per file ───────────────────────────────────
+//
+// Pairs heap-owned source content with its ParseResult so AstNode
+// String fields (which borrow from `content`) stay valid for the
+// entry's lifetime. Used by cross-file resolution in definition.c3
+// to recover decl indices without disk I/O.
+
+struct AstCacheEntry {
+	String content;        // heap-copied source
+	ParseResult* pr;       // heap-allocated, parsed against `content`
+}
+
 // ── Workspace index ────────────────────────────────────────────────
 
 struct WorkspaceIndex {
@@ -72,6 +84,7 @@ struct WorkspaceIndex {
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
 	HashMap{String, List{String}} class_type_params; // class name -> generic type parameter names (e.g. MappedStream -> [K, V])
+	HashMap{String, AstCacheEntry} ast_cache; // uri -> cached (content, ParseResult) for cross-file lookups
 	List{String} ext_cache_keys;                     // heap-allocated keys for extension entries
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
@@ -86,6 +99,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.super_index.init(mem);
 	self.member_cache.init(mem);
 	self.class_type_params.init(mem);
+	self.ast_cache.init(mem);
 	self.ext_cache_keys.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
@@ -191,6 +205,18 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		if (k.len > 0) mem::free(k.ptr);
 	}
 	self.ext_cache_keys.free();
+
+	// Free ast_cache entries (heap content + ParseResult)
+	@pool() {
+		foreach (&entry : self.ast_cache.tvalues()) {
+			if (entry.content.len > 0) mem::free(entry.content.ptr);
+			if (entry.pr != null) {
+				entry.pr.free_errors();
+				mem::free(entry.pr);
+			}
+		}
+	};
+	self.ast_cache.free();
 
 	self.classpath.free();
 	self.dep_index.free();
@@ -751,6 +777,52 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 
 	// Populate member cache for class-like declarations
 	self.cache_class_members(uri, content, &buf, count, start);
+
+	// Cache (content, ParseResult) for cross-file decl_idx recovery.
+	// Cleared and reparsed on every index_file call so AST stays in sync
+	// with the latest content. Source is heap-copied because AstNode
+	// String fields borrow from it.
+	self.cache_ast(uri, content);
+}
+
+/**
+ * Heap-copy `content`, parse it, and cache the (content, ParseResult)
+ * pair under `uri`. Frees any prior entry for this URI.
+ *
+ * The cached AST is consumed by `find_decl_idx_by_position` in
+ * definition.c3 to recover decl indices for cross-file lookups
+ * without forcing a disk read.
+ */
+fn void WorkspaceIndex.cache_ast(WorkspaceIndex* self, String uri, String content) {
+	// Free any prior entry
+	if (try old = self.ast_cache.get_ref(uri)) {
+		if (old.content.len > 0) mem::free(old.content.ptr);
+		if (old.pr != null) {
+			old.pr.free_errors();
+			mem::free(old.pr);
+		}
+	}
+
+	if (content.len == 0) {
+		self.ast_cache.remove(uri);
+		return;
+	}
+
+	String content_copy = content.copy(mem);
+	ParseResult* pr = mem::new(ParseResult);
+	parser::parse(content_copy, pr);
+
+	AstCacheEntry entry = { .content = content_copy, .pr = pr };
+	self.ast_cache.set(uri, entry);
+}
+
+/**
+ * Look up a cached ParseResult for a workspace file. Returns null when
+ * the URI hasn't been indexed (or had empty content).
+ */
+fn ParseResult*? WorkspaceIndex.get_cached_ast(WorkspaceIndex* self, String uri) {
+	AstCacheEntry* entry = self.ast_cache.get_ref(uri)!;
+	return entry.pr;
 }
 
 /**
@@ -758,6 +830,16 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
  * Frees heap strings, compacts the symbols list, and rebuilds indices.
  */
 fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
+	// Invalidate cached AST entry for this file
+	if (try old = self.ast_cache.get_ref(uri)) {
+		if (old.content.len > 0) mem::free(old.content.ptr);
+		if (old.pr != null) {
+			old.pr.free_errors();
+			mem::free(old.pr);
+		}
+		self.ast_cache.remove(uri);
+	}
+
 	WorkspaceFile* wf = self.files.get_ref(uri) ?? null;
 	if (wf == null) {
 		return;

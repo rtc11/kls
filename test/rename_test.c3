@@ -967,3 +967,55 @@ fn void rename_via_callable_ref_renames_decl_and_usages() @test {
 		}
 	};
 }
+
+// Cursor on the *declaration* itself must update the callable-ref usage.
+// Reverse direction of `rename_via_callable_ref_renames_decl_and_usages`:
+// validates that the decl-site path produces an AST_NODE target whose
+// identity matches the one produced from the callable-ref site.
+fn void rename_from_decl_site_with_callable_ref() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String file =
+			"class Header {\n"
+			"    companion object {\n"
+			"        fun fromString(s: String): Header = Header()\n"
+			"    }\n"
+			"}\n"
+			"fun useIt() = listOf(\"a\").map(Header::fromString)\n";
+		store.open("file:///header.kt", "kotlin", 1, file);
+		ws.index_file("file:///header.kt", file);
+
+		// Cursor on `fromString` at decl site (line 2, col 12).
+		Object* params = make_rename_params("file:///header.kt", 2, 12, "parse");
+		Object* result = rename::handle_rename(&store, &ws, params) ?? null;
+
+		assert(result != null, "expected rename from decl-site to succeed");
+
+		Object* edits = get_edits_for_uri(result, "file:///header.kt");
+		assert(edits != null, "expected edits for header.kt");
+		usz count = edits.get_len();
+		assert(count >= 2, "expected >= 2 edits (decl + callable-ref), got %d", (int)count);
+
+		// Verify line 5 (callable-ref usage) is among the edits.
+		bool found_use = false;
+		for (usz i = 0; i < count; i++) {
+			if (get_edit_line(edits, i) == 5) {
+				found_use = true;
+				break;
+			}
+		}
+		assert(found_use, "expected callable-ref usage on line 5 to be renamed");
+
+		for (usz i = 0; i < count; i++) {
+			assert(get_edit_new_text(edits, i) == "parse",
+				"expected newText 'parse' at edit %d", (int)i);
+		}
+	};
+}

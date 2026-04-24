@@ -7,6 +7,7 @@ import std::collections::object;
 import kls::document;
 import kls::lsp::hover;
 import kls::lsp::definition;
+import kls::lsp::references;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
@@ -138,35 +139,26 @@ fn Object*? handle_rename(DocumentStore* store, WorkspaceIndex* workspace, Objec
 
 	if (pr != null) {
 		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
-		if (target.kind == TargetKind.IN_FILE) {
-			// Try to recover the AstNode from raw byte offset (when the
-			// target came from scope walk). When it came from the dot-
-			// member resolver, name_offset is encoded line/col — find
-			// the matching AST node by line/col instead.
-			has_decl = recover_decl_idx(pr, target_name, target.name_offset, &decl_idx);
-			if (has_decl) {
-				is_top_level = is_externally_visible_decl(pr, decl_idx);
-			} else {
-				// Encoded line/col: search by name + line/col
-				uint enc = target.name_offset;
-				uint t_line = enc >> 16;
-				uint t_col = enc & 0xFFFF;
-				for (uint i = 0; i < pr.node_count; i++) {
-					AstNode* n = &pr.nodes[i];
-					if (!ast::is_declaration(n.kind)) continue;
-					if (n.name != target_name) continue;
-					if (n.name_line != t_line || n.name_col != t_col) continue;
-					decl_idx = i;
-					has_decl = true;
-					is_top_level = is_externally_visible_decl(pr, i);
-					break;
-				}
+		// Cursor on a declaration site itself: build self AST_NODE target.
+		if (target.kind == TargetKind.NONE) {
+			uint self_idx = 0;
+			if (references::find_decl_idx_at_offset(pr, target_name, tok.offset, &self_idx)) {
+				target = definition::make_ast_target(uri, self_idx);
 			}
-		} else if (target.kind == TargetKind.CROSS_FILE) {
-			// Declaration in another file — treat as top-level so the
-			// cross-file scan runs. has_decl stays false; current file
-			// uses adapter-based per-token verification instead of
-			// scope restriction.
+		}
+
+		if (target.kind == TargetKind.AST_NODE && target.uri == uri) {
+			// Decl in current file — recover decl_idx directly from target.
+			if (target.decl_idx < pr.node_count) {
+				decl_idx = target.decl_idx;
+				has_decl = true;
+				is_top_level = is_externally_visible_decl(pr, decl_idx);
+			}
+		} else if (target.kind != TargetKind.NONE) {
+			// Decl elsewhere (other workspace file, dep JAR, external) —
+			// treat as top-level so cross-file scan runs. has_decl stays
+			// false; current file uses adapter-based per-token verification
+			// instead of scope restriction.
 			is_top_level = true;
 		}
 	}
@@ -306,24 +298,14 @@ fn Object* collect_target_edits(String content, ParseResult* pr, TypeInfo* ti,
 		}
 	}
 
-	// Encoded line/col path: when target.name_offset is encoded, decode for
-	// declaration-site comparison by token line/col. We always compute the
-	// declaration's line/col when an AstNode is known (whether discovered
-	// by raw byte offset or by encoded line/col), so the lexer pass can
-	// match the decl site by line/col regardless of the recovery path.
-	bool target_is_in_file = (target.kind == TargetKind.IN_FILE);
-	uint enc_line = 0;
-	uint enc_col = 0;
+	// Decl-site comparison by raw byte offset. When the target is an
+	// AST_NODE in this file, decl_byte_offset is the byte offset of the
+	// declaration's name token. Otherwise (cross-file / dep / external),
+	// no in-file decl site to special-case.
+	bool target_is_in_file = (target.kind == TargetKind.AST_NODE && target.uri == current_uri);
 	uint decl_byte_offset = uint.max;
-	if (target_is_in_file) {
-		if (has_decl) {
-			enc_line = pr.nodes[decl_idx].name_line;
-			enc_col = pr.nodes[decl_idx].name_col;
-			decl_byte_offset = pr.nodes[decl_idx].name_offset;
-		} else {
-			enc_line = target.name_offset >> 16;
-			enc_col = target.name_offset & 0xFFFF;
-		}
+	if (target_is_in_file && has_decl) {
+		decl_byte_offset = pr.nodes[decl_idx].name_offset;
 	}
 
 	Lexer lex = lexer::init(content);
@@ -352,11 +334,6 @@ fn Object* collect_target_edits(String content, ParseResult* pr, TypeInfo* ti,
 		// Same-file declaration site: include directly.
 		if (target_is_in_file) {
 			if (decl_byte_offset != uint.max && t.offset == decl_byte_offset) {
-				Object* edit = build_text_edit(t, new_name);
-				edits.push(edit);
-				continue;
-			}
-			if (t.line == enc_line && t.col == enc_col) {
 				Object* edit = build_text_edit(t, new_name);
 				edits.push(edit);
 				continue;
