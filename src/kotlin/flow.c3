@@ -409,6 +409,55 @@ fn void apply_cond_facts(ParseResult* pr, uint cond_idx, FlowState* true_out, Fl
 			return;
 		}
 	}
+
+	// Contract-driven narrowing: `if (call(...))` with a contract of
+	// the form `returns(true|false) implies (predicate)` narrows
+	// caller-side facts in the matching branch. Common idioms:
+	//   if (s.isNullOrEmpty()) {} else { s.length }    // s known non-null in else
+	//   if (!s.isNullOrEmpty()) { s.length }           // s known non-null in then
+	if (n.kind == CALL_EXPR) {
+		apply_call_cond_contracts(pr, idx, negated, true_out, false_out);
+		return;
+	}
+}
+
+/**
+ * Consume `returns(true|false) implies (cond)` contracts at a call
+ * appearing in conditional position. RETURN_TRUE arms feed `true_out`,
+ * RETURN_FALSE arms feed `false_out`. ANY_RETURN arms apply
+ * unconditionally on both branches (the call returned normally to
+ * evaluate the condition, so any `returns()` postcondition holds).
+ *
+ * `negated` flips which branch each arm contributes to (handles `!call`).
+ */
+fn void apply_call_cond_contracts(ParseResult* pr, uint call_idx, bool negated,
+		FlowState* true_out, FlowState* false_out) {
+	AstNode* call = &pr.nodes[call_idx];
+	String callee = call.name;
+	if (callee.len == 0) return;
+
+	contracts::ContractEffect[8] buf;
+	usz n = contracts::collect_stdlib_contracts(callee, buf[..]);
+	for (usz i = 0; i < n; i++) {
+		if (buf[i].kind != contracts::ContractEffectKind.RETURNS_IMPLIES) continue;
+
+		FlowState* dest;
+		switch (buf[i].rv) {
+			case contracts::ReturnValue.RETURN_TRUE:
+				dest = negated ? false_out : true_out;
+			case contracts::ReturnValue.RETURN_FALSE:
+				dest = negated ? true_out : false_out;
+			case contracts::ReturnValue.ANY_RETURN:
+				// Postcondition of normal completion — both branches see it.
+				apply_predicate_to(pr, call_idx, &buf[i], true_out);
+				apply_predicate_to(pr, call_idx, &buf[i], false_out);
+				continue;
+			case contracts::ReturnValue.RETURN_NULL:
+				// Boolean-valued conditions can't carry a null return.
+				continue;
+		}
+		apply_predicate_to(pr, call_idx, &buf[i], dest);
+	}
 }
 
 fn void merge_facts_into(FlowState* dest, FlowState* src) {
@@ -608,12 +657,22 @@ fn void apply_call_contracts(ParseResult* pr, uint call_idx, FlowState* state) {
  */
 fn void apply_returns_implies(ParseResult* pr, uint call_idx,
 		contracts::ContractEffect* effect, FlowState* state) {
+	apply_predicate_to(pr, call_idx, effect, state);
+}
+
+/**
+ * Apply the contract's predicate as a fact to `dest`. Shared between
+ * statement-position consumption (ANY_RETURN) and conditional-position
+ * consumption (RETURN_TRUE / RETURN_FALSE arms in `if` / `when`).
+ */
+fn void apply_predicate_to(ParseResult* pr, uint call_idx,
+		contracts::ContractEffect* effect, FlowState* dest) {
 	String target_name = resolve_target_name(pr, call_idx, &effect.target);
 
 	switch (effect.pred) {
 		case contracts::PredKind.PRED_NOT_NULL:
 			if (target_name.len > 0) {
-				state.add_fact(ast::NO_PARENT, target_name, types::TYPE_UNKNOWN, true);
+				dest.add_fact(ast::NO_PARENT, target_name, types::TYPE_UNKNOWN, true);
 			}
 		case contracts::PredKind.PRED_BOOL_PARAM:
 			// `target_name` here would be the formal param's name in
@@ -621,11 +680,11 @@ fn void apply_returns_implies(ParseResult* pr, uint call_idx,
 			// unless the caller passes a bare local/param of the same
 			// name. The interesting narrowing is when the actual arg
 			// is itself `x != null` / `x is T` — propagate that.
-			propagate_boolean_arg_narrowing(pr, call_idx, effect.target.param_index, state);
+			propagate_boolean_arg_narrowing(pr, call_idx, effect.target.param_index, dest);
 		case contracts::PredKind.PRED_IS_TYPE:
 			if (target_name.len > 0) {
 				TypeRef t = types::parse_type_text(effect.type_text);
-				state.add_fact(ast::NO_PARENT, target_name, t, !t.nullable);
+				dest.add_fact(ast::NO_PARENT, target_name, t, !t.nullable);
 			}
 		case contracts::PredKind.PRED_IS_NULL:
 		case contracts::PredKind.PRED_IS_NOT_TYPE:
@@ -669,13 +728,20 @@ fn String resolve_target_name(ParseResult* pr, uint call_idx,
 		uint arg = nth_positional_arg(pr, call_idx, target.param_index);
 		return name_of_expr(pr, arg);
 	}
-	// TARGET_RECEIVER — walk up to DOT_EXPR parent and read its LHS.
+	// TARGET_RECEIVER — the receiver of a member call appears as the
+	// callee child of CALL_EXPR (parser shape: CALL_EXPR has DOT_EXPR
+	// as a child, where the DOT_EXPR's first child is the receiver).
+	// Note: the callee child is added BEFORE `children_start` for the
+	// args, so we must scan all nodes for `parent == call_idx`.
 	if (call_idx >= pr.node_count) return "";
-	uint parent = pr.nodes[call_idx].parent;
-	if (parent == ast::NO_PARENT) return "";
-	if (pr.nodes[parent].kind != DOT_EXPR) return "";
-	uint lhs = first_child(pr, parent);
-	return name_of_expr(pr, lhs);
+	for (uint i = 0; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != call_idx) continue;
+		if (pr.nodes[i].kind == DOT_EXPR) {
+			uint lhs = first_child(pr, i);
+			return name_of_expr(pr, lhs);
+		}
+	}
+	return "";
 }
 
 /**

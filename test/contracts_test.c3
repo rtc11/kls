@@ -195,3 +195,85 @@ fn void extract_user_contract_skips_non_contract_body() @test {
 		assert(n == 0, "no contracts on plain body");
 	};
 }
+
+// ── Conditional-position narrowing (Phase 2 deferred item) ─────────
+
+fn void cond_narrow_negated_is_null_or_empty() @test {
+	@pool() {
+		// `if (!s.isNullOrEmpty()) s.length` — s should be non-null in then-branch.
+		String src = "fun f(s: String?) { if (!s.isNullOrEmpty()) { val len = s } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		// 1st `s` = receiver of isNullOrEmpty; 2nd `s` = use in `val len = s`.
+		uint use_idx = find_nth_name(pr, "s", 1);
+		assert(use_idx != ast::NO_PARENT, "found use of s in then-branch");
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "s");
+		assert(fact != null, "expected smart cast fact for s");
+		assert(fact.not_null, "s should be not-null in then-branch of !isNullOrEmpty");
+	};
+}
+
+fn void cond_narrow_else_branch_of_is_null_or_empty() @test {
+	@pool() {
+		// `if (s.isNullOrEmpty()) {} else { s.length }` — s non-null in else.
+		String src = "fun f(s: String?) { if (s.isNullOrEmpty()) {} else { val len = s } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "s", 1);
+		assert(use_idx != ast::NO_PARENT, "found use of s in else-branch");
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "s");
+		assert(fact != null, "expected smart cast fact for s in else-branch");
+		assert(fact.not_null, "s should be not-null in else-branch of isNullOrEmpty");
+	};
+}
+
+fn void cond_narrow_negated_is_null_or_blank() @test {
+	@pool() {
+		String src = "fun f(s: String?) { if (!s.isNullOrBlank()) { val len = s } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "s", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "s");
+		assert(fact != null, "expected fact");
+		assert(fact.not_null, "s should be not-null after !isNullOrBlank()");
+	};
+}
+
+fn void cond_no_narrow_in_wrong_branch_isNullOrEmpty() @test {
+	@pool() {
+		// then-branch of `if (s.isNullOrEmpty()) { ... }` learns NOTHING about s
+		// (s could be null or empty).
+		String src = "fun f(s: String?) { if (s.isNullOrEmpty()) { val x = s } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "s", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "s");
+		// Either no fact or not_null=false — both acceptable.
+		assert(fact == null || !fact.not_null,
+			"s must NOT be smart-cast to non-null in then-branch of isNullOrEmpty");
+	};
+}
