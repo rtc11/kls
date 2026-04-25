@@ -3770,3 +3770,108 @@ fn void smart_cast_local_var_same_function_is_stable() @test {
 		}
 	};
 }
+
+// ── Property smart cast (member + top-level val) ───────────────────
+
+fn void smart_cast_top_level_val_simple() @test {
+	@pool() {
+		// Top-level `val` with no custom getter is stable. Bare-name access
+		// after a null check should narrow.
+		String src =
+			`val name: String? = "hi"
+			fun test() {
+				if (name != null) {
+					val s = name
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "top-level val should narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_top_level_var_unstable() @test {
+	@pool() {
+		// Top-level `var` is never stable.
+		String src =
+			`var name: String? = "hi"
+			fun test() {
+				if (name != null) {
+					val s = name
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "top-level var must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_top_level_val_with_custom_getter_unstable() @test {
+	@pool() {
+		// `val` with a custom getter is unstable — getter could return
+		// different values across two reads.
+		String src =
+			`val rnd: String?
+				get() = if (System.currentTimeMillis() % 2L == 0L) "x" else null
+			fun test() {
+				if (rnd != null) {
+					val s = rnd
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "val with custom getter must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_open_val_unstable() @test {
+	@pool() {
+		// `open val` may be overridden with a custom getter — unstable.
+		String src =
+			`open val name: String? = "hi"
+			fun test() {
+				if (name != null) {
+					val s = name
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "open val must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_top_level_val_is_check_narrows() @test {
+	@pool() {
+		// Type-check on top-level val.
+		String src =
+			`val v: Any = "hi"
+			fun test() {
+				if (v is String) {
+					val s = v
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "top-level val should narrow on `is`; got '%s'", t);
+	};
+}

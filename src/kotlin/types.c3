@@ -714,7 +714,7 @@ fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_
 }
 
 /**
- * Stability gate for smart casts (Kotlin spec §11.3, scoped to locals).
+ * Stability gate for smart casts (Kotlin spec §11.3).
  *
  *   - PARAM                          → stable (effective val)
  *   - PROPERTY_DECL local val        → stable
@@ -722,8 +722,21 @@ fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_
  *                                       function as the declaration
  *                                       (i.e. not captured by a nested
  *                                       lambda / anonymous function).
- *   - Member properties / top-level  → not stable in this phase (property
- *                                       smart cast is deferred).
+ *   - PROPERTY_DECL member/top-level val → stable iff:
+ *                                       no custom getter AND not `open`
+ *                                       AND not `var`. (Conservative
+ *                                       approximation of spec §11.3:
+ *                                       declaration must be in the
+ *                                       same module — same file is a
+ *                                       reliable subset; top-level
+ *                                       cross-file access is reachable
+ *                                       only through workspace which
+ *                                       this gate doesn't see, so
+ *                                       only same-file uses currently
+ *                                       narrow.)
+ *   - PROPERTY_DECL member/top-level var → never stable (mutable, could
+ *                                          change between check & use,
+ *                                          delegated, etc.).
  */
 fn bool is_stable_for_smart_cast(ParseResult* pr, TypeInfo* info, uint decl_idx, uint use_idx) {
 	if (decl_idx >= pr.node_count) return false;
@@ -731,15 +744,42 @@ fn bool is_stable_for_smart_cast(ParseResult* pr, TypeInfo* info, uint decl_idx,
 	if (decl.kind == PARAM) return true;
 	if (decl.kind != PROPERTY_DECL) return false;
 
-	// Local-only: declaration must be inside a function-like scope.
-	uint decl_func = (decl_idx < ast::MAX_NODES) ? info.enclosing_func[decl_idx] : ast::NO_PARENT;
-	if (decl_func == ast::NO_PARENT) return false;
-
 	bool is_var = (decl.mod_flags & ast::MOD_VAR) != 0;
-	if (!is_var) return true;
 
-	uint use_func = (use_idx < ast::MAX_NODES) ? info.enclosing_func[use_idx] : ast::NO_PARENT;
-	return use_func == decl_func;
+	// Local case: declared inside a function-like scope.
+	uint decl_func = (decl_idx < ast::MAX_NODES) ? info.enclosing_func[decl_idx] : ast::NO_PARENT;
+	if (decl_func != ast::NO_PARENT) {
+		if (!is_var) return true;
+		uint use_func = (use_idx < ast::MAX_NODES) ? info.enclosing_func[use_idx] : ast::NO_PARENT;
+		return use_func == decl_func;
+	}
+
+	// Member/top-level property. var is never stable (mutable, possibly
+	// delegated, observable concurrently). val is stable only when:
+	//   1. no custom getter (a custom getter could return different
+	//      values across two reads even for `val`), and
+	//   2. not `open` (an override could supply a custom getter).
+	if (is_var) return false;
+	if ((decl.mod_flags & ast::MOD_OPEN) != 0) return false;
+	if (property_has_custom_getter(pr, decl_idx)) return false;
+	return true;
+}
+
+/**
+ * True if a PROPERTY_DECL has a `get()` accessor with a body. Parser
+ * shape: accessors are FUN_DECL children of the property whose `name`
+ * is literally "get" or "set".
+ */
+fn bool property_has_custom_getter(ParseResult* pr, uint prop_idx) {
+	if (prop_idx >= pr.node_count) return false;
+	AstNode* p = &pr.nodes[prop_idx];
+	if (p.child_count == 0) return false;
+	for (uint i = p.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != prop_idx) continue;
+		if (pr.nodes[i].kind != FUN_DECL) continue;
+		if (pr.nodes[i].name == "get") return true;
+	}
+	return false;
 }
 
 /**
