@@ -436,8 +436,8 @@ fn void apply_call_cond_contracts(ParseResult* pr, uint call_idx, bool negated,
 	String callee = call.name;
 	if (callee.len == 0) return;
 
-	contracts::ContractEffect[8] buf;
-	usz n = contracts::collect_stdlib_contracts(callee, buf[..]);
+	contracts::ContractEffect[16] buf;
+	usz n = collect_contracts_for_callee(pr, callee, buf[..]);
 	for (usz i = 0; i < n; i++) {
 		if (buf[i].kind != contracts::ContractEffectKind.RETURNS_IMPLIES) continue;
 
@@ -641,13 +641,38 @@ fn void apply_call_contracts(ParseResult* pr, uint call_idx, FlowState* state) {
 	String callee = call.name;
 	if (callee.len == 0) return;
 
-	contracts::ContractEffect[8] buf;
-	usz n = contracts::collect_stdlib_contracts(callee, buf[..]);
+	contracts::ContractEffect[16] buf;
+	usz n = collect_contracts_for_callee(pr, callee, buf[..]);
 	for (usz i = 0; i < n; i++) {
 		if (buf[i].kind != contracts::ContractEffectKind.RETURNS_IMPLIES) continue;
 		if (buf[i].rv != contracts::ReturnValue.ANY_RETURN) continue;
 		apply_returns_implies(pr, call_idx, &buf[i], state);
 	}
+}
+
+/**
+ * Collect contracts for a callee from BOTH the hardcoded stdlib table
+ * AND the in-file user-defined contracts (any FUN_DECL with matching
+ * name in the same ParseResult). Cross-file user contracts are NOT
+ * resolved here — that requires a workspace lookup which would invert
+ * the kotlin → workspace layering. Tracked in the contracts plan.
+ */
+fn usz collect_contracts_for_callee(ParseResult* pr, String callee_name,
+		contracts::ContractEffect[] out) {
+	usz n = contracts::collect_stdlib_contracts(callee_name, out);
+	if (n >= out.len) return n;
+
+	// In-file scan: find any FUN_DECL with this name, extract its
+	// contracts. Multiple matches (overloads) all contribute — flow
+	// is conservative so applying superset of facts only narrows more.
+	for (uint i = 0; i < pr.node_count; i++) {
+		if (n >= out.len) break;
+		if (pr.nodes[i].kind != FUN_DECL) continue;
+		if (pr.nodes[i].name != callee_name) continue;
+		usz wrote = contracts::extract_user_contracts(pr, i, out[n..]);
+		n += wrote;
+	}
+	return n;
 }
 
 /**

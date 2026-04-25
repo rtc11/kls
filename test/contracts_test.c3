@@ -277,3 +277,131 @@ fn void cond_no_narrow_in_wrong_branch_isNullOrEmpty() @test {
 			"s must NOT be smart-cast to non-null in then-branch of isNullOrEmpty");
 	};
 }
+
+// ── User-defined contract consumption (in-file) ────────────────────
+
+fn void user_contract_stmt_position_narrows_caller() @test {
+	@pool() {
+		// User defines a non-null assertion helper. Caller-side use of x
+		// after the call should be smart-cast to non-null.
+		String src = "fun assertNotNull(x: Any?) { contract { returns() implies (x != null) } ; if (x == null) throw RuntimeException() }\n"
+			"fun f(p: String?) { assertNotNull(p) ; val s = p }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		// 1st `p` use = the call argument; 2nd `p` use = the post-call use.
+		uint use_idx = find_nth_name(pr, "p", 1);
+		assert(use_idx != ast::NO_PARENT, "found post-call use of p");
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "p");
+		assert(fact != null, "expected smart cast fact for p");
+		assert(fact.not_null, "p should be not-null after assertNotNull(p)");
+	};
+}
+
+fn void user_contract_cond_position_narrows_then_branch() @test {
+	@pool() {
+		// User defines isNotNull: returns(true) implies (x != null).
+		// Caller-side `if (isNotNull(p)) p.length` narrows p to non-null.
+		String src = "fun isNotNull(x: Any?): Boolean { contract { returns(true) implies (x != null) } ; return x != null }\n"
+			"fun f(p: String?) { if (isNotNull(p)) { val s = p } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		// 1st `p` use = arg to isNotNull; 2nd `p` use = inside then-branch.
+		uint use_idx = find_nth_name(pr, "p", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "p");
+		assert(fact != null, "expected fact in then-branch");
+		assert(fact.not_null, "p should be not-null in then-branch of isNotNull(p)");
+	};
+}
+
+fn void user_contract_cond_position_narrows_else_branch_for_returns_false() @test {
+	@pool() {
+		// returns(false) implies (x != null) — narrow in ELSE branch.
+		String src = "fun isMissing(x: Any?): Boolean { contract { returns(false) implies (x != null) } ; return x == null }\n"
+			"fun f(p: String?) { if (isMissing(p)) {} else { val s = p } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "p", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "p");
+		assert(fact != null, "expected fact in else-branch");
+		assert(fact.not_null, "p should be not-null in else-branch of isMissing(p)");
+	};
+}
+
+fn void user_contract_negated_cond_flips_branch() @test {
+	@pool() {
+		// `if (!isNotNull(p))` — narrow now in ELSE, not THEN.
+		String src = "fun isNotNull(x: Any?): Boolean { contract { returns(true) implies (x != null) } ; return x != null }\n"
+			"fun f(p: String?) { if (!isNotNull(p)) {} else { val s = p } }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "p", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "p");
+		assert(fact != null, "expected fact in else-branch (negated cond)");
+		assert(fact.not_null, "p should be not-null in else-branch of !isNotNull(p)");
+	};
+}
+
+fn void user_contract_is_type_narrows_caller() @test {
+	@pool() {
+		// returns() implies (x is String) — narrow x to String after call.
+		String src = "fun assertString(x: Any) { contract { returns() implies (x is String) } ; if (x !is String) throw RuntimeException() }\n"
+			"fun f(p: Any) { assertString(p) ; val s = p }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "p", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "p");
+		assert(fact != null, "expected fact after assertString(p)");
+		assert(fact.narrowed.name == "String",
+			"expected narrowing to String, got '%s'", fact.narrowed.name);
+	};
+}
+
+fn void user_contract_no_match_does_nothing() @test {
+	@pool() {
+		// Call to undefined fn — no contract, no narrow.
+		String src = "fun f(p: String?) { someUndefinedFn(p) ; val s = p }";
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		uint fdecl = find_decl(pr, FUN_DECL, "f");
+		Cfg* c = cfg::build_cfg(pr, fdecl);
+		defer c.free();
+		flow::FlowAnalysis* fa = flow::analyze(pr, c);
+		defer fa.free();
+
+		uint use_idx = find_nth_name(pr, "p", 1);
+		flow::Fact* fact = fa.fact_at(pr, c, use_idx, "p");
+		// No fact OR not_null=false — both fine.
+		assert(fact == null || !fact.not_null,
+			"unknown callee must not narrow caller");
+	};
+}
