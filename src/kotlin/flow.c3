@@ -2,6 +2,7 @@ module kls::kotlin::flow;
 
 import kls::kotlin::ast;
 import kls::kotlin::cfg;
+import kls::kotlin::contracts;
 import kls::kotlin::types;
 
 // ── Flow-sensitive smart-cast analysis ─────────────────────────────
@@ -558,23 +559,12 @@ fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
 			break;
 
 		case CALL_EXPR:
-			// requireNotNull(x), checkNotNull(x), require(x != null), check(x != null)
-			if (n.name == "requireNotNull" || n.name == "checkNotNull") {
-				uint arg = first_arg_expr(pr, idx);
-				String name = name_of_expr(pr, arg);
-				if (name.len > 0) {
-					TypeRef nn = types::TYPE_UNKNOWN;
-					state.add_fact(ast::NO_PARENT, name, nn, true);
-				}
-			} else if (n.name == "require" || n.name == "check") {
-				uint arg = first_arg_expr(pr, idx);
-				String name;
-				String op = parse_null_check(pr, arg, &name);
-				if (op == "!=null" && name.len > 0) {
-					TypeRef nn = types::TYPE_UNKNOWN;
-					state.add_fact(ast::NO_PARENT, name, nn, true);
-				}
-			}
+			// Apply post-call facts from any matching stdlib contract.
+			// Covers requireNotNull/checkNotNull/require/check (formerly
+			// hardcoded) plus isNullOrEmpty/isNullOrBlank patterns when
+			// they appear in statement position (rare; usually they
+			// surface via cond branches — see apply_cond_facts).
+			apply_call_contracts(pr, idx, state);
 			break;
 
 		default:
@@ -590,15 +580,119 @@ fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
 	}
 }
 
-fn uint first_arg_expr(ParseResult* pr, uint call_idx) {
+/**
+ * Apply contract effects matching this call site. Statement-position
+ * application: only RETURNS_IMPLIES with rv == ANY_RETURN contributes
+ * facts (the call must have returned normally to reach the next
+ * statement). Conditional-position narrowing (returns(true|false))
+ * happens through `apply_cond_facts`.
+ */
+fn void apply_call_contracts(ParseResult* pr, uint call_idx, FlowState* state) {
+	AstNode* call = &pr.nodes[call_idx];
+	String callee = call.name;
+	if (callee.len == 0) return;
+
+	contracts::ContractEffect[8] buf;
+	usz n = contracts::collect_stdlib_contracts(callee, buf[..]);
+	for (usz i = 0; i < n; i++) {
+		if (buf[i].kind != contracts::ContractEffectKind.RETURNS_IMPLIES) continue;
+		if (buf[i].rv != contracts::ReturnValue.ANY_RETURN) continue;
+		apply_returns_implies(pr, call_idx, &buf[i], state);
+	}
+}
+
+/**
+ * Translate a RETURNS_IMPLIES effect into a FlowState fact at the call
+ * site. Substitutes the predicate target (param index or receiver)
+ * against the actual call arguments / receiver expression.
+ */
+fn void apply_returns_implies(ParseResult* pr, uint call_idx,
+		contracts::ContractEffect* effect, FlowState* state) {
+	String target_name = resolve_target_name(pr, call_idx, &effect.target);
+
+	switch (effect.pred) {
+		case contracts::PredKind.PRED_NOT_NULL:
+			if (target_name.len > 0) {
+				state.add_fact(ast::NO_PARENT, target_name, types::TYPE_UNKNOWN, true);
+			}
+		case contracts::PredKind.PRED_BOOL_PARAM:
+			// `target_name` here would be the formal param's name in
+			// callee scope, which doesn't refer to anything caller-side
+			// unless the caller passes a bare local/param of the same
+			// name. The interesting narrowing is when the actual arg
+			// is itself `x != null` / `x is T` — propagate that.
+			propagate_boolean_arg_narrowing(pr, call_idx, effect.target.param_index, state);
+		case contracts::PredKind.PRED_IS_TYPE:
+			if (target_name.len > 0) {
+				TypeRef t = types::parse_type_text(effect.type_text);
+				state.add_fact(ast::NO_PARENT, target_name, t, !t.nullable);
+			}
+		case contracts::PredKind.PRED_IS_NULL:
+		case contracts::PredKind.PRED_IS_NOT_TYPE:
+		case contracts::PredKind.PRED_NOT_BOOL:
+		case contracts::PredKind.PRED_NONE:
+			// No useful narrowing from these in statement position.
+			break;
+	}
+}
+
+/**
+ * For PRED_BOOL_PARAM: if the call's Nth argument is `x != null` or
+ * `x is T`, treat it like that condition was asserted true.
+ */
+fn void propagate_boolean_arg_narrowing(ParseResult* pr, uint call_idx,
+		uint param_index, FlowState* state) {
+	uint arg = nth_positional_arg(pr, call_idx, param_index);
+	if (arg >= pr.node_count) return;
+	String name;
+	String op = parse_null_check(pr, arg, &name);
+	if (op == "!=null" && name.len > 0) {
+		state.add_fact(ast::NO_PARENT, name, types::TYPE_UNKNOWN, true);
+		return;
+	}
+	String type_text;
+	String tcop = parse_type_check(pr, arg, &name, &type_text);
+	if (tcop == "is" && name.len > 0) {
+		TypeRef t = types::parse_type_text(type_text);
+		state.add_fact(ast::NO_PARENT, name, t, !t.nullable);
+	}
+}
+
+/**
+ * Resolve the variable name a contract target points at within the
+ * caller. Param targets index the call's positional argument list;
+ * receiver targets walk up to the enclosing DOT_EXPR's left side.
+ */
+fn String resolve_target_name(ParseResult* pr, uint call_idx,
+		contracts::PredTarget* target) {
+	if (target.kind == contracts::PredTargetKind.TARGET_PARAM) {
+		uint arg = nth_positional_arg(pr, call_idx, target.param_index);
+		return name_of_expr(pr, arg);
+	}
+	// TARGET_RECEIVER — walk up to DOT_EXPR parent and read its LHS.
+	if (call_idx >= pr.node_count) return "";
+	uint parent = pr.nodes[call_idx].parent;
+	if (parent == ast::NO_PARENT) return "";
+	if (pr.nodes[parent].kind != DOT_EXPR) return "";
+	uint lhs = first_child(pr, parent);
+	return name_of_expr(pr, lhs);
+}
+
+/**
+ * Get the argument expression at the Nth positional position of a call.
+ */
+fn uint nth_positional_arg(ParseResult* pr, uint call_idx, uint n) {
 	if (call_idx >= pr.node_count) return ast::NO_PARENT;
 	AstNode* call = &pr.nodes[call_idx];
 	if (call.child_count == 0) return ast::NO_PARENT;
+	uint count = 0;
 	for (uint i = call.children_start; i < pr.node_count; i++) {
 		if (pr.nodes[i].parent != call_idx) continue;
-		if (pr.nodes[i].kind == VALUE_ARGUMENT) {
-			return ast::get_arg_expr_idx(pr, i);
-		}
+		if (pr.nodes[i].kind != VALUE_ARGUMENT) continue;
+		// Skip named arguments — contracts target positional formals.
+		if (pr.nodes[i].name.len > 0) continue;
+		if (count == n) return ast::get_arg_expr_idx(pr, i);
+		count++;
 	}
 	return ast::NO_PARENT;
 }

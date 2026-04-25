@@ -104,3 +104,33 @@ fn void smart_cast_impossible_not_emitted_for_param() @test {
 			"expected NO smart-cast-impossible warning for parameter");
 	};
 }
+
+fn void no_diagnostic_after_require_not_null_contract() @test {
+	@pool() {
+		// requireNotNull's stdlib contract should narrow x post-call,
+		// so referencing x.length must NOT yield a smart-cast warning.
+		String src =
+			`fun test(x: String?) {
+				requireNotNull(x)
+				val len = x.length
+			}`;
+		Object* diags = build_diags(src);
+		assert(!any_message_contains(diags, "Smart cast"),
+			"requireNotNull contract should suppress smart-cast warning");
+	};
+}
+
+fn void no_diagnostic_after_require_predicate_contract() @test {
+	@pool() {
+		// require(x != null) likewise narrows via PRED_BOOL_PARAM
+		// argument propagation.
+		String src =
+			`fun test(x: String?) {
+				require(x != null)
+				val len = x.length
+			}`;
+		Object* diags = build_diags(src);
+		assert(!any_message_contains(diags, "Smart cast"),
+			"require(x != null) contract should suppress warning");
+	};
+}

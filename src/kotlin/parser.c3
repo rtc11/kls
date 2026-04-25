@@ -4405,6 +4405,7 @@ fn bool is_known_infix_function(String text) {
 		case "until":    return true;
 		case "downTo":   return true;
 		case "step":     return true;
+		case "implies":  return true;  // kotlin.contracts: returns(...) implies (cond)
 		default:         return false;
 	}
 }

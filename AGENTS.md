@@ -83,6 +83,7 @@ kls/
       symbols.c3              # kls::kotlin::symbols - Lightweight declaration symbol scanner
       types.c3                # kls::kotlin::types - Type representation (TypeRef, TypeKind), inference/resolution + flow-sensitive smart cast
       stdlib.c3               # kls::kotlin::stdlib - Built-in Kotlin stdlib symbol table for completions/hover
+      contracts.c3            # kls::kotlin::contracts - Kotlin contracts DSL (returns()/implies/callsInPlace) effect extraction + stdlib contract table
       incremental.c3          # kls::kotlin::incremental - Incremental re-parsing (chunk-based top-level decls)
       token_cache.c3          # kls::kotlin::token_cache - Cached token streams, binary-search splice on edit
       jdk_symbols.c3          # kls::kotlin::jdk_symbols - Hard-coded JDK symbol table (java.lang, java.util)
@@ -149,6 +150,7 @@ kls/
     javadoc_test.c3           # Javadoc extraction tests
     classfile_test.c3         # Class file parser tests
     stdlib_test.c3            # Stdlib symbol tests
+    contracts_test.c3         # Kotlin contracts DSL extraction + stdlib contract narrowing tests
     kotlin_fallback_test.c3   # Kotlin fallback detection tests
     source_nav_test.c3        # Source navigation tests
     cfg_test.c3               # CFG construction tests
@@ -190,6 +192,15 @@ kls/
 **Wiring** (`kotlin/types.c3`): Phase 9 of `resolve_types` calls `build_function_flows` to construct one `FunctionFlow {cfg, fa}` per function-like decl plus an `enclosing_func` map for every AST node. Phase 10 clears NAME_EXPR/DOT_EXPR `has_type` bits and re-runs expression + initializer + destructuring resolution so val/var bindings see narrowed types. `resolve_name_expr_type` calls `lookup_smart_cast_fact` then applies the **stability gate** (`is_stable_for_smart_cast`): PARAM and local val are always stable; local var is stable only when the use site is in the same function as the declaration (i.e. not captured by a nested lambda). Member properties / top-level bindings are not yet narrowed (property smart cast is deferred). Memory: every `mem::free(*.cached_types)` must be preceded by `types::free_type_info(...)` which calls `clear_flow` to release the per-function `Cfg`/`FlowAnalysis`.
 
 **Diagnostic** (`lsp/diagnostics.c3`): `add_smart_cast_impossible_diagnostics` walks NAME_EXPR uses; if a flow fact would narrow the name but `is_stable_for_smart_cast` returns false, emits a Warning ("Smart cast to T is impossible…"). Gated by `config::smart_cast_diagnostic` (default true, key: `smartCastDiagnostic` in initializationOptions).
+
+**Contracts** (`kotlin/contracts.c3`): Kotlin contracts DSL (`kotlin.contracts.*`) effect extraction and consumption.
+- `ContractEffect` models `returns() implies (cond)`, `returns(true|false|null) implies (cond)`, and `callsInPlace(lambda, KIND)`.
+- `STDLIB_CONTRACTS` table hardcodes effects for `requireNotNull`, `checkNotNull`, `require`, `check`, `isNullOrEmpty`, `isNullOrBlank` so flow analysis narrows at stdlib call sites without parsing kotlin-stdlib source.
+- `extract_user_contracts(pr, fun_decl_idx, out)` walks a FUN_DECL's body, finds the leading `contract { ... }` call (no new AST kinds — uses regular CALL_EXPR + LAMBDA_EXPR + BINARY_EXPR("implies")), and decodes each statement into a `ContractEffect`. `implies` was added to the parser infix whitelist (`parser.c3:is_known_infix_function`).
+- `flow.c3:apply_call_contracts` consumes `RETURNS_IMPLIES` effects with `rv == ANY_RETURN` at statement-position calls. PRED_NOT_NULL / PRED_IS_TYPE assert facts directly. PRED_BOOL_PARAM additionally inspects the actual call argument for `x != null` / `x is T` shapes via `propagate_boolean_arg_narrowing`, replacing the previous hardcoded `requireNotNull` / `checkNotNull` / `require` / `check` paths.
+- Conditional-position narrowing for `returns(true|false) implies (cond)` (e.g. `if (!s.isNullOrEmpty()) s.length`) routes through `apply_cond_facts` and is a deferred extension.
+- `callsInPlace` is parsed and stored but not yet consumed (lambda-exit fact join deferred).
+- User-defined contract consumption at call sites (workspace lookup of the callee's CONTRACT_BLOCK) is deferred — only stdlib contracts currently flow through `apply_call_contracts`.
 
 ## C3 Coding Conventions
 
