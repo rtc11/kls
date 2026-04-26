@@ -5750,3 +5750,51 @@ fun main() {
 			"f: Foo (companion factory), got '%s'", t);
 	};
 }
+
+fn void object_expr_supertype_member_resolves() @test {
+	// `val g = object : Greeter { ... }; g.greet()` — Kotlin spec §11.2.7.
+	// Object expression's static type approximated as first non-Any
+	// supertype; member lookup then walks the supertype chain.
+	@pool() {
+		String src = `interface Greeter { fun greet(): String }
+fun main() {
+	val g = object : Greeter { override fun greet(): String = "hi" }
+	val r = g.greet()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint g_idx = find_decl(pr, "g");
+		String gt = g_idx > 0 && ti.has_type[g_idx] ? types::format_type(&ti.node_types[g_idx]) : "<no>";
+		assert(g_idx != 0 && gt == "Greeter", "g should be Greeter, got '%s'", gt);
+
+		uint r_idx = find_decl(pr, "r");
+		String rt = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && rt == "String", "r should be String, got '%s'", rt);
+	};
+}
+
+fn void object_expr_class_supertype_member() @test {
+	// `object : Base()` (open class supertype) — same supertype walk.
+	@pool() {
+		String src = `open class Base { fun ping(): Int = 1 }
+fun main() {
+	val o = object : Base() {}
+	val n = o.ping()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint o_idx = find_decl(pr, "o");
+		String ot = o_idx > 0 && ti.has_type[o_idx] ? types::format_type(&ti.node_types[o_idx]) : "<no>";
+		assert(o_idx != 0 && ot == "Base", "o should be Base, got '%s'", ot);
+
+		uint n_idx = find_decl(pr, "n");
+		String nt = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && nt == "Int", "n should be Int, got '%s'", nt);
+	};
+}

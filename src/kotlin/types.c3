@@ -1335,9 +1335,38 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 		case CALLABLE_REF_EXPR:
 			return resolve_callable_ref_type(pr, info, idx, node);
 
+		case OBJECT_EXPR:
+			return resolve_object_expr_type(pr, info, idx, node);
+
 		default:
 			return TYPE_UNKNOWN;
 	}
+}
+
+/**
+ * Object expression: `object : SuperType { body }` (Kotlin spec §11.2.7).
+ *
+ * Per spec the static type is the intersection of all listed super types
+ * (plus declared body members). KLS approximates by picking the first
+ * non-Any supertype TYPE_REF child — sufficient for member resolution
+ * since `lookup_member_anywhere` already walks the supertype chain.
+ *
+ * If no supertype is given (`object { val x = 1 }`), the value has an
+ * anonymous type whose only members are body members — currently
+ * unresolvable to a named TypeRef, so we return UNKNOWN. Body-member
+ * access for anonymous types is a deferred follow-up.
+ */
+fn TypeRef resolve_object_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	for (uint c = node.children_start; c < pr.node_count; c++) {
+		if (pr.nodes[c].parent != idx) continue;
+		if (pr.nodes[c].kind != TYPE_REF) continue;
+		String tname = pr.nodes[c].name;
+		if (tname.len == 0) continue;
+		if (tname == "Any") continue;
+		TypeRef t = parse_type_text(tname);
+		return t;
+	}
+	return TYPE_UNKNOWN;
 }
 
 // ── Name expression resolution ─────────────────────────────────────
