@@ -5122,3 +5122,56 @@ fn void user_generic_class_two_type_params() @test {
 			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
 	};
 }
+
+// ── Nested type-param unification (Kotlin spec §11.1.7) ────────────
+
+fn void user_generic_fn_nested_list_param() @test {
+	@pool() {
+		String src = `fun <T> first(xs: List<T>): T = xs[0]
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val v = first(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int",
+			"v: Int (T inferred from List<Int>), got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_fn_nested_pair_param_swapped_return() @test {
+	@pool() {
+		String src = `fun <A, B> swap(p: Pair<A, B>): Pair<B, A> = Pair(p.second, p.first)
+		fun f() {
+			val p: Pair<Int, String> = Pair(1, "hi")
+			val q = swap(p)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint q_idx = find_decl(pr, "q");
+		assert(q_idx > 0 && ti.has_type[q_idx]
+			&& types::format_type(&ti.node_types[q_idx]) == "Pair<String, Int>",
+			"q: Pair<String, Int>, got '%s'",
+			q_idx > 0 && ti.has_type[q_idx] ? types::format_type(&ti.node_types[q_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_fn_nested_map_param() @test {
+	@pool() {
+		String src = `fun <K, V> firstKey(m: Map<K, V>): K = m.keys.first()
+		fun f() {
+			val m: Map<String, Int> = mapOf("a" to 1)
+			val k = firstKey(m)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint k_idx = find_decl(pr, "k");
+		assert(k_idx > 0 && ti.has_type[k_idx]
+			&& types::format_type(&ti.node_types[k_idx]) == "String",
+			"k: String, got '%s'",
+			k_idx > 0 && ti.has_type[k_idx] ? types::format_type(&ti.node_types[k_idx]) : "<no>");
+	};
+}

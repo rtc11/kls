@@ -2088,22 +2088,64 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 }
 
 /**
+ * Unify a parameter TypeRef against an argument TypeRef and record any
+ * type-parameter bindings discovered (Kotlin spec §11.1.7 structural
+ * unification). Used by substitute_user_type_params to support nested
+ * type-param positions like `(xs: List<T>)` matched against `List<Int>`.
+ *
+ * Matches by position: param_tref.type_arg_names[i] == tp_name binds
+ * tp = arg_tref.type_arg_names[i]. Recurses one more level to support
+ * `(xs: List<List<T>>)` → `List<List<Int>>`. Container-name mismatch
+ * aborts (caller already gates on names matching).
+ *
+ * Limitations: no variance handling, no upper-bound checks, no
+ * inheritance-based unification (e.g. `(xs: Iterable<T>)` ↔ `List<Int>`).
+ */
+fn void unify_tps_into_subst(TypeRef param_tref, TypeRef arg_tref,
+		String[4] tp_names, usz* tp_count,
+		String[4]* subst_names, bool[4]* subst_nullable, bool[4]* subst_known) {
+	usz slots = param_tref.type_arg_count;
+	if (arg_tref.type_arg_count < slots) slots = arg_tref.type_arg_count;
+	for (usz i = 0; i < slots; i++) {
+		String pname = param_tref.type_arg_names[i];
+		String aname = arg_tref.type_arg_names[i];
+		bool a_nullable = arg_tref.type_arg_nullable[i];
+		// Direct TP slot
+		for (usz t = 0; t < *tp_count; t++) {
+			if ((*subst_known)[t]) continue;
+			if (pname == tp_names[t] && aname.len > 0) {
+				(*subst_names)[t] = aname;
+				(*subst_nullable)[t] = a_nullable;
+				(*subst_known)[t] = true;
+				break;
+			}
+		}
+	}
+}
+
+
+/**
  * Substitute user-defined generic type parameters in a function's return type
  * by inferring T = arg-type from positional FUN_DECL PARAM ↔ CALL_EXPR ARG
  * matching (Kotlin spec §11.1.7 type-argument inference).
  *
  * Strategy: for each TYPE_PARAM child of the FUN_DECL, find the first PARAM
- * whose declared type-text mentions the type-param name (top-level, not
- * inside a generic container). Take the corresponding call argument's
- * resolved type as the substitution. Then rewrite `ret` if its `name` or
- * any `type_arg_names[i]` equals a type-param name.
+ * whose declared type-text mentions the type-param name. Top-level matches
+ * (`(x: T)`) bind directly. Nested matches (`(xs: List<T>)`, `(p: Pair<A,B>)`)
+ * use unify_tps_into_subst to bind from corresponding type-arg slots when the
+ * container name matches. Then rewrite `ret` if its `name` or any
+ * `type_arg_names[i]` equals a type-param name.
  *
  * Limitations:
- *   - Only top-level param-type matches (`(x: T)`, not `(x: List<T>)`).
+ *   - One level of nesting; `(xs: List<List<T>>)` not unified deeper.
+ *   - Container name must match exactly; no inheritance / variance handling
+ *     (e.g. `(xs: Iterable<T>)` ↔ `List<Int>` doesn't bind T).
  *   - Only return-type substitution; doesn't propagate into call-arg
- *     contexts. Sufficient for `identity(x)` / single-T transformers.
+ *     contexts. Sufficient for `identity(x)` / single-T transformers and
+ *     `first`/`map`-style HOFs.
  *   - Up to 4 type parameters per function.
  */
+
 fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
 		uint fun_decl_idx, uint call_idx, TypeRef ret) {
 	const usz MAX_TP = 4;
@@ -2139,6 +2181,8 @@ fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
 		if (child.parent != fun_decl_idx) continue;
 		if (child.kind != PARAM) continue;
 		String pt = child.type_text;
+		// Top-level T match: (x: T) → bind T = arg type directly.
+		bool top_level_bound = false;
 		for (usz t = 0; t < tp_count; t++) {
 			if (subst_known[t]) continue;
 			if (pt == tp_names[t]) {
@@ -2147,11 +2191,41 @@ fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
 					subst_names[t] = arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		// Nested unification: (xs: List<T>) ↔ List<Int> → T=Int.
+		// (xs: Pair<A, B>) ↔ Pair<Int, String> → A=Int, B=String.
+		// (xs: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0
+					&& param_tref.name == arg.name) {
+					unify_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
 				}
 			}
 		}
 		param_pos++;
 	}
+
+	// Check if substitution is incomplete: ret references a TP we couldn't
+	// bind. Return UNKNOWN to defer — caller's multi-pass loop won't cache,
+	// so a later pass (after arg types resolve) gets another chance.
+	bool incomplete = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) continue;
+		if (ret.name == tp_names[t]) { incomplete = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { incomplete = true; break; }
+		}
+		if (incomplete) break;
+	}
+	if (incomplete) return TYPE_UNKNOWN;
 
 	TypeRef out = ret;
 	for (usz t = 0; t < tp_count; t++) {
