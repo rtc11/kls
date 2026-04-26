@@ -3334,6 +3334,9 @@ fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, As
 				// List<T>[i] → T, etc.
 				return { .kind = SIMPLE, .name = receiver.type_arg_names[0] };
 			}
+			// User-defined `operator fun get(...)` lookup per Kotlin spec §9.6.
+			TypeRef getter = lookup_member_anywhere(pr, info, receiver, "get");
+			if (getter.kind != UNKNOWN) return getter;
 			break;
 		}
 	}

@@ -4326,3 +4326,79 @@ fn void user_operator_div_via_data_class() @test {
 		assert(t == "Ratio", "a / b on data class should resolve via div; got '%s'", t);
 	};
 }
+
+// ── Operator-call resolution (index) ──────────────────────────────
+
+fn void user_operator_get_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class User
+			class Cache {
+				operator fun get(key: String): User = User()
+			}
+			fun test(c: Cache) {
+				val u = c["alice"]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "u");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "User", "c[\"alice\"] should resolve via Cache.get → User; got '%s'", t);
+	};
+}
+
+fn void user_operator_get_nullable_return() @test {
+	@pool() {
+		String src =
+			`class Session
+			class Sessions {
+				operator fun get(id: Int): Session? = null
+			}
+			fun test(s: Sessions) {
+				val sess = s[42]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "sess");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Session?", "s[42] should resolve via Sessions.get → Session?; got '%s'", t);
+	};
+}
+
+fn void list_index_still_resolves_via_stdlib() @test {
+	@pool() {
+		// Regression: List<T>[i] hardcoded path
+		String src =
+			`fun test(xs: List<String>) {
+				val s = xs[0]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "xs[0] → String; got '%s'", t);
+	};
+}
+
+fn void map_index_still_resolves_via_stdlib() @test {
+	@pool() {
+		// Regression: Map<K,V>[k] → V? hardcoded path
+		String src =
+			`fun test(m: Map<String, Int>) {
+				val v = m["key"]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "v");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int?", "m[\"key\"] → Int?; got '%s'", t);
+	};
+}
