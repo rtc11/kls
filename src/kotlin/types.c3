@@ -6,6 +6,7 @@ import kls::kotlin::lexer;
 import kls::kotlin::cfg;
 import kls::kotlin::flow;
 import std::core::string;
+import std::collections::list;
 import kls::workspace;
 import kls::kotlin::symbols;
 import kls::deps::jar_index;
@@ -1968,7 +1969,8 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
 				// Constructor call: class name matches
 				if (sym.kind == symbols::SymbolKind.CLASS || sym.kind == symbols::SymbolKind.OBJECT) {
-					return { .kind = SIMPLE, .name = sym.name };
+					TypeRef base = { .kind = SIMPLE, .name = sym.name };
+					return infer_xfile_class_type_args(pr, info, sym.name, idx, base);
 				}
 			}
 		}
@@ -3656,6 +3658,161 @@ fn TypeRef resolve_member_type_with_supertypes(TypeRef receiver, String member_n
  * a matching member declaration, returning its type_text as a TypeRef.
  * Also checks supertypes of the receiver class.
  */
+/**
+ * Infer cross-file class type-args at constructor call site by matching
+ * primary-ctor PARAM types (from workspace member cache) against call arg
+ * types (Kotlin spec §11.1.7). Mirrors in-file `infer_class_type_args`
+ * but operates on `MemberDecl[]` indexed by workspace.
+ *
+ * Returns UNKNOWN if any TP unbound AND call has args (defer pattern), so
+ * the multi-pass loop retries once arg types resolve. If TPs not declared
+ * (non-generic class) returns base unchanged.
+ */
+fn TypeRef infer_xfile_class_type_args(ParseResult* pr, TypeInfo* info,
+		String class_name, uint call_idx, TypeRef base) {
+	if (g_workspace == null) return base;
+
+	List{String}*? tps_opt = g_workspace.lookup_class_type_params(class_name);
+	if (catch tps_opt) return base;
+	if (tps_opt == null || tps_opt.len() == 0) return base;
+
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = tps_opt.len();
+	if (tp_count > MAX_TP) tp_count = MAX_TP;
+	for (usz t = 0; t < tp_count; t++) tp_names[t] = (*tps_opt)[t];
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	// Walk member cache for class, find PARAMs in indexed order
+	if (try members = g_workspace.member_cache.get_ref(class_name)) {
+		uint pp = 0;
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = &(*members)[i];
+			if (m.node_kind != PARAM) continue;
+			String pt = m.type_text;
+			// Top-level T match
+			bool top_bound = false;
+			for (usz t = 0; t < tp_count; t++) {
+				if (subst_known[t]) continue;
+				if (pt == tp_names[t]) {
+					TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+					if (arg.kind != UNKNOWN && arg.name.len > 0) {
+						subst_names[t] = arg.name;
+						subst_nullable[t] = arg.nullable;
+						subst_known[t] = true;
+						top_bound = true;
+					}
+				}
+			}
+			// Nested + supertype unification (skip FUNCTION-typed PARAMs)
+			if (!top_bound && pt.len > 0) {
+				TypeRef ptref = parse_type_text(pt);
+				if (ptref.kind != UNKNOWN && ptref.kind != FUNCTION
+					&& ptref.type_arg_count > 0) {
+					TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+					if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+						if (ptref.name == arg.name) {
+							unify_tps_into_subst(ptref, arg,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						} else {
+							TypeRef lifted = lift_to_supertype(arg, ptref.name);
+							if (lifted.kind != UNKNOWN) {
+								unify_tps_into_subst(ptref, lifted,
+									tp_names, &tp_count,
+									&subst_names, &subst_nullable, &subst_known);
+							}
+						}
+					}
+				}
+			}
+			pp++;
+		}
+	}
+
+	// Defer if any TP unbound + call has args
+	bool any_unbound = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) { any_unbound = true; break; }
+	}
+	if (any_unbound) {
+		uint arg_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == call_idx
+				&& pr.nodes[j].kind == VALUE_ARGUMENT) arg_count++;
+		}
+		if (arg_count > 0) return TYPE_UNKNOWN;
+	}
+
+	TypeRef out = base;
+	out.kind = GENERIC;
+	out.type_arg_count = (uint)tp_count;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) {
+			out.type_arg_names[t] = subst_names[t];
+			out.type_arg_nullable[t] = subst_nullable[t];
+		} else {
+			out.type_arg_names[t] = tp_names[t];
+			out.type_arg_nullable[t] = false;
+		}
+	}
+	return out;
+}
+
+/**
+ * Substitute a workspace class's TYPE_PARAMs in a member's declared type
+ * using the receiver's type-arg names (Kotlin spec §11.1.7).
+ *
+ * `class Bag<T>(val items: List<T>)` indexed in workspace.
+ * Receiver = Bag<Int>, member type = List<T> → substituted = List<Int>.
+ *
+ * Uses `WorkspaceIndex.lookup_class_type_params` to retrieve declared
+ * TP names. Substitutes:
+ *   - top-level `T` → receiver.type_arg_names[i] (when raw.name == TP)
+ *   - nested `List<T>` → `List<Int>` (when raw.type_arg_names[i] == TP)
+ *
+ * Skips unbound or empty cases — returns raw unchanged so caller can fall
+ * back to whatever the source said.
+ */
+fn TypeRef substitute_class_tps_from_receiver(TypeRef raw, TypeRef receiver, String class_name) {
+	if (g_workspace == null) return raw;
+	if (receiver.type_arg_count == 0) return raw;
+
+	List{String}*? tps_opt = g_workspace.lookup_class_type_params(class_name);
+	if (catch tps_opt) return raw;
+	if (tps_opt == null || tps_opt.len() == 0) return raw;
+
+	usz n = tps_opt.len();
+	if (n > receiver.type_arg_count) n = receiver.type_arg_count;
+
+	TypeRef out = raw;
+	for (usz t = 0; t < n; t++) {
+		String tp = (*tps_opt)[t];
+		if (tp.len == 0) continue;
+		String binding = receiver.type_arg_names[t];
+		if (binding.len == 0) continue;
+		bool b_nullable = receiver.type_arg_nullable[t];
+
+		// Top-level: raw.name == TP
+		if (out.name == tp) {
+			out.name = binding;
+			if (b_nullable) out.nullable = true;
+		}
+		// Nested: raw.type_arg_names[i] == TP
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp) {
+				out.type_arg_names[a] = binding;
+				if (b_nullable) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
 fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 	if (g_workspace == null) return TYPE_UNKNOWN;
 	String type_name = receiver.name;
@@ -3667,7 +3824,8 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 			MemberDecl* m = &(*members)[i];
 			if (m.name == member_name) {
 				if (m.type_text.len > 0) {
-					return parse_type_text(m.type_text);
+					TypeRef raw = parse_type_text(m.type_text);
+					return substitute_class_tps_from_receiver(raw, receiver, type_name);
 				}
 				// Function with no explicit return type — assume Unit
 				if (m.node_kind == FUN_DECL) return TYPE_UNIT;
@@ -3714,7 +3872,10 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 			for (usz j = 0; j < super_members.len(); j++) {
 				MemberDecl* m = &(*super_members)[j];
 				if (m.name == member_name) {
-					if (m.type_text.len > 0) return parse_type_text(m.type_text);
+					if (m.type_text.len > 0) {
+						TypeRef raw = parse_type_text(m.type_text);
+						return substitute_class_tps_from_receiver(raw, receiver, st);
+					}
 					if (m.node_kind == FUN_DECL) return TYPE_UNIT;
 					return TYPE_UNKNOWN;
 				}

@@ -5362,3 +5362,87 @@ fn void implicit_it_lambda_forwarded_unchanged() @test {
 			"ys: List<Int> (it: Int forwarded), got '%s'", ty);
 	};
 }
+
+fn void cross_file_generic_class_nested_member() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///bag.kt", "class Bag<T>(val items: List<T>)");
+
+		String src = `fun main() {
+			val xs: List<Int> = listOf(1, 2)
+			val b = Bag(xs)
+			val its = b.items
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		uint its_idx = find_decl(pr, "its");
+		String tb = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		String tits = its_idx > 0 && ti.has_type[its_idx] ? types::format_type(&ti.node_types[its_idx]) : "<no>";
+		assert(its_idx != 0 && ti.has_type[its_idx]
+			&& types::format_type(&ti.node_types[its_idx]) == "List<Int>",
+			"its: List<Int> (xfile member with substituted T), got '%s' (b='%s')", tits, tb);
+	};
+}
+
+fn void cross_file_generic_class_top_level_T() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///box.kt", "class Box<T>(val v: T)");
+
+		String src = `fun main() {
+			val b = Box(42)
+			val v = b.v
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint v_idx = find_decl(pr, "v");
+		String tv = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int",
+			"v: Int (xfile T from val v: T), got '%s'", tv);
+	};
+}
+
+fn void cross_file_generic_class_two_tps() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///pair.kt", "class P<A, B>(val a: A, val b: B)");
+
+		String src = `fun main() {
+			val p = P("hi", 7)
+			val xa = p.a
+			val xb = p.b
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint xa_idx = find_decl(pr, "xa");
+		uint xb_idx = find_decl(pr, "xb");
+		String txa = xa_idx > 0 && ti.has_type[xa_idx] ? types::format_type(&ti.node_types[xa_idx]) : "<no>";
+		String txb = xb_idx > 0 && ti.has_type[xb_idx] ? types::format_type(&ti.node_types[xb_idx]) : "<no>";
+		assert(xa_idx != 0 && ti.has_type[xa_idx]
+			&& types::format_type(&ti.node_types[xa_idx]) == "String",
+			"xa: String, got '%s'", txa);
+		assert(xb_idx != 0 && ti.has_type[xb_idx]
+			&& types::format_type(&ti.node_types[xb_idx]) == "Int",
+			"xb: Int, got '%s'", txb);
+	};
+}
