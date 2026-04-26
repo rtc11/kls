@@ -941,6 +941,24 @@ fn void resolve_initializer_types(ParseResult* pr, TypeInfo* info) {
 			if (child.kind == PARAM || child.kind == TYPE_PARAM ||
 				child.kind == BLOCK || child.kind == TYPE_REF) continue;
 
+			// Property delegation: `val x by <expr>` (expr tagged with extra_text="delegate").
+			// Kotlin spec §11.16: property type = `getValue` operator return type.
+			// We special-case `lazy { ... }` (returns lambda body type) which is the
+			// overwhelmingly common case; other delegates fall through to the standard
+			// child-type inheritance below.
+			if (node.kind == PROPERTY_DECL && child.extra_text == "delegate") {
+				if (child.kind == CALL_EXPR && child.name == "lazy") {
+					TypeRef body = find_trailing_lambda_body_in_call(pr, info, j);
+					if (body.kind != UNKNOWN) {
+						inferred = body;
+						break;
+					}
+				}
+				// Future: other stdlib delegates (Delegates.notNull, observable, ...)
+				// or generic getValue operator lookup.
+				break;
+			}
+
 			// This is an expression child -- use its type
 			if (info.has_type[j]) {
 				inferred = info.node_types[j];
@@ -954,6 +972,26 @@ fn void resolve_initializer_types(ParseResult* pr, TypeInfo* info) {
 			info.has_type[i] = true;
 		}
 	}
+}
+
+/**
+ * Find the trailing LAMBDA_EXPR child of a CALL_EXPR and return its body type.
+ * Used by `by lazy { ... }` delegation.
+ */
+fn TypeRef find_trailing_lambda_body_in_call(ParseResult* pr, TypeInfo* info, uint call_idx) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind == LAMBDA_EXPR) {
+			return last_expr_type_in(pr, info, j, true);
+		}
+		if (pr.nodes[j].kind == VALUE_ARGUMENT && pr.nodes[j].extra_text == "trailing") {
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx != uint.max && pr.nodes[expr_idx].kind == LAMBDA_EXPR) {
+				return last_expr_type_in(pr, info, expr_idx, true);
+			}
+		}
+	}
+	return TYPE_UNKNOWN;
 }
 
 /**

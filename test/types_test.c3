@@ -4642,3 +4642,71 @@ fn void callable_ref_to_unit_fun() @test {
 			"expected return Unit, got '%s'", ti.node_types[idx].return_type_name);
 	};
 }
+
+// ── by lazy delegation (Kotlin spec §11.16) ─────────────────────────
+
+fn void by_lazy_int_literal() @test {
+	@pool() {
+		String src = `fun f() {
+			val x by lazy { 42 }
+			val y = x
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_decl(r, "x");
+		uint y_idx = find_decl(r, "y");
+		String tx = x_idx > 0 && ti.has_type[x_idx] ? types::format_type(&ti.node_types[x_idx]) : "<no type>";
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no type>";
+		assert(tx == "Int", "expected x: Int from lazy { 42 }, got '%s'", tx);
+		assert(ty == "Int", "expected y: Int (y = x), got '%s'", ty);
+	};
+}
+
+fn void by_lazy_string() @test {
+	@pool() {
+		String src = `fun f() {
+			val name by lazy { "hello" }
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "name");
+		assert(idx > 0 && ti.has_type[idx], "name should have type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "expected name: String from lazy { \"hello\" }, got '%s'", t);
+	};
+}
+
+fn void by_lazy_top_level() @test {
+	@pool() {
+		String src = `val cached by lazy { compute() }
+			fun compute(): Long = 99L`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "cached");
+		assert(idx > 0 && ti.has_type[idx], "cached should have type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Long", "expected cached: Long from lazy { compute() }, got '%s'", t);
+	};
+}
+
+fn void val_assignment_lazy_call_not_delegated() @test {
+	@pool() {
+		// Without `by`, this is just a regular assignment of a Lazy<T> value.
+		// We don't have a real Lazy type modeled, so the property type comes
+		// from whatever resolve_known_call/scope returns for `lazy(...)` —
+		// currently UNKNOWN. The point of this test is to confirm `=` does
+		// NOT trigger the delegate-unwrap path (no spurious Int).
+		String src = `fun f() {
+			val x = lazy { 42 }
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "x");
+		String t = idx > 0 && ti.has_type[idx] ? types::format_type(&ti.node_types[idx]) : "<no type>";
+		assert(t != "Int", "expected x to NOT be Int (only delegated `by lazy` unwraps), got '%s'", t);
+	};
+}

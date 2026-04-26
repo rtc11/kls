@@ -1346,7 +1346,13 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 
 	// Delegation: by expression
 	if (self.eat(KW_BY)) {
-		self.parse_expression_body();
+		uint delegate_root = self.parse_expression(PREC_NONE);
+		self.eat(SEMICOLON);
+		// Tag the delegate root so the type system can distinguish
+		// `val x by lazy {...}` from `val x = lazy {...}`.
+		if (delegate_root < self.result.node_count) {
+			self.result.nodes[delegate_root].extra_text = "delegate";
+		}
 	}
 
 	self.adopt_children(idx, children_start);
