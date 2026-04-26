@@ -6083,6 +6083,30 @@ fn void cross_file_data_class_copy_returns_self() @test {
 	};
 }
 
+fn void cross_file_generic_data_class_copy_substitutes() @test {
+	// `data class Box<T>(val v: T)` cross-file; `Box(1).copy(v=2)`
+	// should return Box<Int>, not bare Box.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///box.kt", "data class Box<T>(val v: T)");
+
+		String src = `fun main() {
+	val a = Box(1)
+	val b = a.copy(v = 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		String t = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx != 0 && t == "Box<Int>", "b: Box<Int>, got '%s'", t);
+	};
+}
+
 // ── Multi-condition when arms (LUB) ───────────────────────────────
 
 fn void when_multi_condition_same_type_narrows() @test {

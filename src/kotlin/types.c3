@@ -4384,8 +4384,17 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name,
 		}
 	}
 	if ((cls_flags & ast::MOD_DATA) != 0 && !receiver.is_class_ref && member_name == "copy") {
-		// Return self type. TODO: substitute generic type args from
-		// receiver if data class is generic — currently returns bare name.
+		// .copy() returns the same class type with the same generics.
+		// `data class Box<T>(val v: T)`; `Box(1).copy(v=2)` → Box<Int>
+		// (Kotlin spec §11.2.4). Mirror receiver type args verbatim.
+		if (receiver.kind == GENERIC && receiver.type_arg_count > 0) {
+			TypeRef out = { .kind = GENERIC, .name = type_name, .type_arg_count = receiver.type_arg_count };
+			for (usz i = 0; i < receiver.type_arg_count; i++) {
+				out.type_arg_names[i] = receiver.type_arg_names[i];
+				out.type_arg_nullable[i] = receiver.type_arg_nullable[i];
+			}
+			return out;
+		}
 		return { .kind = SIMPLE, .name = type_name };
 	}
 
