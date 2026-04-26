@@ -20,12 +20,14 @@ import kls::log;
 struct ServerConfig {
 	bool hover_docs_from_source;   // extract Javadoc/KDoc from src.zip / -sources.jar
 	bool smart_cast_diagnostic;    // emit "smart cast to T is impossible" warnings
+	bool sealed_exhaustive_diagnostic;  // emit "non-exhaustive when on sealed type" warnings
 }
 
 // Module-level global with defaults
 ServerConfig g_config = {
 	.hover_docs_from_source = true,
 	.smart_cast_diagnostic = true,
+	.sealed_exhaustive_diagnostic = true,
 };
 
 /**
@@ -50,6 +52,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.smart_cast_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("sealedExhaustiveDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.sealed_exhaustive_diagnostic = val.b;
+			log::debug("[kls] config: sealedExhaustiveDiagnostic = %s",
+				g_config.sealed_exhaustive_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -67,6 +77,15 @@ fn bool hover_docs_enabled() {
  */
 fn bool smart_cast_diagnostic_enabled() {
 	return g_config.smart_cast_diagnostic;
+}
+
+/**
+ * Whether to emit "non-exhaustive when on sealed type" warnings when
+ * a `when` over a sealed-class subject lacks an `else` arm and does
+ * not cover every direct subtype.
+ */
+fn bool sealed_exhaustive_diagnostic_enabled() {
+	return g_config.sealed_exhaustive_diagnostic;
 }
 
 /**

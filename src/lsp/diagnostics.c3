@@ -140,6 +140,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null) {
 			add_type_mismatch_diagnostics(diagnostics, ast, type_info, workspace);
 			add_smart_cast_impossible_diagnostics(diagnostics, ast, type_info);
+			if (workspace != null) {
+				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
+			}
 		}
 		add_unreachable_code_diagnostics(diagnostics, ast);
 	}
@@ -2075,4 +2078,118 @@ fn uint find_decl_for_name(ParseResult* ast, uint use_idx, String name) {
 		current = scope.parent;
 	}
 	return ast::NO_PARENT;
+}
+
+// ── Sealed class exhaustiveness ───────────────────────────────────
+
+/**
+ * Emit Warning diagnostics for `when (subject)` arms over a sealed
+ * class subject when the arms do not cover every direct subtype and
+ * no `else` arm is present (Kotlin spec §16.30.5).
+ *
+ * Subtype enumeration uses workspace.super_index (built during
+ * indexing). Sealed-ness of the parent is read from
+ * workspace.lookup_class_mod_flags. Only `is T` arm conditions count
+ * toward coverage; other patterns (literals, ranges) are ignored
+ * conservatively (sealed classes can't have those anyway).
+ *
+ * Gated by config::sealed_exhaustive_diagnostic_enabled().
+ */
+fn void add_sealed_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
+		TypeInfo* type_info, WorkspaceIndex* workspace) {
+	if (!config::sealed_exhaustive_diagnostic_enabled()) return;
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Locate the subject (first non-ENTRY child)
+		uint subj_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == WHEN_ENTRY) break;
+			subj_idx = c;
+			break;
+		}
+		if (subj_idx == ast::NO_PARENT) continue;
+
+		// Resolve subject type
+		if (!type_info.has_type[subj_idx]) continue;
+		TypeRef subj_type = type_info.node_types[subj_idx];
+		if (subj_type.name.len == 0) continue;
+
+		// Check sealed flag
+		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		if (flags & ast::MOD_SEALED == 0) continue;
+
+		// Enumerate direct subtypes via super_index
+		String[64] subtypes;
+		usz subtype_count = 0;
+		if (try sub_indices = workspace.super_index.get(subj_type.name)) {
+			for (usz k = 0; k < sub_indices.len() && subtype_count < 64; k++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(sub_indices.get(k));
+				if (sym.name.len == 0) continue;
+				// Dedup (multiple files may define same name)
+				bool seen = false;
+				for (usz x = 0; x < subtype_count; x++) {
+					if (subtypes[x] == sym.name) { seen = true; break; }
+				}
+				if (!seen) subtypes[subtype_count++] = sym.name;
+			}
+		}
+		if (subtype_count == 0) continue;
+
+		// Walk arms: collect covered subtypes; bail on else
+		bool has_else = false;
+		bool[64] covered;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			AstNode* entry = &ast.nodes[c];
+			if (entry.extra_text == "else") { has_else = true; break; }
+
+			// Walk entry children (skip last = body)
+			uint last_child = ast::NO_PARENT;
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				last_child = k;
+			}
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				if (k == last_child) continue;
+				AstNode* cond = &ast.nodes[k];
+				if (cond.kind != TYPE_CHECK_EXPR || cond.extra_text != "is") continue;
+				for (usz x = 0; x < subtype_count; x++) {
+					if (subtypes[x] == cond.type_text) { covered[x] = true; break; }
+				}
+			}
+		}
+		if (has_else) continue;
+
+		// Compute missing
+		String[64] missing;
+		usz missing_count = 0;
+		for (usz x = 0; x < subtype_count; x++) {
+			if (!covered[x]) {
+				missing[missing_count++] = subtypes[x];
+			}
+		}
+		if (missing_count == 0) continue;
+
+		// Build message: "'when' on sealed class 'Shape' is non-exhaustive: missing 'Square'[, ...]"
+		DString msg;
+		msg.tinit();
+		msg.appendf("'when' on sealed class '%s' is non-exhaustive: missing ", subj_type.name);
+		for (usz x = 0; x < missing_count; x++) {
+			if (x > 0) msg.append(", ");
+			msg.appendf("'%s'", missing[x]);
+		}
+
+		Object* diag = make_diagnostic(
+			node.start_line, node.start_col,
+			node.start_line, node.start_col + 4,  // span "when" keyword
+			2, msg.str_view());
+		diagnostics.push(diag);
+	}
 }
