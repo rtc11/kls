@@ -1108,6 +1108,9 @@ fn void assign_component_types(ParseResult* pr, TypeInfo* info, uint parent_idx,
 		// Skip if child already has an explicit type annotation
 		if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
 			TypeRef comp_type = get_component_type(init_type, comp_index);
+			if (comp_type.kind == UNKNOWN) {
+				comp_type = lookup_componentN(pr, info, init_type, comp_index);
+			}
 			if (comp_type.kind != UNKNOWN) {
 				info.node_types[j] = comp_type;
 				info.has_type[j] = true;
@@ -1128,6 +1131,9 @@ fn void assign_component_types_for_params(ParseResult* pr, TypeInfo* info, uint 
 		// Skip if child already has an explicit type annotation
 		if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
 			TypeRef comp_type = get_component_type(element_type, comp_index);
+			if (comp_type.kind == UNKNOWN) {
+				comp_type = lookup_componentN(pr, info, element_type, comp_index);
+			}
 			if (comp_type.kind != UNKNOWN) {
 				info.node_types[j] = comp_type;
 				info.has_type[j] = true;
@@ -1135,6 +1141,26 @@ fn void assign_component_types_for_params(ParseResult* pr, TypeInfo* info, uint 
 		}
 		comp_index++;
 	}
+}
+
+/**
+ * Look up `operator fun componentN()` on a user-defined type for destructuring
+ * (Kotlin spec §11.7). N is 1-based per the operator name. Returns UNKNOWN if
+ * no matching operator exists. Used as fallback when built-in component-type
+ * mapping (Pair/Triple/Map.Entry) doesn't apply.
+ */
+fn TypeRef lookup_componentN(ParseResult* pr, TypeInfo* info, TypeRef source_type, uint comp_index) {
+	if (source_type.kind == UNKNOWN || source_type.name.len == 0) return TYPE_UNKNOWN;
+	String name;
+	switch (comp_index) {
+		case 0: name = "component1";
+		case 1: name = "component2";
+		case 2: name = "component3";
+		case 3: name = "component4";
+		case 4: name = "component5";
+		default: return TYPE_UNKNOWN;
+	}
+	return lookup_member_anywhere(pr, info, source_type, name);
 }
 
 /**
@@ -1358,6 +1384,36 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 				return base;
 			}
 			return TYPE_UNKNOWN;
+		}
+
+		// Also look inside destructuring-wrapper PROPERTY_DECLs at this scope.
+		// `val (a, b) = expr` produces a PROPERTY_DECL named "(destructuring)"
+		// whose PROPERTY_DECL children are the destructured bindings. Their
+		// parent is the wrapper, not the enclosing BLOCK, so the direct-child
+		// scan above misses them. (Kotlin spec §11.7)
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* wrapper = &pr.nodes[j];
+			if (wrapper.parent != current) continue;
+			if (wrapper.kind != PROPERTY_DECL || wrapper.name != "(destructuring)") continue;
+			for (uint k = 0; k < pr.node_count; k++) {
+				AstNode* inner = &pr.nodes[k];
+				if (inner.parent != j) continue;
+				if (inner.kind != PROPERTY_DECL) continue;
+				if (inner.name != node.name) continue;
+				bool stable = is_stable_for_smart_cast(pr, info, k, idx);
+				flow::Fact* applied = stable ? fact : null;
+				if (applied != null && applied.narrowed.kind != UNKNOWN) {
+					return applied.narrowed;
+				}
+				if (info.has_type[k]) {
+					TypeRef base = info.node_types[k];
+					if (applied != null && applied.not_null && base.nullable) {
+						base.nullable = false;
+					}
+					return base;
+				}
+				return TYPE_UNKNOWN;
+			}
 		}
 
 		AstNode* scope = &pr.nodes[current];
@@ -2301,6 +2357,22 @@ fn uint find_decl_in_scope_chain(ParseResult* pr, uint use_idx, String name) {
 			if (!is_typed_declaration(candidate.kind)) continue;
 			if (candidate.name != name) continue;
 			return j;
+		}
+		// Also look inside destructuring-wrapper PROPERTY_DECLs at this scope:
+		// `val (a, b) = expr` produces a PROPERTY_DECL named "(destructuring)"
+		// whose PROPERTY_DECL children are the destructured bindings. Their
+		// parent is the wrapper, not the enclosing BLOCK, so the direct-child
+		// scan above misses them. (Kotlin spec §11.7)
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* wrapper = &pr.nodes[j];
+			if (wrapper.parent != current) continue;
+			if (wrapper.kind != PROPERTY_DECL || wrapper.name != "(destructuring)") continue;
+			for (uint k = 0; k < pr.node_count; k++) {
+				AstNode* inner = &pr.nodes[k];
+				if (inner.parent != j) continue;
+				if (inner.kind != PROPERTY_DECL) continue;
+				if (inner.name == name) return k;
+			}
 		}
 		AstNode* scope = &pr.nodes[current];
 		if (current == 0 || scope.parent == ast::NO_PARENT) break;

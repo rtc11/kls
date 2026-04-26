@@ -4645,6 +4645,98 @@ fn void callable_ref_to_unit_fun() @test {
 
 // ── User iterator() for-loops (Kotlin spec §15.5) ───────────────────
 
+// ── User componentN() destructuring (Kotlin spec §11.7) ─────────────
+
+fn void destructure_user_class_with_componentN() @test {
+	@pool() {
+		String src = `class Point {
+			operator fun component1(): Int = 0
+			operator fun component2(): String = ""
+		}
+		fun f(p: Point) {
+			val (a, b) = p
+			val x = a
+			val y = b
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(r, "a");
+		uint b_idx = find_decl(r, "b");
+		uint x_idx = find_decl(r, "x");
+		uint y_idx = find_decl(r, "y");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int from componentN, got '%s'", types::format_type(&ti.node_types[a_idx]));
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String",
+			"b: String from componentN");
+		assert(x_idx > 0 && ti.has_type[x_idx]
+			&& types::format_type(&ti.node_types[x_idx]) == "Int",
+			"x: Int (downstream propagation), got '%s'",
+			x_idx > 0 && ti.has_type[x_idx] ? types::format_type(&ti.node_types[x_idx]) : "<no>");
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "String",
+			"y: String (downstream propagation)");
+	};
+}
+
+fn void destructure_user_class_three_components() @test {
+	@pool() {
+		String src = `class Trio {
+			operator fun component1(): Int = 0
+			operator fun component2(): Long = 0L
+			operator fun component3(): Boolean = true
+		}
+		fun f(t: Trio) {
+			val (i, l, b) = t
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint i_idx = find_decl(r, "i");
+		uint l_idx = find_decl(r, "l");
+		uint b_idx = find_decl(r, "b");
+		assert(types::format_type(&ti.node_types[i_idx]) == "Int", "i: Int");
+		assert(types::format_type(&ti.node_types[l_idx]) == "Long", "l: Long");
+		assert(types::format_type(&ti.node_types[b_idx]) == "Boolean", "b: Boolean");
+	};
+}
+
+fn void destructure_in_for_loop_user_componentN() @test {
+	@pool() {
+		String src = `class Pair2 {
+			operator fun component1(): Int = 0
+			operator fun component2(): String = ""
+		}
+		class Pair2List {
+			operator fun iterator(): Pair2Iter = Pair2Iter()
+		}
+		class Pair2Iter {
+			operator fun hasNext(): Boolean = true
+			operator fun next(): Pair2 = Pair2()
+		}
+		fun f(items: Pair2List) {
+			for ((a, b) in items) {
+				val x = a
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_node(r, PARAM, "a");
+		uint b_idx = find_node(r, PARAM, "b");
+		uint x_idx = find_decl(r, "x");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int from componentN, got '%s'", types::format_type(&ti.node_types[a_idx]));
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String", "b: String");
+		assert(x_idx > 0 && ti.has_type[x_idx]
+			&& types::format_type(&ti.node_types[x_idx]) == "Int", "x: Int");
+	};
+}
+
 fn void for_in_list_infers_element_type() @test {
 	@pool() {
 		String src = `fun f() {
