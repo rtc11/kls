@@ -4443,3 +4443,96 @@ fn void user_operator_invoke_returns_primitive() @test {
 		assert(t == "Int", "c() should resolve via Counter.invoke → Int; got '%s'", t);
 	};
 }
+
+// ── Operator-call resolution (unary) ──────────────────────────────
+
+fn void user_operator_unary_minus_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Vec(val x: Int, val y: Int) {
+				operator fun unaryMinus(): Vec = Vec(-x, -y)
+			}
+			fun test(v: Vec) {
+				val n = -v
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Vec", "-v should resolve via Vec.unaryMinus → Vec; got '%s'", t);
+	};
+}
+
+fn void user_operator_inc_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Counter(val n: Int) {
+				operator fun inc(): Counter = Counter(n + 1)
+			}
+			fun test(c: Counter) {
+				val r = ++c
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Counter", "++c should resolve via Counter.inc → Counter; got '%s'", t);
+	};
+}
+
+fn void user_operator_postfix_inc_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Counter(val n: Int) {
+				operator fun inc(): Counter = Counter(n + 1)
+			}
+			fun test(c: Counter) {
+				val r = c++
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Counter", "c++ should resolve via Counter.inc → Counter; got '%s'", t);
+	};
+}
+
+fn void int_unary_minus_still_works() @test {
+	@pool() {
+		// Regression: -Int → Int via stdlib
+		String src =
+			`fun test() {
+				val n = -42
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "-42 → Int; got '%s'", t);
+	};
+}
+
+fn void boolean_not_still_works() @test {
+	@pool() {
+		// Regression: !Boolean → Boolean
+		String src =
+			`fun test(b: Boolean) {
+				val n = !b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Boolean", "!b → Boolean; got '%s'", t);
+	};
+}

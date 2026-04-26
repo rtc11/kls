@@ -3112,15 +3112,36 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 fn TypeRef resolve_prefix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	String op = node.extra_text;
 
-	if (op == "!") return TYPE_BOOLEAN;
-
-	if (op == "-" || op == "+" || op == "++" || op == "--") {
-		for (uint j = 0; j < pr.node_count; j++) {
-			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				return info.node_types[j];
-			}
+	// Find operand type once
+	TypeRef operand = TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			operand = info.node_types[j];
+			break;
 		}
 	}
+
+	// `!` is always Boolean per spec (Boolean operand required), but try
+	// user-defined `not` first for other types (e.g. custom BitSet).
+	if (op == "!") {
+		if (operand.kind != UNKNOWN && operand.name != "Boolean") {
+			TypeRef looked_up = lookup_member_anywhere(pr, info, operand, "not");
+			if (looked_up.kind != UNKNOWN) return looked_up;
+		}
+		return TYPE_BOOLEAN;
+	}
+
+	String method = unary_op_method(op);
+	if (method.len > 0 && operand.kind != UNKNOWN) {
+		TypeRef looked_up = resolve_member_type(operand, method);
+		if (looked_up.kind == UNKNOWN) {
+			looked_up = lookup_member_anywhere(pr, info, operand, method);
+		}
+		if (looked_up.kind != UNKNOWN) return looked_up;
+	}
+
+	// Fallback: legacy behaviour — operand type for unary +/- and pre-inc/dec
+	if (op == "-" || op == "+" || op == "++" || op == "--") return operand;
 
 	return TYPE_UNKNOWN;
 }
@@ -3130,22 +3151,31 @@ fn TypeRef resolve_prefix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 fn TypeRef resolve_postfix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	String op = node.extra_text;
 
-	if (op == "!!") {
-		for (uint j = 0; j < pr.node_count; j++) {
-			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				TypeRef inner = info.node_types[j];
-				inner.nullable = false;
-				return inner;
-			}
+	// Find operand type once
+	TypeRef operand = TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			operand = info.node_types[j];
+			break;
 		}
 	}
 
+	if (op == "!!") {
+		operand.nullable = false;
+		return operand;
+	}
+
+	// Postfix `++` / `--` — try operator method, fall back to operand type
 	if (op == "++" || op == "--") {
-		for (uint j = 0; j < pr.node_count; j++) {
-			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				return info.node_types[j];
+		String method = unary_op_method(op);
+		if (method.len > 0 && operand.kind != UNKNOWN) {
+			TypeRef looked_up = resolve_member_type(operand, method);
+			if (looked_up.kind == UNKNOWN) {
+				looked_up = lookup_member_anywhere(pr, info, operand, method);
 			}
+			if (looked_up.kind != UNKNOWN) return looked_up;
 		}
+		return operand;
 	}
 
 	return TYPE_UNKNOWN;
