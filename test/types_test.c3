@@ -5313,7 +5313,7 @@ fn void user_generic_fn_fntype_R_only_from_lambda() @test {
 	};
 }
 
-fn void probe_fntype_param_T_from_fn_arg_type() @test {
+fn void user_generic_fn_T_via_other_arg_with_lambda() @test {
 	@pool() {
 		String src = `fun <T> apply2(x: T, f: (T) -> T): T = TODO()
 		fun f() {
@@ -5326,5 +5326,39 @@ fn void probe_fntype_param_T_from_fn_arg_type() @test {
 		assert(r_idx > 0 && ti.has_type[r_idx]
 			&& types::format_type(&ti.node_types[r_idx]) == "Int",
 			"r: Int (T bound from x), got '%s'", tr);
+	};
+}
+
+fn void implicit_it_lambda_R_from_body() @test {
+	@pool() {
+		String src = `fun <T, R> mp(xs: List<T>, f: (T) -> R): List<R> = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val ys = mp(xs) { it.toString() }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint y_idx = find_decl(pr, "ys");
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no>";
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "List<String>",
+			"ys: List<String> (it.toString from implicit it: Int), got '%s'", ty);
+	};
+}
+
+fn void implicit_it_lambda_forwarded_unchanged() @test {
+	@pool() {
+		String src = `fun <T, R> mp(xs: List<T>, f: (T) -> R): List<R> = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val ys = mp(xs) { it }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint y_idx = find_decl(pr, "ys");
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no>";
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "List<Int>",
+			"ys: List<Int> (it: Int forwarded), got '%s'", ty);
 	};
 }

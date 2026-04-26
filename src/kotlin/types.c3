@@ -1536,6 +1536,13 @@ fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx
 		return TYPE_UNKNOWN;
 	}
 
+	// Case 3: User-defined function with FUNCTION-typed parameter.
+	// fun <T, R> mp(xs: List<T>, f: (T) -> R) → mp(xs) { it.toString() }
+	// Resolves `it` to the FUNCTION param's first param-slot type, with
+	// any TPs substituted from the call's other args (Kotlin spec §11.1.7).
+	TypeRef user_it = infer_implicit_it_from_user_call(pr, info, lambda_idx, call_idx);
+	if (user_it.kind != UNKNOWN) return user_it;
+
 	return TYPE_UNKNOWN;
 }
 
@@ -2190,6 +2197,166 @@ fn void unify_function_tps_into_subst(TypeRef param_tref, TypeRef arg_tref,
 		}
 	}
 }
+
+/**
+ * Infer implicit `it` type for a lambda passed to a user-defined function
+ * with a FUNCTION-typed parameter (Kotlin spec §11.1.7 + §4.6).
+ *
+ * Strategy:
+ *   1. Find the lambda's positional arg index in the call.
+ *   2. Look up the called fn (in-file FUN_DECL by name match).
+ *   3. Get that PARAM's type_text, parse as FUNCTION.
+ *   4. Take param_type_names[0] (the `it` slot).
+ *   5. If it's a TP of the called fn, run the standard TP inference
+ *      against the OTHER call args to bind it.
+ *   6. Return the bound type.
+ *
+ * Limitations: in-file callees only (workspace lookup deferred), single-
+ * param lambdas only, no support for receiver-typed lambdas.
+ */
+fn TypeRef infer_implicit_it_from_user_call(ParseResult* pr, TypeInfo* info,
+		uint lambda_idx, uint call_idx) {
+	// Locate lambda's arg position
+	uint arg_pos = 0;
+	uint pos = 0;
+	bool found = false;
+	uint lambda_parent = pr.nodes[lambda_idx].parent;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind != VALUE_ARGUMENT) continue;
+		// Direct VALUE_ARGUMENT wrap of lambda
+		if (j == lambda_parent) {
+			arg_pos = pos;
+			found = true;
+			break;
+		}
+		pos++;
+	}
+	// Trailing lambda: lambda is direct child of CALL_EXPR (after VALUE_ARGUMENTs)
+	if (!found && lambda_parent == call_idx) {
+		arg_pos = pos;
+		found = true;
+	}
+	if (!found) return TYPE_UNKNOWN;
+
+	String fn_name = pr.nodes[call_idx].name;
+	if (fn_name.len == 0) return TYPE_UNKNOWN;
+
+	// Find in-file FUN_DECL by name
+	uint fun_decl_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].kind != FUN_DECL) continue;
+		if (pr.nodes[j].name != fn_name) continue;
+		fun_decl_idx = j;
+		break;
+	}
+	if (fun_decl_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	// Find PARAM at arg_pos
+	uint param_pos_count = 0;
+	String fn_param_text = "";
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != fun_decl_idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (param_pos_count == arg_pos) {
+			fn_param_text = pr.nodes[j].type_text;
+			break;
+		}
+		param_pos_count++;
+	}
+	if (fn_param_text.len == 0) return TYPE_UNKNOWN;
+
+	TypeRef fn_param_tref = parse_type_text(fn_param_text);
+	if (fn_param_tref.kind != FUNCTION) return TYPE_UNKNOWN;
+	if (fn_param_tref.param_type_count == 0) return TYPE_UNKNOWN;
+
+	String it_slot = fn_param_tref.param_type_names[0];
+	if (it_slot.len == 0 || it_slot == "?") return TYPE_UNKNOWN;
+
+	// If it_slot is a literal type (e.g. Int), return it directly.
+	// If it's a TP, bind from other call args.
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) {
+		return { .kind = SIMPLE, .name = it_slot };
+	}
+
+	bool is_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (it_slot == tp_names[t]) { is_tp = true; break; }
+	}
+	if (!is_tp) {
+		return { .kind = SIMPLE, .name = it_slot };
+	}
+
+	// Bind TPs from non-FUNCTION call args (mirrors substitute_user_type_params)
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint pp = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		// Top-level T match
+		bool top_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					subst_names[t] = arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_bound = true;
+				}
+			}
+		}
+		// Nested unification (skip FUNCTION-typed params to avoid recursion)
+		if (!top_bound && pt.len > 0) {
+			TypeRef ptref = parse_type_text(pt);
+			if (ptref.kind != FUNCTION && ptref.kind != UNKNOWN
+				&& ptref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (ptref.name == arg.name) {
+						unify_tps_into_subst(ptref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, ptref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(ptref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		pp++;
+	}
+
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t] && it_slot == tp_names[t]) {
+			return { .kind = SIMPLE, .name = subst_names[t],
+				.nullable = subst_nullable[t] };
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
 
 /**
  * Unify a parameter TypeRef against an argument TypeRef and record any
