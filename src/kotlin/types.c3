@@ -3119,6 +3119,14 @@ fn TypeRef unwrap_typealias(ParseResult* pr, TypeRef t) {
 		}
 		if (matched == ast::NO_PARENT) return t;
 		TypeRef target = parse_type_text(pr.nodes[matched].type_text);
+		// Substitute alias TPs from use-site type args (Kotlin spec §11.1.5).
+		// `typealias StringMap<V> = Map<String, V>` with use site
+		// `StringMap<Int>` rewrites V → Int inside the parsed target.
+		// Reuses substitute_class_type_params: it reads TYPE_PARAM children
+		// of the alias decl and substitutes from the receiver's type_arg_names.
+		if (t.kind == GENERIC && t.type_arg_count > 0) {
+			target = substitute_class_type_params(pr, matched, t, target);
+		}
 		// Preserve nullability from receiver and class-ref bit.
 		if (t.nullable) target.nullable = true;
 		if (t.is_class_ref) target.is_class_ref = true;

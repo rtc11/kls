@@ -6162,3 +6162,52 @@ fn void when_multi_condition_first_cond_wrongly_applied() @test {
 		assert(t != "Int", "BUG: x wrongly narrowed to String from first cond, got n='%s'", t);
 	};
 }
+
+// ── Generic typealias TP substitution ─────────────────────────────
+
+fn void typealias_generic_single_tp() @test {
+	// `typealias Box<T> = Pair<T, T>; val b: Box<Int>` — alias TP T
+	// must substitute from use-site type args.
+	@pool() {
+		String src = `class Pair<A, B>(val first: A, val second: B)
+typealias Box<T> = Pair<T, T>
+fun main() {
+	val b: Box<Int> = Pair(1, 2)
+	val f = b.first
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint f_idx = find_decl(pr, "f");
+		String t = f_idx > 0 && ti.has_type[f_idx] ? types::format_type(&ti.node_types[f_idx]) : "<no>";
+		assert(f_idx != 0 && t == "Int", "f: Int (Box<Int>.first → T=Int → A=Int), got '%s'", t);
+	};
+}
+
+fn void typealias_generic_partial_subst() @test {
+	// `typealias StringMap<V> = Map<String, V>` — only V is alias TP;
+	// String is fixed. Use site StringMap<Int> binds V=Int.
+	@pool() {
+		String src = `class Map<K, V>(val k: K, val v: V)
+typealias StringMap<V> = Map<String, V>
+fun main() {
+	val m: StringMap<Int> = Map("a", 1)
+	val k = m.k
+	val v = m.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint k_idx = find_decl(pr, "k");
+		String kt = k_idx > 0 && ti.has_type[k_idx] ? types::format_type(&ti.node_types[k_idx]) : "<no>";
+		assert(k_idx != 0 && kt == "String", "k: String (fixed in alias), got '%s'", kt);
+
+		uint v_idx = find_decl(pr, "v");
+		String vt = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && vt == "Int", "v: Int (V→Int via use site), got '%s'", vt);
+	};
+}
