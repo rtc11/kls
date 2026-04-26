@@ -3251,6 +3251,28 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 		if (cls.kind != CLASS_DECL && cls.kind != INTERFACE_DECL && cls.kind != OBJECT_DECL) continue;
 		if (cls.name != recv_name) continue;
 
+		// Synthetic enum members (Kotlin spec §11.2.6 + §16.30 Enum<E>):
+		//   val name: String      — entry name
+		//   val ordinal: Int      — declaration order
+		// Plus class-ref-only:
+		//   fun values(): Array<E>
+		//   fun valueOf(name: String): E
+		bool is_enum_class = (cls.kind == CLASS_DECL) && ((cls.mod_flags & ast::MOD_ENUM) != 0);
+		if (is_enum_class) {
+			if (member_name == "name") return TYPE_STRING;
+			if (member_name == "ordinal") return TYPE_INT;
+			if (receiver.is_class_ref) {
+				if (member_name == "values") {
+					TypeRef arr = { .kind = GENERIC, .name = "Array", .type_arg_count = 1 };
+					arr.type_arg_names[0] = recv_name;
+					return arr;
+				}
+				if (member_name == "valueOf") {
+					return { .kind = SIMPLE, .name = recv_name };
+				}
+			}
+		}
+
 		// Scan direct children for matching member
 		for (uint j = 0; j < pr.node_count; j++) {
 			if (pr.nodes[j].parent != i) continue;
@@ -3267,6 +3289,11 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 					}
 					if (child.kind == FUN_DECL) return TYPE_UNIT;
 					return TYPE_UNKNOWN;
+				case ENUM_ENTRY:
+					// `Color.RED` — receiver is enum class-ref, member is
+					// the entry. Each entry is an instance of the enum class.
+					if (out_decl_idx != null) *out_decl_idx = j;
+					return { .kind = SIMPLE, .name = recv_name };
 				case PARAM:
 					// Primary-ctor val/var only — plain params aren't members
 					uint mods = child.mod_flags;

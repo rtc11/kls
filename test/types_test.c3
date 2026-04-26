@@ -5798,3 +5798,69 @@ fun main() {
 		assert(n_idx != 0 && nt == "Int", "n should be Int, got '%s'", nt);
 	};
 }
+
+fn void enum_entry_resolves_to_enum_class() @test {
+	// `enum class Color { RED }; val c = Color.RED` — entry is instance
+	// of enum class. Kotlin spec §11.2.6 + §16.30.
+	@pool() {
+		String src = `enum class Color { RED, GREEN, BLUE }
+fun main() {
+	val c = Color.RED
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint c_idx = find_decl(pr, "c");
+		String t = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx != 0 && t == "Color", "c should be Color, got '%s'", t);
+	};
+}
+
+fn void enum_synthetic_name_and_ordinal() @test {
+	// Every enum entry has synthetic .name: String and .ordinal: Int.
+	@pool() {
+		String src = `enum class Color { RED, GREEN, BLUE }
+fun main() {
+	val c = Color.RED
+	val n = c.name
+	val o = c.ordinal
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String nt = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && nt == "String", "n should be String, got '%s'", nt);
+
+		uint o_idx = find_decl(pr, "o");
+		String ot = o_idx > 0 && ti.has_type[o_idx] ? types::format_type(&ti.node_types[o_idx]) : "<no>";
+		assert(o_idx != 0 && ot == "Int", "o should be Int, got '%s'", ot);
+	};
+}
+
+fn void enum_static_values_and_valueOf() @test {
+	// Class-ref-only synthetic statics: values(): Array<E>, valueOf(s): E.
+	@pool() {
+		String src = `enum class Color { RED, GREEN, BLUE }
+fun main() {
+	val a = Color.values()
+	val v = Color.valueOf("RED")
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String at = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && at == "Array<Color>", "a should be Array<Color>, got '%s'", at);
+
+		uint v_idx = find_decl(pr, "v");
+		String vt = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && vt == "Color", "v should be Color, got '%s'", vt);
+	};
+}
