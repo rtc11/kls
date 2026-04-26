@@ -1972,6 +1972,33 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 					TypeRef base = { .kind = SIMPLE, .name = sym.name };
 					return infer_xfile_class_type_args(pr, info, sym.name, idx, base);
 				}
+				// Top-level function call: parse return type, substitute TPs.
+				// `fun <T> id(x: T): T` indexed cross-file → `id("hi")` returns String.
+				if (sym.kind == symbols::SymbolKind.FUNCTION && sym.receiver.len == 0) {
+					ParseResult*? other_pr_opt = g_workspace.get_cached_ast(sym.uri);
+					if (catch other_pr_opt) continue;
+					if (other_pr_opt == null) continue;
+					ParseResult* other_pr = other_pr_opt;
+					// Find FUN_DECL by name + line.
+					uint fidx = uint.max;
+					for (uint k = 0; k < other_pr.node_count; k++) {
+						AstNode* n = &other_pr.nodes[k];
+						if (n.kind != FUN_DECL) continue;
+						if (n.name != sym.name) continue;
+						if (n.name_line == sym.line) { fidx = k; break; }
+					}
+					if (fidx == uint.max) {
+						for (uint k = 0; k < other_pr.node_count; k++) {
+							AstNode* n = &other_pr.nodes[k];
+							if (n.kind == FUN_DECL && n.name == sym.name) { fidx = k; break; }
+						}
+					}
+					if (fidx == uint.max) continue;
+					String rt_text = other_pr.nodes[fidx].type_text;
+					TypeRef ret = rt_text.len > 0 ? parse_type_text(rt_text) : TYPE_UNKNOWN;
+					if (ret.kind == UNKNOWN) continue;
+					return infer_xfile_fun_type_args(pr, info, sym.uri, sym.name, sym.line, idx, ret);
+				}
 			}
 		}
 
@@ -3758,6 +3785,153 @@ fn TypeRef infer_xfile_class_type_args(ParseResult* pr, TypeInfo* info,
 		} else {
 			out.type_arg_names[t] = tp_names[t];
 			out.type_arg_nullable[t] = false;
+		}
+	}
+	return out;
+}
+
+/**
+ * Infer cross-file FUN_DECL type-arguments by matching declared PARAM types
+ * (from cached workspace AST) against call arg types, then substitute into
+ * the function's return type. Mirrors `substitute_user_type_params` for the
+ * cross-file case (Kotlin spec §11.1.7).
+ *
+ * `fun <T> id(x: T): T = x` indexed in workspace; caller `id("hi")` →
+ * returns `String`. Top-level + nested + supertype + FUNCTION-type
+ * unification all supported.
+ *
+ * Returns UNKNOWN when ret references an unbound TP (defer pattern), so the
+ * caller's multi-pass loop retries once arg types resolve. Returns ret
+ * unchanged when no TPs declared or ret doesn't reference any TP.
+ */
+fn TypeRef infer_xfile_fun_type_args(ParseResult* pr, TypeInfo* info,
+		String fun_uri, String fun_name, uint fun_line, uint call_idx, TypeRef ret) {
+	if (g_workspace == null) return ret;
+
+	ParseResult*? other_pr_opt = g_workspace.get_cached_ast(fun_uri);
+	if (catch other_pr_opt) return ret;
+	if (other_pr_opt == null) return ret;
+	ParseResult* other_pr = other_pr_opt;
+
+	// Find FUN_DECL with matching name + line. Line is 0-based.
+	uint fun_idx = uint.max;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* n = &other_pr.nodes[j];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name != fun_name) continue;
+		if (n.name_line == fun_line) { fun_idx = j; break; }
+	}
+	if (fun_idx == uint.max) {
+		// Fallback: any FUN_DECL with this name (multiple-overloads not handled)
+		for (uint j = 0; j < other_pr.node_count; j++) {
+			AstNode* n = &other_pr.nodes[j];
+			if (n.kind == FUN_DECL && n.name == fun_name) { fun_idx = j; break; }
+		}
+		if (fun_idx == uint.max) return ret;
+	}
+
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return ret;
+
+	bool ret_uses_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (ret.name == tp_names[t]) { ret_uses_tp = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { ret_uses_tp = true; break; }
+		}
+		if (ret_uses_tp) break;
+	}
+	if (!ret_uses_tp) return ret;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint param_pos = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		// Top-level T match.
+		bool top_level_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					subst_names[t] = arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		// Nested + supertype + FUNCTION-type unification.
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// Defer if ret references unbound TP.
+	bool incomplete = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) continue;
+		if (ret.name == tp_names[t]) { incomplete = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { incomplete = true; break; }
+		}
+		if (incomplete) break;
+	}
+	if (incomplete) return TYPE_UNKNOWN;
+
+	TypeRef out = ret;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) continue;
+		if (out.name == tp_names[t]) {
+			out.name = subst_names[t];
+			if (subst_nullable[t]) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = subst_names[t];
+				if (subst_nullable[t]) out.type_arg_nullable[a] = true;
+			}
 		}
 	}
 	return out;

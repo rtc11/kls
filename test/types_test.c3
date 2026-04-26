@@ -5446,3 +5446,52 @@ fn void cross_file_generic_class_two_tps() @test {
 			"xb: Int, got '%s'", txb);
 	};
 }
+
+fn void cross_file_generic_fn_return_T() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <T> first(xs: List<T>): T = xs[0]");
+
+		String src = `fun main() {
+			val xs: List<Int> = listOf(1, 2)
+			val r = first(xs)
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (xfile T from List<T>), got '%s'", tr);
+	};
+}
+
+fn void cross_file_generic_fn_top_level_T() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <T> id(x: T): T = x");
+
+		String src = `fun main() {
+			val r = id("hi")
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (xfile id(x: T): T), got '%s'", tr);
+	};
+}
