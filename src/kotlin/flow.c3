@@ -599,17 +599,59 @@ fn void apply_when_entry_facts(ParseResult* pr, uint entry_idx, FlowState* true_
 	}
 	if (subject_name.len == 0) return;
 
-	// Walk entry children: first child is the condition; following children
-	// are body. (For multi-condition arms `is A, is B -> ...` we only narrow
-	// when all conditions agree on the same type — TODO.)
-	uint cond_child = ast::NO_PARENT;
+	// Walk entry children: all but the last are conditions; last is body.
+	// (Kotlin spec §16.30: comma-separated arm conditions narrow the
+	// subject only when ALL conditions agree on the same type.)
+	uint[16] cond_children;
+	usz cond_count = 0;
+	uint last_child = ast::NO_PARENT;
 	for (uint i = pr.nodes[entry_idx].children_start; i < pr.node_count; i++) {
 		if (pr.nodes[i].parent != entry_idx) continue;
-		cond_child = i;
-		break;
+		last_child = i;
+		if (cond_count < 16) cond_children[cond_count++] = i;
 	}
-	if (cond_child == ast::NO_PARENT) return;
+	// Drop the body (last child) from the condition list.
+	if (cond_count == 0) return;
+	if (cond_count > 0 && cond_children[cond_count - 1] == last_child) cond_count--;
+	if (cond_count == 0) return;
 
+	// Single condition: existing single-cond logic.
+	if (cond_count == 1) {
+		apply_single_when_cond(pr, cond_children[0], subject_name, true_out, false_out);
+		return;
+	}
+
+	// Multi-condition arm: only narrow if all conditions are `is T` with
+	// the SAME T. Disjunction over different types would require LUB
+	// computation across arbitrary class hierarchies; conservative skip.
+	String agreed_type = "";
+	bool all_same_is = true;
+	for (usz k = 0; k < cond_count; k++) {
+		AstNode* c = &pr.nodes[cond_children[k]];
+		if (c.kind != TYPE_CHECK_EXPR || c.extra_text != "is") {
+			all_same_is = false;
+			break;
+		}
+		if (k == 0) {
+			agreed_type = c.type_text;
+		} else if (c.type_text != agreed_type) {
+			all_same_is = false;
+			break;
+		}
+	}
+	if (all_same_is && agreed_type.len > 0) {
+		TypeRef t = types::parse_type_text(agreed_type);
+		true_out.add_fact(ast::NO_PARENT, subject_name, t, !t.nullable);
+	}
+}
+
+/**
+ * Apply narrowing facts from a single when-arm condition. Factored out
+ * of apply_when_entry_facts so multi-condition arms can dispatch per-cond
+ * (currently only the single-cond case calls this).
+ */
+fn void apply_single_when_cond(ParseResult* pr, uint cond_child, String subject_name,
+		FlowState* true_out, FlowState* false_out) {
 	AstNode* cn = &pr.nodes[cond_child];
 
 	// `is T` / `!is T` arm

@@ -6082,3 +6082,83 @@ fn void cross_file_data_class_copy_returns_self() @test {
 		assert(b_idx != 0 && t == "Foo", "b: Foo, got '%s'", t);
 	};
 }
+
+// ── Multi-condition when arms (LUB) ───────────────────────────────
+
+fn void when_multi_condition_same_type_narrows() @test {
+	// `when (x) { is String, is String -> ... }` — all conds same type.
+	// Subject narrows to String inside the arm body.
+	@pool() {
+		String src = `fun f(x: Any?): Int {
+	when (x) {
+		is String, is String -> {
+			val n = x.length
+			return n
+		}
+		else -> return 0
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (x narrowed to String), got '%s'", t);
+	};
+}
+
+fn void when_multi_condition_different_types_no_narrow() @test {
+	// `when (x) { is Int, is String -> ... }` — different types,
+	// no common supertype known. Subject stays Any?, x.length not resolved.
+	@pool() {
+		String src = `fun f(x: Any?): String {
+	when (x) {
+		is Int, is String -> {
+			val n = x.length
+			return "ok"
+		}
+		else -> return "no"
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		// x is NOT narrowed → x.length is unknown
+		assert(n_idx != 0, "should find 'n'");
+		String t = ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(t != "Int", "x should NOT narrow to String when conditions disagree, got n='%s'", t);
+	};
+}
+
+fn void when_multi_condition_first_cond_wrongly_applied() @test {
+	// Bug probe: when (x) { is String, is Int -> ... } — current code
+	// only reads first condition. If first is `is String`, we incorrectly
+	// narrow x to String inside arm even when the match came from Int.
+	// `x.length` resolves to Int even though it shouldn't.
+	@pool() {
+		String src = `fun f(x: Any?): Int {
+	when (x) {
+		is String, is Int -> {
+			val n = x.length
+			return n
+		}
+		else -> return 0
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		// Correct behavior: x is NOT narrowed → x.length unknown → n is UNKNOWN.
+		assert(n_idx != 0, "should find 'n'");
+		assert(t != "Int", "BUG: x wrongly narrowed to String from first cond, got n='%s'", t);
+	};
+}
