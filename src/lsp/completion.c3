@@ -335,8 +335,16 @@ fn void add_identifier_completions(Object* items, String content, String prefix)
 	if (content.len == 0) return;
 
 	// Collect unique identifiers using a temp HashMap for O(1) dedup.
+	// Seed with existing item labels so we don't shadow richer entries
+	// (e.g. dot-completion already added 'extra' as a Property).
 	HashMap{String, bool} seen;
 	seen.tinit();
+	for (usz i = 0; i < items.get_len(); i++) {
+		Object* item = items.get_at(i);
+		if (try label = item.get_string("label")) {
+			seen.set(label, true);
+		}
+	}
 
 	Lexer lex = lexer::init(content);
 	while (true) {
@@ -896,6 +904,15 @@ fn void add_dot_completions(Object* items, DocumentStore* store, WorkspaceIndex*
 		receiver_type = resolve_receiver_type(pr, ti, receiver_name, line, character);
 	}
 
+	// Object expression body members (Kotlin spec §11.2.7 + §16.6).
+	// Surfaces decls from `val o = object [: Super] { ... }` even when
+	// the receiver type is UNKNOWN (pure-anonymous). Body decls win
+	// over supertype members so this runs first; later workspace/dep
+	// passes dedup against existing labels.
+	if (pr != null) {
+		add_object_body_completions(items, pr, receiver_name, prefix);
+	}
+
 	// If we couldn't resolve via AST, try to infer from the name
 	// (e.g., receiver is a class name -> offer static members)
 	if (receiver_type.kind == UNKNOWN) {
@@ -1070,6 +1087,83 @@ fn TypeRef guess_receiver_type(String content, String receiver_name, uint line, 
 }
 
 // ── Workspace class member completion ─────────────────────────────
+
+/**
+ * Surface body decls (PROPERTY_DECL / FUN_DECL) of an object expression
+ * backing the receiver (Kotlin spec §11.2.7 + §16.6). Handles both
+ * supertype-anchored objects (`object : Greeter { ... }`) and pure-
+ * anonymous objects (`object { ... }`) regardless of receiver_type.
+ *
+ * Walks `pr` looking for a PROPERTY_DECL named `receiver_name` whose
+ * initializer is an OBJECT_EXPR, then emits each direct body decl as
+ * a Property/Method completion item with proper kind + detail.
+ */
+fn void add_object_body_completions(Object* items, ParseResult* pr, String receiver_name, String prefix) {
+	if (pr == null || receiver_name.len == 0) return;
+
+	// Find the PROPERTY_DECL bound to receiver_name
+	uint obj_idx = ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* d = &pr.nodes[i];
+		if (d.kind != PROPERTY_DECL) continue;
+		if (d.name != receiver_name) continue;
+		// First non-TYPE_REF child = initializer
+		for (uint k = d.children_start; k < pr.node_count; k++) {
+			if (pr.nodes[k].parent != i) continue;
+			NodeKind kk = pr.nodes[k].kind;
+			if (kk == TYPE_REF) continue;
+			if (kk == OBJECT_EXPR) obj_idx = k;
+			break;
+		}
+		if (obj_idx != ast::NO_PARENT) break;
+	}
+	if (obj_idx == ast::NO_PARENT) return;
+
+	// Dedup against any existing items (rare; safety)
+	String[256] seen_buf;
+	usz seen_count = 0;
+	for (usz i = 0; i < items.get_len() && seen_count < 256; i++) {
+		Object* it = items.get_at(i);
+		if (try label = it.get_string("label")) seen_buf[seen_count++] = label;
+	}
+
+	for (uint k = pr.nodes[obj_idx].children_start; k < pr.node_count; k++) {
+		if (pr.nodes[k].parent != obj_idx) continue;
+		AstNode* m = &pr.nodes[k];
+		if (m.name.len == 0) continue;
+
+		int kind;
+		String detail;
+		switch (m.kind) {
+			case PROPERTY_DECL:
+				kind = COMPLETION_KIND_PROPERTY;
+				detail = m.type_text.len > 0 ? m.type_text : "Any";
+				break;
+			case FUN_DECL:
+				kind = COMPLETION_KIND_METHOD;
+				detail = m.type_text.len > 0 ? m.type_text : "Unit";
+				break;
+			default:
+				continue;
+		}
+
+		if (prefix.len > 0 && !m.name.starts_with(prefix)) continue;
+		if (prefix.len > 0 && m.name == prefix) continue;
+
+		bool already = false;
+		for (usz j = 0; j < seen_count; j++) {
+			if (seen_buf[j] == m.name) { already = true; break; }
+		}
+		if (already) continue;
+		if (seen_count < 256) seen_buf[seen_count++] = m.name;
+
+		Object* item = object::new_obj(tmem);
+		item.set("label", m.name);
+		item.set("kind", kind);
+		item.set("detail", detail);
+		items.push(item);
+	}
+}
 
 /**
  * Look up a user-defined class/interface/object in the workspace index

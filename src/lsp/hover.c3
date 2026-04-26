@@ -340,16 +340,33 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 
 		// Found the DOT_EXPR - resolve receiver type from first child
 		TypeRef receiver_type = types::TYPE_UNKNOWN;
+		uint recv_idx = ast::NO_PARENT;
 
 		// The receiver is the first child of this DOT_EXPR
 		uint dot_idx = i;
 		for (uint j = 0; j < pr.node_count; j++) {
 			if (pr.nodes[j].parent == dot_idx) {
+				recv_idx = j;
 				// First child = receiver
 				if (ti.has_type[j]) {
 					receiver_type = ti.node_types[j];
 				}
 				break;
+			}
+		}
+
+		// Object expression body member (Kotlin spec §11.2.7 + §16.6).
+		// Body decls win over supertype members; runs before generic
+		// member-table lookup so anonymous objects (UNKNOWN receiver)
+		// also resolve.
+		if (recv_idx != ast::NO_PARENT) {
+			TypeRef body_t = types::resolve_anon_object_member(pr, ti, recv_idx, tok.text);
+			if (body_t.kind != UNKNOWN) {
+				DString ds;
+				ds.tinit();
+				String t_str = types::format_type(&body_t);
+				ds.appendf("```kotlin\n%s: %s\n```\n\n*Object body member*", tok.text, t_str);
+				return ds.str_view();
 			}
 		}
 
