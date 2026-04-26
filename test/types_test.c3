@@ -5279,3 +5279,52 @@ fn void user_generic_fn_supertype_mutable_to_immutable() @test {
 			"r: String (T via MutableList <: List), got '%s'", tr);
 	};
 }
+
+fn void user_generic_fn_fntype_R_from_typed_lambda() @test {
+	@pool() {
+		String src = `fun <T, R> mp(xs: List<T>, f: (T) -> R): List<R> = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val ys = mp(xs) { x: Int -> "v" }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint y_idx = find_decl(pr, "ys");
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no>";
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "List<String>",
+			"ys: List<String> (R from typed lambda body), got '%s'", ty);
+	};
+}
+
+fn void user_generic_fn_fntype_R_only_from_lambda() @test {
+	@pool() {
+		String src = `fun <R> wrap(f: () -> R): R = TODO()
+		fun f() {
+			val r = wrap { 42 }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (R from lambda body of () -> R), got '%s'", tr);
+	};
+}
+
+fn void probe_fntype_param_T_from_fn_arg_type() @test {
+	@pool() {
+		String src = `fun <T> apply2(x: T, f: (T) -> T): T = TODO()
+		fun f() {
+			val r = apply2(10) { it + 1 }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (T bound from x), got '%s'", tr);
+	};
+}

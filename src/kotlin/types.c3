@@ -2143,6 +2143,55 @@ fn TypeRef lift_to_supertype(TypeRef arg, String target_name) {
 }
 
 /**
+ * Unify a function-type parameter (FUNCTION TypeRef like `(T) -> R`) against
+ * a lambda's resolved FUNCTION TypeRef. Binds TPs in param-slot positions
+ * and the return-slot (Kotlin spec §11.1.7 + §4.6 function types).
+ *
+ * Lambda-side fields: `param_type_names[]` (strings, no nullable) and
+ * `return_type_name`. We only bind when the lambda-side string is a real
+ * type (not "?", not empty, not "Unit" placeholder when return_type_name
+ * was synthesized from an empty body).
+ */
+fn void unify_function_tps_into_subst(TypeRef param_tref, TypeRef arg_tref,
+		String[4] tp_names, usz* tp_count,
+		String[4]* subst_names, bool[4]* subst_nullable, bool[4]* subst_known) {
+	if (param_tref.kind != FUNCTION || arg_tref.kind != FUNCTION) return;
+
+	// Param-slot positions
+	usz slots = param_tref.param_type_count;
+	if (arg_tref.param_type_count < slots) slots = arg_tref.param_type_count;
+	for (usz i = 0; i < slots; i++) {
+		String pname = param_tref.param_type_names[i];
+		String aname = arg_tref.param_type_names[i];
+		if (aname.len == 0 || aname == "?") continue;
+		for (usz t = 0; t < *tp_count; t++) {
+			if ((*subst_known)[t]) continue;
+			if (pname == tp_names[t]) {
+				(*subst_names)[t] = aname;
+				(*subst_nullable)[t] = false;
+				(*subst_known)[t] = true;
+				break;
+			}
+		}
+	}
+
+	// Return-slot
+	String pret = param_tref.return_type_name;
+	String aret = arg_tref.return_type_name;
+	if (aret.len > 0 && aret != "?" && aret != "Unit") {
+		for (usz t = 0; t < *tp_count; t++) {
+			if ((*subst_known)[t]) continue;
+			if (pret == tp_names[t]) {
+				(*subst_names)[t] = aret;
+				(*subst_nullable)[t] = false;
+				(*subst_known)[t] = true;
+				break;
+			}
+		}
+	}
+}
+
+/**
  * Unify a parameter TypeRef against an argument TypeRef and record any
  * type-parameter bindings discovered (Kotlin spec §11.1.7 structural
  * unification). Used by substitute_user_type_params to support nested
@@ -2255,9 +2304,18 @@ fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
 		// (xs: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
 		// Supertype unification: (xs: Iterable<T>) ↔ List<Int> → T=Int
 		// via stdlib hierarchy table (Kotlin spec §11.1.7 + §7.1).
+		// Function-type unification: (f: (T) -> R) ↔ lambda → bind T from
+		// param slot, R from return slot (Kotlin spec §11.1.7 + §4.6).
 		if (!top_level_bound && pt.len > 0) {
 			TypeRef param_tref = parse_type_text(pt);
-			if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
 				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
 					if (param_tref.name == arg.name) {
@@ -2384,9 +2442,17 @@ fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
 		// Nested unification: (val xs: List<T>) ↔ List<Int> → T=Int.
 		// (val store: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
 		// Supertype unification: (val xs: Iterable<T>) ↔ List<Int> → T=Int.
+		// Function-type unification: (val f: (T) -> R) ↔ lambda.
 		if (!top_level_bound && pt.len > 0) {
 			TypeRef param_tref = parse_type_text(pt);
-			if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
 				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
 					if (param_tref.name == arg.name) {
