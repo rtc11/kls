@@ -4643,6 +4643,96 @@ fn void callable_ref_to_unit_fun() @test {
 	};
 }
 
+// ── User iterator() for-loops (Kotlin spec §15.5) ───────────────────
+
+fn void for_in_list_infers_element_type() @test {
+	@pool() {
+		String src = `fun f() {
+			for (x in listOf(1, 2, 3)) {
+				val y = x
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_node(r, PARAM, "x");
+		uint y_idx = find_decl(r, "y");
+		assert(x_idx > 0 && ti.has_type[x_idx], "x should have type");
+		assert(y_idx > 0 && ti.has_type[y_idx], "y should have type");
+		assert(types::format_type(&ti.node_types[x_idx]) == "Int", "x: Int");
+		assert(types::format_type(&ti.node_types[y_idx]) == "Int", "y: Int");
+	};
+}
+
+fn void for_in_user_iterator() @test {
+	@pool() {
+		String src = `class Range {
+			operator fun iterator(): RangeIter = RangeIter()
+		}
+		class RangeIter {
+			operator fun hasNext(): Boolean = true
+			operator fun next(): Int = 0
+		}
+		fun f(r: Range) {
+			for (x in r) {
+				val y = x
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_node(r, PARAM, "x");
+		uint y_idx = find_decl(r, "y");
+		assert(x_idx > 0 && ti.has_type[x_idx], "x should have type");
+		assert(y_idx > 0 && ti.has_type[y_idx], "y should have type");
+		assert(types::format_type(&ti.node_types[x_idx]) == "Int",
+			"x: Int from user iterator/next, got '%s'", types::format_type(&ti.node_types[x_idx]));
+		assert(types::format_type(&ti.node_types[y_idx]) == "Int", "y: Int");
+	};
+}
+
+fn void for_in_user_iterator_string() @test {
+	@pool() {
+		String src = `class Names {
+			operator fun iterator(): NameIter = NameIter()
+		}
+		class NameIter {
+			operator fun hasNext(): Boolean = true
+			operator fun next(): String = ""
+		}
+		fun f(n: Names) {
+			for (name in n) {
+				val s = name
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint name_idx = find_node(r, PARAM, "name");
+		uint s_idx = find_decl(r, "s");
+		assert(name_idx > 0 && ti.has_type[name_idx], "name should have type");
+		String t = types::format_type(&ti.node_types[name_idx]);
+		assert(t == "String", "expected name: String, got '%s'", t);
+		assert(s_idx > 0 && ti.has_type[s_idx]
+			&& types::format_type(&ti.node_types[s_idx]) == "String", "s: String");
+	};
+}
+
+fn void for_in_explicit_param_type_preserved() @test {
+	@pool() {
+		String src = `fun f() {
+			for (x: Long in listOf(1, 2, 3)) {}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_node(r, PARAM, "x");
+		assert(x_idx > 0 && ti.has_type[x_idx], "x should have type");
+		String t = types::format_type(&ti.node_types[x_idx]);
+		assert(t == "Long", "explicit annotation Long should win over inferred Int, got '%s'", t);
+	};
+}
+
 // ── by lazy delegation (Kotlin spec §11.16) ─────────────────────────
 
 fn void by_lazy_int_literal() @test {

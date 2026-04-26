@@ -1037,13 +1037,12 @@ fn void resolve_destructuring_types(ParseResult* pr, TypeInfo* info) {
 		}
 
 		// Case 2: for ((k, v) in map) — FOR_STMT with multiple PARAM children
+		// Case 3: for (x in items) — FOR_STMT with single PARAM child
 		if (node.kind == FOR_STMT) {
-			// Count PARAM children to detect destructuring
 			uint param_count = ast::count_children_of_kind(pr, node, PARAM);
-			if (param_count < 2) continue;
+			if (param_count == 0) continue;
 
-			// Find the collection type: look for the expression after 'in'
-			// The collection expression is a non-PARAM, non-BLOCK child
+			// Find the collection type: first non-PARAM, non-BLOCK child
 			TypeRef collection_type = TYPE_UNKNOWN;
 			for (uint j = 0; j < pr.node_count; j++) {
 				AstNode* child = &pr.nodes[j];
@@ -1057,14 +1056,45 @@ fn void resolve_destructuring_types(ParseResult* pr, TypeInfo* info) {
 
 			if (collection_type.kind == UNKNOWN) continue;
 
-			// Determine element type for the iteration
+			// Determine element type. Built-in collections handled directly;
+			// user types go through operator fun iterator() / next() lookup
+			// (Kotlin spec §15.5).
 			TypeRef element_type = get_iteration_element_type(collection_type);
+			if (element_type.kind == UNKNOWN) {
+				element_type = resolve_user_iterator_element_type(pr, info, collection_type);
+			}
 			if (element_type.kind == UNKNOWN) continue;
 
-			// Assign component types to the PARAM children
-			assign_component_types_for_params(pr, info, i, element_type);
+			if (param_count >= 2) {
+				// Destructuring loop: assign component types
+				assign_component_types_for_params(pr, info, i, element_type);
+			} else {
+				// Single-PARAM loop: assign element type to the PARAM child,
+				// unless it has an explicit annotation already.
+				for (uint j = 0; j < pr.node_count; j++) {
+					AstNode* child = &pr.nodes[j];
+					if (child.parent != i || child.kind != PARAM) continue;
+					if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
+						info.node_types[j] = element_type;
+						info.has_type[j] = true;
+					}
+					break;
+				}
+			}
 		}
 	}
+}
+
+/**
+ * Resolve element type via user-defined `operator fun iterator()` / `next()`
+ * (Kotlin spec §15.5). Looks up `iterator()` on the collection type, then
+ * `next()` on the returned iterator type. Returns its return type, or UNKNOWN.
+ */
+fn TypeRef resolve_user_iterator_element_type(ParseResult* pr, TypeInfo* info, TypeRef collection_type) {
+	TypeRef iter_type = lookup_member_anywhere(pr, info, collection_type, "iterator");
+	if (iter_type.kind == UNKNOWN) return TYPE_UNKNOWN;
+	TypeRef next_type = lookup_member_anywhere(pr, info, iter_type, "next");
+	return next_type;
 }
 
 /**
