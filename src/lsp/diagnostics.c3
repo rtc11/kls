@@ -1934,49 +1934,110 @@ fn void add_smart_cast_impossible_diagnostics(Object* diagnostics, ParseResult* 
 
 	for (uint i = 0; i < ast.node_count; i++) {
 		AstNode* node = &ast.nodes[i];
-		if (node.kind != NAME_EXPR) continue;
-		if (node.name.len == 0) continue;
 
-		flow::Fact* fact = types::lookup_smart_cast_fact(ast, type_info, i, node.name);
-		if (fact == null) continue;
-		// Only flag facts that would actually narrow something.
-		if (fact.narrowed.kind == types::TypeKind.UNKNOWN && !fact.not_null) continue;
+		// Bare-name use: `x` where x is a captured local var or other
+		// unstable binding.
+		if (node.kind == NAME_EXPR) {
+			if (node.name.len == 0) continue;
 
-		uint decl_idx = find_decl_for_name(ast, i, node.name);
-		if (decl_idx == ast::NO_PARENT) continue;
-		if (types::is_stable_for_smart_cast(ast, type_info, decl_idx, i)) continue;
+			flow::Fact* fact = types::lookup_smart_cast_fact(ast, type_info, i, node.name);
+			if (fact == null) continue;
+			// Only flag facts that would actually narrow something.
+			if (fact.narrowed.kind == types::TypeKind.UNKNOWN && !fact.not_null) continue;
 
-		// Build the diagnostic.
-		Object* diag = object::new_obj(tmem);
+			uint decl_idx = find_decl_for_name(ast, i, node.name);
+			if (decl_idx == ast::NO_PARENT) continue;
+			if (types::is_stable_for_smart_cast(ast, type_info, decl_idx, i)) continue;
 
-		Object* range = object::new_obj(tmem);
-		Object* start = object::new_obj(tmem);
-		start.set("line", (int)node.start_line);
-		start.set("character", (int)node.start_col);
-		Object* end = object::new_obj(tmem);
-		end.set("line", (int)node.start_line);
-		end.set("character", (int)(node.start_col + node.name.len));
-		range.set("start", start);
-		range.set("end", end);
-
-		diag.set("range", range);
-		diag.set("severity", 2); // DiagnosticSeverity.Warning
-		diag.set("source", "kls");
-
-		DString message;
-		message.tinit();
-		if (fact.narrowed.kind != types::TypeKind.UNKNOWN) {
-			String narrowed_text = types::format_type(&fact.narrowed);
-			message.appendf("Smart cast to '%s' is impossible, because '%s' is a mutable property that could have been changed by this time",
-				narrowed_text, node.name);
-		} else {
-			message.appendf("Smart cast to non-null is impossible, because '%s' is a mutable property that could have been changed by this time",
-				node.name);
+			emit_smart_cast_impossible(diagnostics, node, node.name, fact, node.start_col, node.start_col + node.name.len);
+			continue;
 		}
-		diag.set("message", message.str_view());
 
-		diagnostics.push(diag);
+		// Member-access use: `b.x` where receiver is a bare NAME_EXPR or
+		// THIS_EXPR. Skip uses on the LHS of an assignment (writes don't
+		// need a smart cast).
+		if (node.kind == DOT_EXPR && node.name.len > 0) {
+			// Find the receiver child.
+			uint recv_idx = ast::NO_PARENT;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == i) { recv_idx = j; break; }
+			}
+			if (recv_idx == ast::NO_PARENT) continue;
+			AstNode* rn = &ast.nodes[recv_idx];
+			if (rn.kind != NAME_EXPR && rn.kind != THIS_EXPR) continue;
+			String recv_name = rn.kind == THIS_EXPR ? "this" : rn.name;
+			if (recv_name.len == 0) continue;
+
+			// Skip writes: parent is ASSIGNMENT_EXPR and we're its LHS.
+			uint p = node.parent;
+			if (p != ast::NO_PARENT && p < ast.node_count
+				&& ast.nodes[p].kind == ASSIGNMENT_EXPR) {
+				// First child of ASSIGNMENT_EXPR == LHS
+				uint first = ast::NO_PARENT;
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == p) { first = j; break; }
+				}
+				if (first == i) continue;
+			}
+
+			flow::Fact* fact = types::lookup_smart_cast_fact(ast, type_info, i, recv_name, node.name);
+			if (fact == null) continue;
+			if (fact.narrowed.kind == types::TypeKind.UNKNOWN && !fact.not_null) continue;
+
+			// Resolve the receiver type via TypeInfo so we can pass it to
+			// the stability check.
+			if (!type_info.has_type[recv_idx]) continue;
+			types::TypeRef recv_type = type_info.node_types[recv_idx];
+			if (recv_type.kind == types::TypeKind.UNKNOWN) continue;
+
+			if (types::member_access_is_stable(ast, type_info, recv_idx, recv_name, recv_type, node.name)) continue;
+
+			// Range covers the full `recv.member` span.
+			uint end_col = node.start_col + node.name.len;
+			// Diagnostic uses node.name as the symbol referred to in the
+			// message — match Kotlin's compiler wording.
+			DString full_name;
+			full_name.tinit();
+			full_name.appendf("%s.%s", recv_name, node.name);
+			emit_smart_cast_impossible_named(diagnostics, node, full_name.str_view(), fact, node.start_col, end_col);
+		}
 	}
+}
+
+fn void emit_smart_cast_impossible(Object* diagnostics, AstNode* node, String name, flow::Fact* fact, uint start_col, uint end_col) {
+	emit_smart_cast_impossible_named(diagnostics, node, name, fact, start_col, end_col);
+}
+
+fn void emit_smart_cast_impossible_named(Object* diagnostics, AstNode* node, String display_name, flow::Fact* fact, uint start_col, uint end_col) {
+	Object* diag = object::new_obj(tmem);
+
+	Object* range = object::new_obj(tmem);
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)node.start_line);
+	start.set("character", (int)start_col);
+	Object* end = object::new_obj(tmem);
+	end.set("line", (int)node.start_line);
+	end.set("character", (int)end_col);
+	range.set("start", start);
+	range.set("end", end);
+
+	diag.set("range", range);
+	diag.set("severity", 2); // DiagnosticSeverity.Warning
+	diag.set("source", "kls");
+
+	DString message;
+	message.tinit();
+	if (fact.narrowed.kind != types::TypeKind.UNKNOWN) {
+		String narrowed_text = types::format_type(&fact.narrowed);
+		message.appendf("Smart cast to '%s' is impossible, because '%s' is a mutable property that could have been changed by this time",
+			narrowed_text, display_name);
+	} else {
+		message.appendf("Smart cast to non-null is impossible, because '%s' is a mutable property that could have been changed by this time",
+			display_name);
+	}
+	diag.set("message", message.str_view());
+
+	diagnostics.push(diag);
 }
 
 /**

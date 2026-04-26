@@ -200,7 +200,7 @@ kls/
 
 Memory: every `mem::free(*.cached_types)` must be preceded by `types::free_type_info(...)` which calls `clear_flow` to release the per-function `Cfg`/`FlowAnalysis`.
 
-**Diagnostic** (`lsp/diagnostics.c3`): `add_smart_cast_impossible_diagnostics` walks NAME_EXPR uses; if a flow fact would narrow the name but `is_stable_for_smart_cast` returns false, emits a Warning ("Smart cast to T is impossible…"). Gated by `config::smart_cast_diagnostic` (default true, key: `smartCastDiagnostic` in initializationOptions).
+**Diagnostic** (`lsp/diagnostics.c3`): `add_smart_cast_impossible_diagnostics` walks NAME_EXPR and DOT_EXPR uses; if a flow fact would narrow the (bare or `recv.member`) name but the stability gate fails (`is_stable_for_smart_cast` for bare names, `types::member_access_is_stable` for member access), emits a Warning ("Smart cast to T is impossible…"). DOT_EXPR path requires receiver to be NAME_EXPR or THIS_EXPR; skips writes (LHS of ASSIGNMENT_EXPR). Shared `emit_smart_cast_impossible_named` helper handles both paths. Gated by `config::smart_cast_diagnostic` (default true, key: `smartCastDiagnostic` in initializationOptions).
 
 **Contracts** (`kotlin/contracts.c3`): Kotlin contracts DSL (`kotlin.contracts.*`) effect extraction and consumption.
 - `ContractEffect` models `returns() implies (cond)`, `returns(true|false|null) implies (cond)`, and `callsInPlace(lambda, KIND)`.

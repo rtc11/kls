@@ -134,3 +134,56 @@ fn void no_diagnostic_after_require_predicate_contract() @test {
 			"require(x != null) contract should suppress warning");
 	};
 }
+
+// ── Member-property smart-cast diagnostics ─────────────────────────
+
+fn void smart_cast_impossible_emitted_for_member_var() @test {
+	@pool() {
+		// `var x` member is unstable. After `if (b.x != null)` the compiler
+		// cannot smart cast `b.x` — must emit a Warning.
+		String src =
+			`class Box(var x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s: String = b.x
+				}
+			}`;
+		Object* diags = build_diags(src);
+		assert(any_message_contains(diags, "Smart cast"),
+			"expected Smart cast warning for ctor-var member");
+		assert(any_message_contains(diags, "b.x"),
+			"warning should mention 'b.x' (full member path)");
+	};
+}
+
+fn void no_smart_cast_diagnostic_for_member_val() @test {
+	@pool() {
+		// Stable val member — flow narrows; no warning expected.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s: String = b.x
+				}
+			}`;
+		Object* diags = build_diags(src);
+		assert(!any_message_contains(diags, "Smart cast"),
+			"stable val member should NOT emit warning");
+	};
+}
+
+fn void smart_cast_impossible_emitted_for_open_member_val() @test {
+	@pool() {
+		// `open val` may be overridden with a custom getter — unstable.
+		String src =
+			`open class Box { open val x: String? = null }
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s: String = b.x
+				}
+			}`;
+		Object* diags = build_diags(src);
+		assert(any_message_contains(diags, "Smart cast"),
+			"open val member should emit warning");
+	};
+}
