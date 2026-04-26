@@ -3190,20 +3190,49 @@ fn TypeRef unwrap_typealias(ParseResult* pr, TypeRef t) {
 			matched = i;
 			break;
 		}
-		if (matched == ast::NO_PARENT) return t;
-		TypeRef target = parse_type_text(pr.nodes[matched].type_text);
-		// Substitute alias TPs from use-site type args (Kotlin spec §11.1.5).
-		// `typealias StringMap<V> = Map<String, V>` with use site
-		// `StringMap<Int>` rewrites V → Int inside the parsed target.
-		// Reuses substitute_class_type_params: it reads TYPE_PARAM children
-		// of the alias decl and substitutes from the receiver's type_arg_names.
-		if (t.kind == GENERIC && t.type_arg_count > 0) {
-			target = substitute_class_type_params(pr, matched, t, target);
+		if (matched != ast::NO_PARENT) {
+			TypeRef target = parse_type_text(pr.nodes[matched].type_text);
+			if (t.kind == GENERIC && t.type_arg_count > 0) {
+				target = substitute_class_type_params(pr, matched, t, target);
+			}
+			if (t.nullable) target.nullable = true;
+			if (t.is_class_ref) target.is_class_ref = true;
+			t = target;
+			continue;
 		}
-		// Preserve nullability from receiver and class-ref bit.
-		if (t.nullable) target.nullable = true;
-		if (t.is_class_ref) target.is_class_ref = true;
-		t = target;
+		// Cross-file fallback: workspace-indexed typealias (Kotlin spec §11.1.5).
+		if (g_workspace != null) {
+			TypealiasInfo* info = g_workspace.lookup_typealias(t.name);
+			if (info != null) {
+				TypeRef target = parse_type_text(info.aliased_type_text);
+				// Manual TP substitution (no AST handle; use info.tp_names).
+				if (t.kind == GENERIC && t.type_arg_count > 0 && info.tp_count > 0) {
+					usz n_subst = info.tp_count;
+					if (n_subst > t.type_arg_count) n_subst = t.type_arg_count;
+					for (usz k = 0; k < n_subst; k++) {
+						String tp = info.tp_names[k];
+						String binding = t.type_arg_names[k];
+						bool binding_nullable = t.type_arg_nullable[k];
+						if (binding == tp || binding.len == 0) continue;
+						if (target.name == tp) {
+							target.name = binding;
+							if (binding_nullable) target.nullable = true;
+						}
+						for (uint a = 0; a < target.type_arg_count; a++) {
+							if (target.type_arg_names[a] == tp) {
+								target.type_arg_names[a] = binding;
+								if (binding_nullable) target.type_arg_nullable[a] = true;
+							}
+						}
+					}
+				}
+				if (t.nullable) target.nullable = true;
+				if (t.is_class_ref) target.is_class_ref = true;
+				t = target;
+				continue;
+			}
+		}
+		return t;
 	}
 	return t;
 }

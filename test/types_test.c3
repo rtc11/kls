@@ -6107,6 +6107,54 @@ fn void cross_file_generic_data_class_copy_substitutes() @test {
 	};
 }
 
+// ── Cross-file typealias ──────────────────────────────────────────
+
+fn void cross_file_typealias_simple() @test {
+	// `typealias S = String` in another file. `s.length` cross-file.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///alias.kt", "typealias S = String");
+
+		String src = `fun main() {
+	val s: S = ""
+	val n = s.length
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (cross-file alias), got '%s'", t);
+	};
+}
+
+fn void cross_file_typealias_to_user_class() @test {
+	// alias to user class in same other file
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///models.kt", "class Foo(val x: Int)\ntypealias F = Foo");
+
+		String src = `fun main() {
+	val f: F = Foo(1)
+	val n = f.x
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (cross-file alias to user class), got '%s'", t);
+	};
+}
+
 // ── Multi-condition when arms (LUB) ───────────────────────────────
 
 fn void when_multi_condition_same_type_narrows() @test {

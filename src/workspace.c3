@@ -74,6 +74,18 @@ struct AstCacheEntry {
 	ParseResult* pr;       // heap-allocated, parsed against `content`
 }
 
+// ── Cached typealias declaration ───────────────────────────────────
+//
+// Stores enough of a TYPEALIAS_DECL for cross-file unwrapping (Kotlin
+// spec §11.1.5). Looked up by alias name in WorkspaceIndex.typealiases.
+
+struct TypealiasInfo {
+	String name;                  // heap-copied alias name (e.g. "StringMap")
+	String aliased_type_text;     // heap-copied RHS (e.g. "Map<String, V>")
+	String[8] tp_names;           // heap-copied type-parameter names
+	usz tp_count;
+}
+
 // ── Workspace index ────────────────────────────────────────────────
 
 struct WorkspaceIndex {
@@ -87,6 +99,7 @@ struct WorkspaceIndex {
 	HashMap{String, uint} class_mod_flags;           // class name -> mod_flags of CLASS_DECL (MOD_ENUM, MOD_DATA, MOD_VALUE, etc.)
 	HashMap{String, List{String}} class_type_params; // class name -> generic type parameter names (e.g. MappedStream -> [K, V])
 	HashMap{String, AstCacheEntry} ast_cache; // uri -> cached (content, ParseResult) for cross-file lookups
+	HashMap{String, TypealiasInfo} typealiases; // alias name -> indexed typealias decl (Kotlin spec §11.1.5)
 	List{String} ext_cache_keys;                     // heap-allocated keys for extension entries
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
@@ -103,6 +116,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.class_mod_flags.init(mem);
 	self.class_type_params.init(mem);
 	self.ast_cache.init(mem);
+	self.typealiases.init(mem);
 	self.ext_cache_keys.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
@@ -224,6 +238,18 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		}
 	};
 	self.ast_cache.free();
+
+	// Free typealias entries: name + aliased_type_text + tp_names are heap-copied.
+	@pool() {
+		foreach (&info : self.typealiases.tvalues()) {
+			if (info.name.len > 0) mem::free(info.name.ptr);
+			if (info.aliased_type_text.len > 0) mem::free(info.aliased_type_text.ptr);
+			for (usz i = 0; i < info.tp_count; i++) {
+				if (info.tp_names[i].len > 0) mem::free(info.tp_names[i].ptr);
+			}
+		}
+	};
+	self.typealiases.free();
 
 	self.classpath.free();
 	self.dep_index.free();
@@ -856,6 +882,59 @@ fn void WorkspaceIndex.cache_ast(WorkspaceIndex* self, String uri, String conten
 
 	AstCacheEntry entry = { .content = content_copy, .pr = pr };
 	self.ast_cache.set(uri, entry);
+
+	// Index top-level TYPEALIAS_DECLs into the workspace alias map
+	// (Kotlin spec §11.1.5). Cross-file resolvers walk this for
+	// transparent member access through aliases declared in other files.
+	self.index_typealiases(pr);
+}
+
+/**
+ * Walk the parsed file looking for top-level TYPEALIAS_DECL nodes;
+ * record each as a TypealiasInfo in self.typealiases. Last-write-wins
+ * on duplicate names (alias names are global per Kotlin spec §11.1.5).
+ */
+fn void WorkspaceIndex.index_typealiases(WorkspaceIndex* self, ParseResult* pr) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != TYPEALIAS_DECL) continue;
+		if (n.name.len == 0 || n.type_text.len == 0) continue;
+		// Skip nested typealiases (only top-level supported)
+		if (n.parent < pr.node_count) {
+			NodeKind pk = pr.nodes[n.parent].kind;
+			if (pk == CLASS_DECL || pk == INTERFACE_DECL || pk == OBJECT_DECL) continue;
+		}
+
+		// Free old entry if re-indexing
+		if (try old = self.typealiases.get_ref(n.name)) {
+			if (old.name.len > 0) mem::free(old.name.ptr);
+			if (old.aliased_type_text.len > 0) mem::free(old.aliased_type_text.ptr);
+			for (usz k = 0; k < old.tp_count; k++) {
+				if (old.tp_names[k].len > 0) mem::free(old.tp_names[k].ptr);
+			}
+		}
+
+		TypealiasInfo info = {
+			.name = n.name.copy(mem),
+			.aliased_type_text = n.type_text.copy(mem),
+			.tp_count = 0,
+		};
+		// Collect TYPE_PARAM children
+		for (uint k = 0; k < pr.node_count && info.tp_count < 8; k++) {
+			if (pr.nodes[k].parent != i) continue;
+			if (pr.nodes[k].kind != TYPE_PARAM) continue;
+			if (pr.nodes[k].name.len == 0) continue;
+			info.tp_names[info.tp_count++] = pr.nodes[k].name.copy(mem);
+		}
+		self.typealiases.set(info.name, info);
+	}
+}
+
+/**
+ * Look up an indexed typealias by name. Returns null on miss.
+ */
+fn TypealiasInfo* WorkspaceIndex.lookup_typealias(WorkspaceIndex* self, String name) {
+	return self.typealiases.get_ref(name) ?? null;
 }
 
 /**
