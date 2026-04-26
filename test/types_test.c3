@@ -3985,3 +3985,200 @@ fn void in_file_member_function_dot_resolves_type() @test {
 		assert(t == "Int", "in-file member fn resolves; got '%s'", t);
 	};
 }
+
+// ── Member-property smart cast ─────────────────────────────────────
+
+fn void member_prop_smart_cast_null_check_narrows() @test {
+	@pool() {
+		// `if (b.x != null) { val s = b.x }` — `b.x` should narrow String? -> String.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "member-prop smart cast on val ctor param; got '%s'", t);
+	};
+}
+
+fn void member_prop_smart_cast_is_check_narrows() @test {
+	@pool() {
+		// `if (b.x is String) { val s = b.x }` — narrows to String.
+		String src =
+			`class Box(val x: Any)
+			fun test(b: Box) {
+				if (b.x is String) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "member-prop is-check narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_var_does_not_narrow() @test {
+	@pool() {
+		// Primary-ctor `var x` is unstable — must NOT narrow.
+		String src =
+			`class Box(var x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "ctor-var member must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_open_val_does_not_narrow() @test {
+	@pool() {
+		// `open val x` may be overridden with a custom getter — unstable.
+		String src =
+			`open class Box { open val x: String? = null }
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "open val member must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_val_with_custom_getter_does_not_narrow() @test {
+	@pool() {
+		String src =
+			`class Box {
+				val x: String?
+					get() = if (System.currentTimeMillis() % 2L == 0L) "x" else null
+			}
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "val-with-custom-getter member must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_var_receiver_narrows_in_straight_line() @test {
+	@pool() {
+		// Receiver `b` is a local `var`, but in straight-line flow with no
+		// reassignment between check and use, Kotlin narrows `b.x`.
+		// The fact-kill on `b = ...` (kill_receiver) handles invalidation.
+		String src =
+			`class Box(val x: String?)
+			fun test() {
+				var b: Box = Box("hi")
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "var-receiver member narrows in straight line; got '%s'", t);
+	};
+}
+
+fn void member_prop_kill_on_receiver_reassignment() @test {
+	@pool() {
+		// Reassignment to receiver between check and use must invalidate.
+		// `b.x` should NOT narrow on the second use.
+		String src =
+			`class Box(val x: String?)
+			fun test() {
+				var b: Box = Box("hi")
+				if (b.x != null) {
+					b = Box(null)
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "kill on receiver reassignment; got '%s'", t);
+	};
+}
+
+fn void member_prop_kill_after_receiver_reassignment() @test {
+	@pool() {
+		// Even with a stable val member, a `b = ...` reassignment between
+		// the check and the use must invalidate the fact (we kill all `b.*`
+		// facts). But here `b` is a `val`, so reassignment is impossible —
+		// instead test that the smart cast still works through normal flow.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val a = b.x
+					val c = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(r, "a");
+		uint c_idx = find_decl(r, "c");
+		assert(a_idx > 0 && ti.has_type[a_idx], "found a");
+		assert(c_idx > 0 && ti.has_type[c_idx], "found c");
+		String ta = types::format_type(&ti.node_types[a_idx]);
+		String tc = types::format_type(&ti.node_types[c_idx]);
+		assert(ta == "String", "first use narrows; got '%s'", ta);
+		assert(tc == "String", "second use also narrows; got '%s'", tc);
+	};
+}
+
+fn void member_prop_bang_bang_narrows() @test {
+	@pool() {
+		// `b.x!!` should also produce a non-null fact for subsequent uses.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				b.x!!
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "b.x!! should narrow subsequent b.x; got '%s'", t);
+	};
+}

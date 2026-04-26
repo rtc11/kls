@@ -31,6 +31,7 @@ const usz MAX_FLOW_NODES = cfg::MAX_CFG_NODES;
 struct Fact {
 	uint decl_idx;          // AST decl index this fact constrains (NO_PARENT for "this")
 	String name;            // variable name (used when decl_idx is NO_PARENT)
+	String member_name;     // member access path: "" for bare name, "x" for `b.x`
 	TypeRef narrowed;       // narrowed type
 	bool not_null;          // proven non-null
 	bool occupied;
@@ -75,12 +76,13 @@ fn FlowState bottom_state() {
 	return s;
 }
 
-fn void FlowState.add_fact(FlowState* self, uint decl_idx, String name, TypeRef narrowed, bool not_null) {
-	// Replace existing fact for same decl_idx/name.
+fn void FlowState.add_fact(FlowState* self, uint decl_idx, String name, TypeRef narrowed, bool not_null, String member_name = "") {
+	// Replace existing fact for same decl_idx/name/member.
 	for (uint i = 0; i < self.count; i++) {
 		if (self.facts[i].occupied
 			&& self.facts[i].decl_idx == decl_idx
-			&& self.facts[i].name == name) {
+			&& self.facts[i].name == name
+			&& self.facts[i].member_name == member_name) {
 			self.facts[i].narrowed = narrowed;
 			self.facts[i].not_null = self.facts[i].not_null || not_null;
 			return;
@@ -90,6 +92,7 @@ fn void FlowState.add_fact(FlowState* self, uint decl_idx, String name, TypeRef 
 	self.facts[self.count] = {
 		.decl_idx = decl_idx,
 		.name = name,
+		.member_name = member_name,
 		.narrowed = narrowed,
 		.not_null = not_null,
 		.occupied = true
@@ -97,7 +100,22 @@ fn void FlowState.add_fact(FlowState* self, uint decl_idx, String name, TypeRef 
 	self.count++;
 }
 
-fn void FlowState.kill_name(FlowState* self, String name) {
+fn void FlowState.kill_name(FlowState* self, String name, String member_name = "") {
+	for (uint i = 0; i < self.count; i++) {
+		if (self.facts[i].occupied
+			&& self.facts[i].name == name
+			&& self.facts[i].member_name == member_name) {
+			self.facts[i].occupied = false;
+		}
+	}
+}
+
+/**
+ * Kill ALL facts that mention `name` as the receiver (i.e. any `name.*`
+ * member fact) plus the bare-name fact. Used when `name` itself is
+ * reassigned — we lose all knowledge of its members too.
+ */
+fn void FlowState.kill_receiver(FlowState* self, String name) {
 	for (uint i = 0; i < self.count; i++) {
 		if (self.facts[i].occupied && self.facts[i].name == name) {
 			self.facts[i].occupied = false;
@@ -106,12 +124,15 @@ fn void FlowState.kill_name(FlowState* self, String name) {
 }
 
 /**
- * Look up a fact by name (preferred) or decl_idx. Returns null if absent.
+ * Look up a fact by (name, member_name). Returns null if absent.
+ * member_name = "" for bare-name facts (default).
  */
-fn Fact* FlowState.lookup(FlowState* self, String name) {
+fn Fact* FlowState.lookup(FlowState* self, String name, String member_name = "") {
 	if (self.unreachable || self.top) return null;
 	for (uint i = 0; i < self.count; i++) {
-		if (self.facts[i].occupied && self.facts[i].name == name) {
+		if (self.facts[i].occupied
+			&& self.facts[i].name == name
+			&& self.facts[i].member_name == member_name) {
 			return &self.facts[i];
 		}
 	}
@@ -250,6 +271,49 @@ fn String name_of_expr(ParseResult* pr, uint expr_idx) {
 }
 
 /**
+ * Try to extract a single-level member access path from `expr_idx`.
+ * On success returns true and sets *out_recv (e.g. "b") and *out_member
+ * (e.g. "x"). Recognises `b.x` (DOT_EXPR with NAME_EXPR receiver) and
+ * `this.x` (DOT_EXPR with THIS_EXPR receiver, recv = "this").
+ *
+ * Bare names produce *out_recv = name, *out_member = "" — distinguishing
+ * via empty member_name preserves single-key behaviour for callers that
+ * don't yet care about members.
+ *
+ * Multi-level access (`a.b.c`) is NOT decoded — returns false. Member
+ * smart casts only narrow at one level for now.
+ */
+fn bool dotted_name_of_expr(ParseResult* pr, uint expr_idx, String* out_recv, String* out_member) {
+	*out_recv = "";
+	*out_member = "";
+	if (expr_idx >= pr.node_count) return false;
+	AstNode* n = &pr.nodes[expr_idx];
+	if (n.kind == PAREN_EXPR) {
+		return dotted_name_of_expr(pr, first_child(pr, expr_idx), out_recv, out_member);
+	}
+	if (n.kind == NAME_EXPR) {
+		*out_recv = n.name;
+		return true;
+	}
+	if (n.kind == THIS_EXPR) {
+		*out_recv = "this";
+		return true;
+	}
+	if (n.kind == DOT_EXPR) {
+		if (n.name.len == 0) return false;
+		// Receiver is the first child; must itself be a bare name.
+		uint recv = first_child(pr, expr_idx);
+		if (recv == ast::NO_PARENT) return false;
+		String recv_name = name_of_expr(pr, recv);
+		if (recv_name.len == 0) return false;
+		*out_recv = recv_name;
+		*out_member = n.name;
+		return true;
+	}
+	return false;
+}
+
+/**
  * Check if `expr_idx` is a LITERAL_EXPR null.
  */
 fn bool is_null_literal(ParseResult* pr, uint expr_idx) {
@@ -264,38 +328,57 @@ fn bool is_null_literal(ParseResult* pr, uint expr_idx) {
  * Try to extract an `is`/`!is` check on a name. Sets *out_name and
  * *out_type_text. Returns "is" or "!is" or "" when not a type check.
  * Handles the (negated, original) shape transparently — caller XORs.
+ *
+ * Also accepts member-access subjects (`b.x is T`) — `*out_member`
+ * is set to the member name when present, "" for bare-name subjects.
  */
-fn String parse_type_check(ParseResult* pr, uint expr_idx, String* out_name, String* out_type_text) {
+fn String parse_type_check(ParseResult* pr, uint expr_idx, String* out_name, String* out_type_text, String* out_member = null) {
+	String dummy;
+	if (out_member == null) out_member = &dummy;
+	*out_member = "";
 	if (expr_idx >= pr.node_count) return "";
 	AstNode* n = &pr.nodes[expr_idx];
 	if (n.kind != TYPE_CHECK_EXPR) return "";
 	uint subj_idx = first_child(pr, expr_idx);
-	String subj = name_of_expr(pr, subj_idx);
+	String subj;
+	String mem;
+	if (!dotted_name_of_expr(pr, subj_idx, &subj, &mem)) return "";
 	if (subj.len == 0) return "";
 	*out_name = subj;
+	*out_member = mem;
 	*out_type_text = n.type_text;
 	return n.extra_text;
 }
 
 /**
  * Try to extract a null comparison: returns "==null", "!=null", or "".
- * On match, sets *out_name to the variable being compared.
+ * On match, sets *out_name to the variable being compared and *out_member
+ * to its member-access suffix (or "" for bare names).
  */
-fn String parse_null_check(ParseResult* pr, uint expr_idx, String* out_name) {
+fn String parse_null_check(ParseResult* pr, uint expr_idx, String* out_name, String* out_member = null) {
+	String dummy;
+	if (out_member == null) out_member = &dummy;
+	*out_member = "";
 	if (expr_idx >= pr.node_count) return "";
 	AstNode* n = &pr.nodes[expr_idx];
 	if (n.kind != BINARY_EXPR) return "";
 	if (n.extra_text != "==" && n.extra_text != "!=") return "";
 	uint l = first_child(pr, expr_idx);
 	uint r = nth_child(pr, expr_idx, 1);
-	String lname = name_of_expr(pr, l);
-	String rname = name_of_expr(pr, r);
-	if (lname.len > 0 && is_null_literal(pr, r)) {
+	String lname;
+	String lmem;
+	String rname;
+	String rmem;
+	bool l_ok = dotted_name_of_expr(pr, l, &lname, &lmem);
+	bool r_ok = dotted_name_of_expr(pr, r, &rname, &rmem);
+	if (l_ok && lname.len > 0 && is_null_literal(pr, r)) {
 		*out_name = lname;
+		*out_member = lmem;
 		return n.extra_text == "==" ? "==null" : "!=null";
 	}
-	if (rname.len > 0 && is_null_literal(pr, l)) {
+	if (r_ok && rname.len > 0 && is_null_literal(pr, l)) {
 		*out_name = rname;
+		*out_member = rmem;
 		return n.extra_text == "==" ? "==null" : "!=null";
 	}
 	return "";
@@ -339,22 +422,23 @@ fn void apply_cond_facts(ParseResult* pr, uint cond_idx, FlowState* true_out, Fl
 	AstNode* n = &pr.nodes[idx];
 
 	String name;
+	String member;
 	String type_text;
-	String op = parse_type_check(pr, idx, &name, &type_text);
+	String op = parse_type_check(pr, idx, &name, &type_text, &member);
 	if (op.len > 0) {
 		bool is_pos = op == "is";
 		if (negated) is_pos = !is_pos;
 		TypeRef t = types::parse_type_text(type_text);
 		if (is_pos) {
-			true_out.add_fact(ast::NO_PARENT, name, t, !t.nullable);
+			true_out.add_fact(ast::NO_PARENT, name, t, !t.nullable, member);
 			// false branch: we don't model "not T" narrowing
 		} else {
-			false_out.add_fact(ast::NO_PARENT, name, t, !t.nullable);
+			false_out.add_fact(ast::NO_PARENT, name, t, !t.nullable, member);
 		}
 		return;
 	}
 
-	String null_op = parse_null_check(pr, idx, &name);
+	String null_op = parse_null_check(pr, idx, &name, &member);
 	if (null_op.len > 0) {
 		bool is_eq = null_op == "==null";
 		if (negated) is_eq = !is_eq;
@@ -363,10 +447,10 @@ fn void apply_cond_facts(ParseResult* pr, uint cond_idx, FlowState* true_out, Fl
 		TypeRef nn = types::TYPE_UNKNOWN;
 		if (is_eq) {
 			// `x == null`: false-branch proves x not-null
-			false_out.add_fact(ast::NO_PARENT, name, nn, true);
+			false_out.add_fact(ast::NO_PARENT, name, nn, true, member);
 		} else {
 			// `x != null`: true-branch proves x not-null
-			true_out.add_fact(ast::NO_PARENT, name, nn, true);
+			true_out.add_fact(ast::NO_PARENT, name, nn, true, member);
 		}
 		return;
 	}
@@ -568,20 +652,30 @@ fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
 
 	switch (n.kind) {
 		case ASSIGNMENT_EXPR:
-			// LHS is first child; if NAME_EXPR, kill facts.
+			// LHS is first child. If bare NAME_EXPR, kill all facts about
+			// it (including any member facts — `b = ...` invalidates `b.x`).
+			// If `b.x = ...`, kill only the `b.x` fact.
 			uint lhs = first_child(pr, idx);
-			String lname = name_of_expr(pr, lhs);
-			if (lname.len > 0) state.kill_name(lname);
+			String lname;
+			String lmem;
+			if (dotted_name_of_expr(pr, lhs, &lname, &lmem) && lname.len > 0) {
+				if (lmem.len == 0) {
+					state.kill_receiver(lname);
+				} else {
+					state.kill_name(lname, lmem);
+				}
+			}
 			// Continue scanning RHS.
 			break;
 
 		case POSTFIX_EXPR:
 			if (n.extra_text == "!!") {
 				uint inner = first_child(pr, idx);
-				String name = name_of_expr(pr, inner);
-				if (name.len > 0) {
+				String name;
+				String mem;
+				if (dotted_name_of_expr(pr, inner, &name, &mem) && name.len > 0) {
 					TypeRef nn = types::TYPE_UNKNOWN;
-					state.add_fact(ast::NO_PARENT, name, nn, true);
+					state.add_fact(ast::NO_PARENT, name, nn, true, mem);
 				}
 			}
 			break;
@@ -597,10 +691,11 @@ fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
 						|| rn.kind == THROW_EXPR
 						|| (rn.kind == BLOCK && block_diverges(pr, r));
 					if (diverges) {
-						String lname = name_of_expr(pr, l);
-						if (lname.len > 0) {
+						String lname;
+						String lmem;
+						if (dotted_name_of_expr(pr, l, &lname, &lmem) && lname.len > 0) {
 							TypeRef nn = types::TYPE_UNKNOWN;
-							state.add_fact(ast::NO_PARENT, lname, nn, true);
+							state.add_fact(ast::NO_PARENT, lname, nn, true, lmem);
 						}
 					}
 				}
@@ -911,12 +1006,12 @@ fn FlowState transfer(ParseResult* pr, Cfg* cfg, uint cfg_idx, FlowState* in_s) 
  * Walks up the AST to find the enclosing CFG-mapped node and reads
  * its IN-state. Returns null if no fact applies.
  */
-fn Fact* FlowAnalysis.fact_at(FlowAnalysis* self, ParseResult* pr, Cfg* cfg, uint ast_idx, String name) {
+fn Fact* FlowAnalysis.fact_at(FlowAnalysis* self, ParseResult* pr, Cfg* cfg, uint ast_idx, String name, String member_name = "") {
 	uint cur = ast_idx;
 	while (cur != ast::NO_PARENT && cur < pr.node_count) {
 		uint cfg_idx = cfg.cfg_node_for(cur);
 		if (cfg_idx != cfg::NO_CFG) {
-			return self.in_state[cfg_idx].lookup(name);
+			return self.in_state[cfg_idx].lookup(name, member_name);
 		}
 		cur = pr.nodes[cur].parent;
 	}

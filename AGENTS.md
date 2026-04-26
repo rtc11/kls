@@ -190,10 +190,13 @@ kls/
 **Dataflow** (`kotlin/flow.c3`): Worklist solver over the CFG with `FlowState` carrying up to `MAX_FACTS_PER_STATE` per-name `Fact`s. Transfer functions extract narrowing facts from `x is T` / `x !is T` / `x == null` / `x != null` (with conjunction/disjunction support), `x!!`, `requireNotNull(x)`, `x ?: return …`. Meet-over-paths fixpoint with TOP/BOTTOM lattice. `analyze_with_entry(pr, cfg, initial)` seeds the entry state from a caller-supplied snapshot — used to inherit enclosing-function facts into nested lambda CFGs at the lambda's lexical position so labeled-return null guards propagate across lambda boundaries.
 
 **Wiring** (`kotlin/types.c3`): Phase 9 of `resolve_types` calls `build_function_flows` to construct one `FunctionFlow {cfg, fa}` per function-like decl plus an `enclosing_func` map for every AST node. Phase 10 clears NAME_EXPR/DOT_EXPR `has_type` bits and re-runs expression + initializer + destructuring resolution so val/var bindings see narrowed types. `resolve_name_expr_type` calls `lookup_smart_cast_fact` then applies the **stability gate** (`is_stable_for_smart_cast`):
-- PARAM and local val are always stable.
+- Function PARAM and primary-ctor `val` PARAM are stable. Primary-ctor `var` PARAM (PARAM with MOD_VAR) is treated as a member var → unstable.
+- Local val is always stable.
 - Local var is stable only when the use site is in the same function as the declaration (i.e. not captured by a nested lambda).
 - Top-level / member val is stable iff: not `var`, not `open`, AND no custom `get()` accessor (`property_has_custom_getter` checks for a FUN_DECL child named "get"). Top-level var is never stable.
 - Cross-file member-property smart casts also depend on `b.x` resolving to a type, which goes through the workspace member-resolution path; in-file bare-name access to top-level vals already narrows.
+
+**Member-property smart cast** (`kotlin/types.c3:resolve_dot_expr_type` + `kotlin/flow.c3`): `b.x` and `this.x` narrow via flow facts keyed by `(receiver_name, member_name)` tuple. `Fact.member_name` is empty for bare-name facts (legacy single-key behaviour). `dotted_name_of_expr` recognises NAME_EXPR / THIS_EXPR / one-level DOT_EXPR — multi-level (`a.b.c`) is not narrowed. `kill_receiver(name)` invalidates all `name.*` member facts on receiver reassignment. `member_access_is_stable` requires both receiver decl AND member decl to pass the stability gate; cross-file members (where in-file class lookup misses) are conservatively denied.
 
 Memory: every `mem::free(*.cached_types)` must be preceded by `types::free_type_info(...)` which calls `clear_flow` to release the per-function `Cfg`/`FlowAnalysis`.
 

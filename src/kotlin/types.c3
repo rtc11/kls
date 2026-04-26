@@ -702,7 +702,7 @@ fn uint compute_enclosing_func(ParseResult* pr, TypeInfo* info, uint idx) {
  * Look up a smart-cast fact for `name` at AST node `use_idx`. Returns
  * null if no flow analysis covers this node or no fact applies.
  */
-fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_idx, String name) {
+fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_idx, String name, String member_name = "") {
 	if (use_idx >= ast::MAX_NODES) return null;
 	uint func_idx = info.enclosing_func[use_idx];
 	if (func_idx == ast::NO_PARENT) return null;
@@ -710,7 +710,7 @@ fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_
 	if (slot == uint.max) return null;
 	FunctionFlow* ff = &info.func_flows[slot];
 	if (ff.fa == null) return null;
-	return ff.fa.fact_at(pr, ff.cfg, use_idx, name);
+	return ff.fa.fact_at(pr, ff.cfg, use_idx, name, member_name);
 }
 
 /**
@@ -741,7 +741,13 @@ fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_
 fn bool is_stable_for_smart_cast(ParseResult* pr, TypeInfo* info, uint decl_idx, uint use_idx) {
 	if (decl_idx >= pr.node_count) return false;
 	AstNode* decl = &pr.nodes[decl_idx];
-	if (decl.kind == PARAM) return true;
+	if (decl.kind == PARAM) {
+		// Primary-ctor `var` params are members and behave like member vars
+		// (unstable). All other PARAM uses (function params, primary-ctor
+		// `val`, plain ctor params) are effective val and stable.
+		bool ctor_var = (decl.mod_flags & ast::MOD_VAR) != 0;
+		return !ctor_var;
+	}
 	if (decl.kind != PROPERTY_DECL) return false;
 
 	bool is_var = (decl.mod_flags & ast::MOD_VAR) != 0;
@@ -2019,9 +2025,11 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
 	// Find receiver (first child)
+	uint recv_idx = ast::NO_PARENT;
 	TypeRef receiver_type = TYPE_UNKNOWN;
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent == idx) {
+			recv_idx = j;
 			if (info.has_type[j]) {
 				receiver_type = info.node_types[j];
 			}
@@ -2031,6 +2039,40 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 
 	if (receiver_type.kind == UNKNOWN) return TYPE_UNKNOWN;
 
+	// Compute the base member type via the existing dispatch chain.
+	TypeRef base = resolve_dot_expr_member_type(pr, info, idx, node, receiver_type);
+	if (base.kind == UNKNOWN) return base;
+
+	// Flow-sensitive smart cast (member-property): if the receiver is a
+	// bare NAME_EXPR (or THIS_EXPR) and a flow fact narrows `recv.member`,
+	// apply it — but only when both receiver and member are stable.
+	if (recv_idx != ast::NO_PARENT) {
+		AstNode* rn = &pr.nodes[recv_idx];
+		bool recv_simple = rn.kind == NAME_EXPR || rn.kind == THIS_EXPR;
+		if (recv_simple) {
+			String recv_name = rn.kind == THIS_EXPR ? "this" : rn.name;
+			if (recv_name.len > 0) {
+				flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, recv_name, node.name);
+				if (fact != null && member_access_is_stable(pr, info, recv_idx, recv_name, receiver_type, node.name)) {
+					if (fact.narrowed.kind != UNKNOWN) {
+						return fact.narrowed;
+					}
+					if (fact.not_null && base.nullable) {
+						base.nullable = false;
+					}
+				}
+			}
+		}
+	}
+	return base;
+}
+
+/**
+ * Compute the member type of `recv.member` ignoring flow facts. Pulled
+ * out of `resolve_dot_expr_type` so the entry point can wrap with the
+ * smart-cast lookup + stability gate.
+ */
+fn TypeRef resolve_dot_expr_member_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node, TypeRef receiver_type) {
 	// Try hardcoded stdlib member resolution first
 	TypeRef result = resolve_member_type(receiver_type, node.name);
 	if (result.kind != UNKNOWN) {
@@ -2060,17 +2102,72 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 
 	// Cross-file: look up member from workspace member_cache
 	if (g_workspace != null) {
-		result = resolve_workspace_member_type(receiver_type, node.name);
-		if (result.kind != UNKNOWN) return result;
+		TypeRef ws = resolve_workspace_member_type(receiver_type, node.name);
+		if (ws.kind != UNKNOWN) return ws;
 
 		// Dependency index: look up member by receiver type name
 		if (g_workspace.dep_index.initialized) {
-			result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name, pr);
-			if (result.kind != UNKNOWN) return result;
+			TypeRef dep = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name, pr);
+			if (dep.kind != UNKNOWN) return dep;
 		}
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * Stability gate for a member access `recv.member`. Both halves must be
+ * stable for the smart cast to apply.
+ *
+ * Receiver stability: walk the receiver's NAME_EXPR scope chain to find
+ * its declaration, apply the existing single-decl gate. THIS_EXPR is
+ * always stable (this-reference can't be reassigned).
+ *
+ * Member stability: prefer the in-file class member if we can find it,
+ * apply the existing gate. Cross-file members are conservatively
+ * assumed unstable (no direct access to workspace decl AST here).
+ */
+fn bool member_access_is_stable(ParseResult* pr, TypeInfo* info, uint recv_idx, String recv_name,
+		TypeRef receiver_type, String member_name) {
+	if (recv_idx >= pr.node_count) return false;
+
+	// Receiver side
+	AstNode* rn = &pr.nodes[recv_idx];
+	if (rn.kind != THIS_EXPR) {
+		uint recv_decl = find_decl_in_scope_chain(pr, recv_idx, recv_name);
+		if (recv_decl == ast::NO_PARENT) return false;
+		if (!is_stable_for_smart_cast(pr, info, recv_decl, recv_idx)) return false;
+	}
+
+	// Member side: locate the in-file class declaration and apply the
+	// gate to the member decl. If we can't find an in-file class for the
+	// receiver type, the member must be cross-file → conservative deny.
+	uint member_decl = ast::NO_PARENT;
+	resolve_in_file_member(pr, receiver_type, member_name, &member_decl);
+	if (member_decl == ast::NO_PARENT) return false;
+	return is_stable_for_smart_cast(pr, info, member_decl, recv_idx);
+}
+
+/**
+ * Find a binding for `name` reachable from `use_idx`'s scope chain.
+ * Returns the AST decl idx, or ast::NO_PARENT if unresolved.
+ */
+fn uint find_decl_in_scope_chain(ParseResult* pr, uint use_idx, String name) {
+	uint scope_idx = find_innermost_scope(pr, use_idx);
+	uint current = scope_idx;
+	while (true) {
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* candidate = &pr.nodes[j];
+			if (candidate.parent != current) continue;
+			if (!is_typed_declaration(candidate.kind)) continue;
+			if (candidate.name != name) continue;
+			return j;
+		}
+		AstNode* scope = &pr.nodes[current];
+		if (current == 0 || scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+	return ast::NO_PARENT;
 }
 
 // ── In-file extension function resolution ──────────────────────────
@@ -2124,8 +2221,12 @@ fn TypeRef resolve_in_file_extension(ParseResult* pr, TypeInfo* info, TypeRef re
  * Returns TYPE_UNKNOWN if no match. Does not walk supertypes (workspace path
  * handles that for cross-file; in-file supertype walk falls through to the
  * workspace path which already handles the current file when indexed).
+ *
+ * If `out_decl_idx` is non-null, sets it to the matched declaration's AST
+ * index (for downstream stability-gate checks). Set to ast::NO_PARENT on miss.
  */
-fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String member_name) {
+fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String member_name, uint* out_decl_idx = null) {
+	if (out_decl_idx != null) *out_decl_idx = ast::NO_PARENT;
 	String recv_name = receiver.name;
 	if (recv_name.len == 0 || member_name.len == 0) return TYPE_UNKNOWN;
 
@@ -2143,6 +2244,7 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 			switch (child.kind) {
 				case PROPERTY_DECL:
 				case FUN_DECL:
+					if (out_decl_idx != null) *out_decl_idx = j;
 					if (child.type_text.len > 0) {
 						return parse_type_text(child.type_text);
 					}
@@ -2152,6 +2254,7 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 					// Primary-ctor val/var only — plain params aren't members
 					uint mods = child.mod_flags;
 					if ((mods & ast::MOD_FINAL) == 0 && (mods & ast::MOD_VAR) == 0) continue;
+					if (out_decl_idx != null) *out_decl_idx = j;
 					if (child.type_text.len > 0) {
 						return parse_type_text(child.type_text);
 					}
