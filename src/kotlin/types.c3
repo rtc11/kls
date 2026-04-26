@@ -1369,6 +1369,69 @@ fn TypeRef resolve_object_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 	return TYPE_UNKNOWN;
 }
 
+/**
+ * Look up a member declared in an anonymous object body (Kotlin spec §16.6).
+ * Walks recv_idx → its declaration → if the declaration's initializer
+ * (or RHS) is an OBJECT_EXPR, scans that object's PROPERTY_DECL/FUN_DECL
+ * children for `member_name`. Returns the declared type or UNKNOWN.
+ *
+ * Body decls win over supertype members so this is invoked BEFORE the
+ * normal supertype/cascade resolution in resolve_dot_expr_type.
+ */
+fn TypeRef resolve_anon_object_member(ParseResult* pr, TypeInfo* info, uint recv_idx, String member_name) {
+	if (recv_idx >= pr.node_count) return TYPE_UNKNOWN;
+	if (member_name.len == 0) return TYPE_UNKNOWN;
+
+	// Locate the OBJECT_EXPR that backs the receiver.
+	uint obj_idx = ast::NO_PARENT;
+	AstNode* rn = &pr.nodes[recv_idx];
+	if (rn.kind == OBJECT_EXPR) {
+		obj_idx = recv_idx;
+	} else if (rn.kind == NAME_EXPR && rn.name.len > 0) {
+		// Find decl in scope chain (similar to resolve_name_expr_type but
+		// kept lightweight: linear scan + look at initializer expression).
+		String name = rn.name;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* d = &pr.nodes[j];
+			if (d.kind != PROPERTY_DECL) continue;
+			if (d.name != name) continue;
+			// Find first child that is an expression — the initializer
+			// (skipping TYPE_REF / accessor children).
+			for (uint k = d.children_start; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				NodeKind kk = pr.nodes[k].kind;
+				if (kk == TYPE_REF) continue;
+				if (kk == OBJECT_EXPR) {
+					obj_idx = k;
+				}
+				break;
+			}
+			if (obj_idx != ast::NO_PARENT) break;
+		}
+	}
+	if (obj_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	// Scan OBJECT_EXPR direct children for matching PROPERTY_DECL / FUN_DECL.
+	for (uint k = pr.nodes[obj_idx].children_start; k < pr.node_count; k++) {
+		if (pr.nodes[k].parent != obj_idx) continue;
+		AstNode* m = &pr.nodes[k];
+		if (m.name != member_name) continue;
+		switch (m.kind) {
+			case PROPERTY_DECL:
+				if (m.type_text.len > 0) return parse_type_text(m.type_text);
+				// Fall back to inferred type if previously resolved
+				if (info.has_type[k]) return info.node_types[k];
+				return TYPE_UNKNOWN;
+			case FUN_DECL:
+				if (m.type_text.len > 0) return parse_type_text(m.type_text);
+				return TYPE_UNIT;
+			default:
+				continue;
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
 // ── Name expression resolution ─────────────────────────────────────
 
 fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
@@ -2991,6 +3054,16 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 			}
 			break;
 		}
+	}
+
+	// Anonymous object body member access (Kotlin spec §16.6): when the
+	// receiver is bound (directly or via a local val) to an OBJECT_EXPR,
+	// scan its body declarations for the member. Body decls take
+	// precedence over supertype members and are accessible even when the
+	// object has no declared supertype (receiver_type == UNKNOWN).
+	if (recv_idx != ast::NO_PARENT) {
+		TypeRef body_t = resolve_anon_object_member(pr, info, recv_idx, node.name);
+		if (body_t.kind != UNKNOWN) return body_t;
 	}
 
 	if (receiver_type.kind == UNKNOWN) return TYPE_UNKNOWN;

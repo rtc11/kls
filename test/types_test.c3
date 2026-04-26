@@ -6211,3 +6211,64 @@ fun main() {
 		assert(v_idx != 0 && vt == "Int", "v: Int (V→Int via use site), got '%s'", vt);
 	};
 }
+
+// ── Anonymous object body members ─────────────────────────────────
+
+fn void object_expr_body_property() @test {
+	// `val o = object { val x: Int = 1 }; o.x` — body property must
+	// be accessible (Kotlin spec §16.6 anonymous object).
+	@pool() {
+		String src = `fun main() {
+	val o = object { val x: Int = 1 }
+	val n = o.x
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (object body x), got '%s'", t);
+	};
+}
+
+fn void object_expr_body_function() @test {
+	// `val o = object { fun greet(): String = "hi" }; o.greet()`
+	@pool() {
+		String src = `fun main() {
+	val o = object { fun greet(): String = "hi" }
+	val s = o.greet()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint s_idx = find_decl(pr, "s");
+		String t = s_idx > 0 && ti.has_type[s_idx] ? types::format_type(&ti.node_types[s_idx]) : "<no>";
+		assert(s_idx != 0 && t == "String", "s: String (object body greet), got '%s'", t);
+	};
+}
+
+fn void object_expr_body_with_supertype() @test {
+	// Body member shadows / extends supertype — own body decl wins.
+	@pool() {
+		String src = `interface Greeter { fun greet(): String }
+fun main() {
+	val o = object : Greeter {
+		override fun greet(): String = "hi"
+		val extra: Int = 42
+	}
+	val e = o.extra
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint e_idx = find_decl(pr, "e");
+		String t = e_idx > 0 && ti.has_type[e_idx] ? types::format_type(&ti.node_types[e_idx]) : "<no>";
+		assert(e_idx != 0 && t == "Int", "e: Int (own body 'extra' beyond supertype), got '%s'", t);
+	};
+}
