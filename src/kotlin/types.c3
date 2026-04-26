@@ -1827,14 +1827,25 @@ fn uint count_call_args(ParseResult* pr, uint call_idx, String callee_name) {
 fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
-	// Check for well-known constructor/factory calls
-	TypeRef known = resolve_known_call(node.name);
-	if (known.kind != UNKNOWN) {
-		// Try to infer type arguments from call arguments
-		if (known.kind == GENERIC && known.type_arg_count == 0) {
-			known = infer_generic_args_from_call(pr, info, idx, known);
+	// Check for well-known constructor/factory calls. User-defined class with
+	// same name shadows stdlib (Kotlin spec §16.10 scope resolution); skip
+	// stdlib short-circuit so the constructor branch can run with proper
+	// type-argument inference from primary-ctor PARAMs.
+	bool user_class_shadows = false;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* candidate = &pr.nodes[j];
+		if (candidate.kind != CLASS_DECL && candidate.kind != OBJECT_DECL) continue;
+		if (candidate.name == node.name) { user_class_shadows = true; break; }
+	}
+	if (!user_class_shadows) {
+		TypeRef known = resolve_known_call(node.name);
+		if (known.kind != UNKNOWN) {
+			// Try to infer type arguments from call arguments
+			if (known.kind == GENERIC && known.type_arg_count == 0) {
+				known = infer_generic_args_from_call(pr, info, idx, known);
+			}
+			return known;
 		}
-		return known;
 	}
 
 	// `runCatching { ... }` → Result<T> where T = lambda body type.
@@ -1862,12 +1873,42 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 	// Count arguments of this call expression
 	uint call_arg_count = count_call_args(pr, idx, node.name);
 
-	// Search for best FUN_DECL matching this name (prefer param count match)
+	// Method call on a receiver: try in-file member resolution FIRST so user
+	// generic class members get proper type-arg substitution (Box<Int>.get():
+	// Int, not raw T from a top-level FUN_DECL match by bare name).
+	bool is_method_call = false;
+	bool generic_receiver = false;
+	bool method_receiver_known = false;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != idx) continue;
+		if (child.kind == DOT_EXPR && child.name == node.name) { is_method_call = true; break; }
+	}
+	if (is_method_call) {
+		TypeRef receiver_type = find_call_receiver_type(pr, info, idx);
+		if (receiver_type.kind != UNKNOWN && receiver_type.name.len > 0) {
+			method_receiver_known = true;
+			if (receiver_type.kind == GENERIC && receiver_type.type_arg_count > 0) {
+				generic_receiver = true;
+			}
+			TypeRef member_result = resolve_in_file_member(pr, receiver_type, node.name);
+			if (member_result.kind != UNKNOWN) return member_result;
+		}
+	}
+
+	// Search for best FUN_DECL matching this name (prefer param count match).
+	// Skip when this is a method call AND we know the receiver type — the
+	// receiver-based resolution above is authoritative; falling through to a
+	// bare-name FUN_DECL match would lose type-arg substitution (Box<Int>.get()
+	// → raw T) or pick an unrelated same-name member. When the receiver is
+	// unknown (still being typed), fall through and defer — caller's retry
+	// loop will re-resolve once receiver gets typed.
 	uint best_idx = 0;
 	bool found_any = false;
 	bool found_exact = false;
 
-	for (uint j = 0; j < pr.node_count; j++) {
+	bool skip_fun_search = generic_receiver || (is_method_call && !method_receiver_known);
+	if (!skip_fun_search) for (uint j = 0; j < pr.node_count; j++) {
 		AstNode* candidate = &pr.nodes[j];
 		if (candidate.kind != FUN_DECL) continue;
 		if (candidate.name != node.name) continue;
@@ -1904,7 +1945,13 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		if (candidate.kind != CLASS_DECL && candidate.kind != OBJECT_DECL) continue;
 		if (candidate.name != node.name) continue;
 
-		return { .kind = SIMPLE, .name = candidate.name };
+		TypeRef result = { .kind = SIMPLE, .name = candidate.name };
+		// Infer class type-args from primary-ctor PARAM types vs call arg types.
+		// Box<T>(val v: T); Box(42) -> Box<Int>. (Kotlin spec §11.1.7.)
+		if (candidate.kind == CLASS_DECL) {
+			result = infer_class_type_args(pr, info, j, idx, result);
+		}
+		return result;
 	}
 
 	// Cross-file: query workspace for constructor calls and function return types
@@ -2142,6 +2189,75 @@ fn TypeRef nth_call_arg_type(ParseResult* pr, TypeInfo* info, uint call_idx, uin
 		pos++;
 	}
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * Infer class type-arguments at a constructor call site by matching
+ * primary-ctor PARAM types against call arg types (Kotlin spec §11.1.7).
+ *
+ * `class Box<T>(val v: T)`; `Box(42)` → returns `Box<Int>`.
+ *
+ * Strategy: collect the class's TYPE_PARAM names, then walk the primary-ctor
+ * PARAMs (PARAM children of the CLASS_DECL — Kotlin desugars `class Box<T>(val v: T)`
+ * into the class with PARAM children for the primary ctor). For each PARAM whose
+ * type-text equals a TP name (top-level only), bind that TP to the corresponding
+ * positional call-arg type. Promote the result to GENERIC with bound type-args.
+ */
+fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
+		uint class_decl_idx, uint call_idx, TypeRef base) {
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != class_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return base;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint param_pos = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != class_decl_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					subst_names[t] = arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// Build GENERIC TypeRef with type-args (UNKNOWN slot for unbound TPs)
+	TypeRef out = base;
+	out.kind = GENERIC;
+	out.type_arg_count = (uint)tp_count;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) {
+			out.type_arg_names[t] = subst_names[t];
+			out.type_arg_nullable[t] = subst_nullable[t];
+		} else {
+			// Leave the TP name as a placeholder so downstream substitution
+			// can still recognise it. (format_type prints it verbatim.)
+			out.type_arg_names[t] = tp_names[t];
+			out.type_arg_nullable[t] = false;
+		}
+	}
+	return out;
 }
 
 /**
@@ -2672,7 +2788,8 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 				case FUN_DECL:
 					if (out_decl_idx != null) *out_decl_idx = j;
 					if (child.type_text.len > 0) {
-						return parse_type_text(child.type_text);
+						TypeRef declared = parse_type_text(child.type_text);
+						return substitute_class_type_params(pr, i, receiver, declared);
 					}
 					if (child.kind == FUN_DECL) return TYPE_UNIT;
 					return TYPE_UNKNOWN;
@@ -2682,15 +2799,87 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 					if ((mods & ast::MOD_FINAL) == 0 && (mods & ast::MOD_VAR) == 0) continue;
 					if (out_decl_idx != null) *out_decl_idx = j;
 					if (child.type_text.len > 0) {
-						return parse_type_text(child.type_text);
+						TypeRef declared = parse_type_text(child.type_text);
+						return substitute_class_type_params(pr, i, receiver, declared);
 					}
 					return TYPE_UNKNOWN;
 				default:
 					continue;
 			}
 		}
+
+		// Companion-object members: `Foo.member` resolves to `Foo.Companion.member`
+		// (Kotlin spec §11.4.4 companion-object access). Walk OBJECT_DECL children
+		// of this class with MOD_COMPANION (or named "Companion") and search them.
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != i) continue;
+			AstNode* comp = &pr.nodes[j];
+			if (comp.kind != OBJECT_DECL) continue;
+			bool is_companion = (comp.mod_flags & ast::MOD_COMPANION) != 0
+				|| comp.name == "Companion" || comp.name.len == 0;
+			if (!is_companion) continue;
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				AstNode* m = &pr.nodes[k];
+				if (m.name != member_name) continue;
+				if (m.kind != PROPERTY_DECL && m.kind != FUN_DECL) continue;
+				if (out_decl_idx != null) *out_decl_idx = k;
+				if (m.type_text.len > 0) return parse_type_text(m.type_text);
+				if (m.kind == FUN_DECL) {
+					// Companion factory `fun new(...): Foo` may have implicit
+					// return type matching the enclosing class — return class-ref
+					// of the enclosing class as a heuristic when type_text empty.
+					return { .kind = SIMPLE, .name = recv_name };
+				}
+				return TYPE_UNKNOWN;
+			}
+		}
 	}
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * Substitute class type-parameters in a member's declared type using the
+ * receiver's bound type-arguments (Kotlin spec §11.1.7 propagation through
+ * member access). For `class Box<T>(val v: T) { fun get(): T }`, given a
+ * receiver `Box<Int>`, substitutes T → Int in the member's return type.
+ *
+ * Mirrors substitute_user_type_params but binds from the receiver's
+ * type_arg_names[] rather than from call-arg positions.
+ */
+fn TypeRef substitute_class_type_params(ParseResult* pr, uint class_decl_idx,
+		TypeRef receiver, TypeRef declared) {
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != class_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return declared;
+
+	TypeRef out = declared;
+	for (usz t = 0; t < tp_count && t < receiver.type_arg_count; t++) {
+		String binding = receiver.type_arg_names[t];
+		bool binding_nullable = receiver.type_arg_nullable[t];
+		// Skip if receiver still carries unbound TP placeholder identical to TP name
+		if (binding == tp_names[t]) continue;
+		if (binding.len == 0) continue;
+		if (out.name == tp_names[t]) {
+			out.name = binding;
+			if (binding_nullable) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = binding;
+				if (binding_nullable) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
 }
 
 // ── Generic type argument propagation helpers ──────────────────────

@@ -5047,3 +5047,78 @@ fn void user_generic_fun_no_substitution_for_concrete_param() @test {
 			"r: String (T inferred from 2nd arg)");
 	};
 }
+
+fn void user_generic_class_constructor_infers_T() @test {
+	@pool() {
+		String src = `class Box<T>(val value: T)
+		fun f() {
+			val b = Box(42)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint b_idx = find_decl(pr, "b");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "Box<Int>",
+			"b: Box<Int>, got '%s'",
+			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_class_fun_member_substitutes_T() @test {
+	@pool() {
+		String src = `class Box<T>(val value: T) {
+			fun get(): T = value
+		}
+		fun f() {
+			val b = Box(42)
+			val v = b.get()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int",
+			"v: Int (T=Int via b.get()), got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_class_val_property_substitutes_T() @test {
+	@pool() {
+		String src = `class Box<T>(val value: T)
+		fun f() {
+			val b = Box("hi")
+			val v = b.value
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "String",
+			"v: String (T=String via b.value), got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_class_two_type_params() @test {
+	@pool() {
+		String src = `class Pair<A, B>(val first: A, val second: B)
+		fun f() {
+			val p = Pair(1, "x")
+			val a = p.first
+			val b = p.second
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint a_idx = find_decl(pr, "a");
+		uint b_idx = find_decl(pr, "b");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int, got '%s'",
+			a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String",
+			"b: String, got '%s'",
+			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
+	};
+}
