@@ -3029,6 +3029,12 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
  * smart-cast lookup + stability gate.
  */
 fn TypeRef resolve_dot_expr_member_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node, TypeRef receiver_type) {
+	// Typealias unwrap (Kotlin spec §11.1.5): `typealias S = String` makes
+	// member access on `S` equivalent to member access on `String`. Done
+	// here too (in addition to lookup_member_anywhere) so the hardcoded
+	// stdlib-member shortcut sees the unwrapped name.
+	receiver_type = unwrap_typealias(pr, receiver_type);
+
 	// Try hardcoded stdlib member resolution first
 	TypeRef result = resolve_member_type(receiver_type, node.name);
 	if (result.kind != UNKNOWN) {
@@ -3059,6 +3065,11 @@ fn TypeRef resolve_dot_expr_member_type(ParseResult* pr, TypeInfo* info, uint id
  * `operator fun plus`/`get`/`invoke`/etc. on a non-stdlib receiver.
  */
 fn TypeRef lookup_member_anywhere(ParseResult* pr, TypeInfo* info, TypeRef receiver_type, String member_name) {
+	// Typealias unwrap (Kotlin spec §11.1.5): `typealias S = String` makes
+	// `S` and `String` member-equivalent. Resolve receiver's name through
+	// any matching TYPEALIAS_DECL before any lookup.
+	receiver_type = unwrap_typealias(pr, receiver_type);
+
 	// In-file extension function resolution
 	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, member_name);
 	if (ext_result.kind != UNKNOWN) return ext_result;
@@ -3080,6 +3091,40 @@ fn TypeRef lookup_member_anywhere(ParseResult* pr, TypeInfo* info, TypeRef recei
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * If `t.name` matches an in-file TYPEALIAS_DECL, return the alias target
+ * type (transitively, with a 16-step cycle guard). Preserves nullability
+ * and is_class_ref. Returns `t` unchanged when no alias matches.
+ *
+ * Type arguments are not substituted — generic typealiases (e.g.
+ * `typealias List2<T> = List<T>`) only work when the alias and target
+ * have parallel type-arg shape; the receiver's type_arg_names are
+ * carried through as-is. Sufficient for simple aliases (`S = String`,
+ * `IntList = List<Int>`).
+ */
+fn TypeRef unwrap_typealias(ParseResult* pr, TypeRef t) {
+	if (t.kind != SIMPLE && t.kind != GENERIC) return t;
+	if (t.name.len == 0) return t;
+	for (uint hops = 0; hops < 16; hops++) {
+		uint matched = ast::NO_PARENT;
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.kind != TYPEALIAS_DECL) continue;
+			if (n.name != t.name) continue;
+			if (n.type_text.len == 0) continue;
+			matched = i;
+			break;
+		}
+		if (matched == ast::NO_PARENT) return t;
+		TypeRef target = parse_type_text(pr.nodes[matched].type_text);
+		// Preserve nullability from receiver and class-ref bit.
+		if (t.nullable) target.nullable = true;
+		if (t.is_class_ref) target.is_class_ref = true;
+		t = target;
+	}
+	return t;
 }
 
 /**

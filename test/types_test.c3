@@ -5922,3 +5922,64 @@ fun main() {
 		assert(c_idx != 0 && t == "Box", "c should be Box (or Box<Int>), got '%s'", t);
 	};
 }
+
+fn void typealias_member_access_via_alias() @test {
+	// `typealias S = String; (s: S).length` resolves to Int via alias unwrap
+	// (Kotlin spec §11.1.5).
+	@pool() {
+		String src = `typealias S = String
+fun main() {
+	val s: S = "hi"
+	val n = s.length
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (typealias String->length), got '%s'", t);
+	};
+}
+
+fn void typealias_chained_unwrap() @test {
+	// Chain of aliases: S2 -> S -> String. 16-step cycle guard kicks in
+	// only on actual cycles, so 2-step chain unwraps fully.
+	@pool() {
+		String src = `typealias S = String
+typealias S2 = S
+fun main() {
+	val x: S2 = "hi"
+	val n = x.length
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (chained alias), got '%s'", t);
+	};
+}
+
+fn void typealias_to_user_class_member() @test {
+	// `typealias B = Box; B().v` member access goes through user class.
+	@pool() {
+		String src = `class Box { val v: Int = 1 }
+typealias B = Box
+fun main() {
+	val b: B = Box()
+	val n = b.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (alias to user class), got '%s'", t);
+	};
+}
