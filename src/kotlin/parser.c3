@@ -15,6 +15,7 @@ struct Parser {
 	ParseResult* result;
 	String last_annotations;  // set by parse_modifiers, read by declaration parsers
 	bool allow_angle_comparison;  // when true, treat < > as comparison in expressions
+	bool in_when_body;            // when true, break expression at newline-`is`/`!is` (Kotlin spec §16.30 entry separator)
 	bool is_script;  // when true, allow top-level statements/expressions (.kts files)
 
 	// User-defined infix function names. Populated by `parse()` from a quick
@@ -2155,13 +2156,19 @@ fn void Parser.parse_when_expr(Parser* self) {
 
 			// Arrow: ->
 			if (self.eat(ARROW)) {
-				// Branch body: block or statement(s)
+				// Branch body: block or statement(s). Set in_when_body so the
+				// expression parser breaks at newline-`is`/`!is` to prevent
+				// the body from consuming the next entry's bare condition
+				// (Kotlin spec §16.30: each branch is separated by newline or `;`).
+				bool save_in_when_body = self.in_when_body;
+				self.in_when_body = true;
 				if (self.at(LCURL)) {
 					self.parse_block();
 				} else if (!self.at(RCURL) && !self.at_eof()) {
 					// Single expression/statement branch
 					self.parse_statement();
 				}
+				self.in_when_body = save_in_when_body;
 			}
 
 			self.adopt_children(entry_idx, entry_children_start);
@@ -2850,6 +2857,11 @@ fn uint Parser.parse_expression(Parser* self, int min_prec) {
 
 		// Handle is/!is and as/as? specially (right side is a type, not expression)
 		if (self.current.kind == KW_IS || self.current.kind == NOT_IS) {
+			// In when-body context, a newline-separated `is`/`!is` starts the
+			// next entry's bare condition — don't consume it as part of this
+			// expression. Comparing token line of `is` to the previous token's
+			// line works because expression parser advances `previous` per token.
+			if (self.in_when_body && self.previous.line < self.current.line) break;
 			left = self.parse_type_check(left);
 			left = self.parse_postfix_chain(left);
 			continue;

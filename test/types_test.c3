@@ -5550,3 +5550,203 @@ fn void cross_file_ext_fn_arg_only_tp() @test {
 			"r: Int (xfile ext fn arg-only TP), got '%s'", tr);
 	};
 }
+
+// ── Audit probes (Kotlin 1.9 spec gaps) ────────────────────────────
+
+fn void probe_typealias_resolves_to_aliased_type() @test {
+	// Kotlin spec §9.5: typealias should make `Name` refer to the aliased type.
+	@pool() {
+		String src = `typealias UserId = Int
+fun main() {
+	val id: UserId = 42
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint id_idx = find_decl(pr, "id");
+		String t = id_idx > 0 && ti.has_type[id_idx] ? types::format_type(&ti.node_types[id_idx]) : "<no>";
+		// Either "Int" (resolved) or "UserId" (alias preserved) is reasonable;
+		// but format must not be "<no>" / UNKNOWN.
+		assert(id_idx != 0 && ti.has_type[id_idx] && (t == "Int" || t == "UserId"),
+			"id: Int or UserId, got '%s'", t);
+	};
+}
+
+fn void probe_class_delegation_inherits_member() @test {
+	// `class A(b: B) : I by b` should expose I's members on A instances.
+	@pool() {
+		String src = `interface Greeter { fun greet(): String }
+class Impl : Greeter { override fun greet(): String = "hi" }
+class Wrapper(g: Greeter) : Greeter by g
+fun main() {
+	val w = Wrapper(Impl())
+	val r = w.greet()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx] && t == "String",
+			"r: String (class delegation by), got '%s'", t);
+	};
+}
+
+fn void probe_value_class_unwraps_to_underlying() @test {
+	// Kotlin spec §9.10: `value class Wrapped(val v: Int)` — `Wrapped(1).v` is Int.
+	@pool() {
+		String src = `@JvmInline value class Wrapped(val v: Int)
+fun main() {
+	val w = Wrapped(42)
+	val r = w.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx] && t == "Int",
+			"r: Int (value class member access), got '%s'", t);
+	};
+}
+
+fn void probe_inline_fn_lambda_return_type() @test {
+	// Inline fn with reified-or-not should still resolve lambda return.
+	@pool() {
+		String src = `inline fun <T> run(block: () -> T): T = block()
+fun main() {
+	val r = run { 42 }
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx] && t == "Int",
+			"r: Int (inline fn lambda return), got '%s'", t);
+	};
+}
+
+fn void probe_when_with_subject_simple_branches() @test {
+	// Simplest: when (x) { 1 -> "a"; 2 -> "b"; else -> "c" } should be String.
+	@pool() {
+		String src = `fun f(x: Int): String {
+	val a = when (x) {
+		1 -> "a"
+		2 -> "b"
+		else -> "c"
+	}
+	return a
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String t = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && ti.has_type[a_idx] && t == "String",
+			"a: String (when-with-subject literal branches), got '%s'", t);
+	};
+}
+
+fn void when_with_subject_smart_cast_is_branch() @test {
+	// `when (x) { is A -> x.aField }` — inside is-branch x narrowed to A
+	// across all sealed-class subclass arms (Kotlin spec §11.1.4 + §11.3).
+	// Requires:
+	//   - parser: break statement at newline before bare `is`/`!is` so
+	//     bodies don't absorb the next entry's condition (in_when_body).
+	//   - cfg: descend into PROPERTY_DECL initializer / RETURN_EXPR value
+	//     when it's a control-flow expression so WHEN_ENTRY conditions
+	//     get COND nodes and bodies see narrowed in_state.
+	@pool() {
+		String src = `sealed class Shape
+class Circle(val radius: Int) : Shape()
+class Square(val side: Int) : Shape()
+fun area(s: Shape): Int {
+	val a = when (s) {
+		is Circle -> s.radius
+		is Square -> s.side
+	}
+	return a
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String t = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && ti.has_type[a_idx] && t == "Int",
+			"a: Int (sealed when smart-cast), got '%s'", t);
+	};
+}
+
+fn void when_with_subject_return_value_smart_cast() @test {
+	// `return when (x) { is T -> x.member }` — same narrowing inside
+	// RETURN_EXPR-as-control-flow-value.
+	@pool() {
+		String src = `sealed class Shape
+class Circle(val radius: Int) : Shape()
+class Square(val side: Int) : Shape()
+fun area(s: Shape): Int = when (s) {
+	is Circle -> s.radius
+	is Square -> s.side
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		// Locate the body WHEN_EXPR; verify both entries' bodies resolve.
+		uint when_idx = 0;
+		for (uint i = 0; i < pr.node_count; i++) {
+			if (pr.nodes[i].kind == WHEN_EXPR) { when_idx = i; break; }
+		}
+		assert(when_idx > 0, "expected WHEN_EXPR in fun body");
+
+		uint resolved = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != when_idx) continue;
+			if (pr.nodes[j].kind != WHEN_ENTRY) continue;
+			// Last child is body — find DOT_EXPR child of entry.
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				if (pr.nodes[k].kind != DOT_EXPR) continue;
+				if (ti.has_type[k] && ti.node_types[k].name == "Int") resolved++;
+			}
+		}
+		assert(resolved == 2, "both entry bodies should resolve s.member to Int, got %d", resolved);
+	};
+}
+
+fn void probe_companion_object_member_via_class() @test {
+	// `class Foo { companion object { fun create(): Foo = Foo() } }; Foo.create()`
+	@pool() {
+		String src = `class Foo {
+	companion object {
+		fun create(): Foo = Foo()
+	}
+}
+fun main() {
+	val f = Foo.create()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint f_idx = find_decl(pr, "f");
+		String t = f_idx > 0 && ti.has_type[f_idx] ? types::format_type(&ti.node_types[f_idx]) : "<no>";
+		assert(f_idx != 0 && ti.has_type[f_idx] && t == "Foo",
+			"f: Foo (companion factory), got '%s'", t);
+	};
+}

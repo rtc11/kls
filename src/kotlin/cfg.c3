@@ -211,12 +211,57 @@ fn uint lower_stmt(Cfg* cfg, ParseResult* pr, uint stmt_idx, uint pred, LoopStac
 		case CONTINUE_EXPR:  return lower_continue(cfg, pr, stmt_idx, pred, loops);
 		case BLOCK:          return lower_block(cfg, pr, stmt_idx, pred, loops);
 		default:
+			// PROPERTY_DECL / RETURN_EXPR / etc. with a control-flow
+			// expression as their value (e.g. `val a = when (s) {...}`,
+			// `return if (x is T) ... else ...`) need their value lowered
+			// so the inner WHEN/IF/TRY produces COND nodes — otherwise
+			// smart-cast facts in branch bodies are never narrowed.
+			uint cf_child = find_control_flow_value(pr, stmt_idx);
+			if (cf_child != ast::NO_PARENT) {
+				uint after = lower_stmt(cfg, pr, cf_child, pred, loops);
+				uint n = cfg.add_node(STATEMENT, stmt_idx);
+				if (after != NO_CFG) cfg.add_edge(after, n);
+				return n;
+			}
 			// Plain statement / expression. Even non-control-flow nodes
 			// may contain `!!`, `?:`, `?.` or guard calls that affect
 			// flow facts — record them as STATEMENT nodes; the flow
 			// analyzer inspects sub-AST for guard effects.
 			return lower_plain(cfg, pr, stmt_idx, pred);
 	}
+}
+
+/**
+ * If `stmt_idx` is a PROPERTY_DECL or RETURN_EXPR whose value child is a
+ * control-flow expression (WHEN_EXPR / IF_EXPR / TRY_EXPR), return the
+ * AST index of that value child. Returns NO_PARENT otherwise.
+ *
+ * Smart-cast narrowing inside `is`/null branches relies on COND nodes
+ * being created by lower_if/lower_when/lower_try; if these expressions
+ * appear as initializers / return values they're never reached through
+ * the block-level statement loop and their bodies see the un-narrowed
+ * subject type.
+ */
+fn uint find_control_flow_value(ParseResult* pr, uint stmt_idx) {
+	if (stmt_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* node = &pr.nodes[stmt_idx];
+	if (node.kind != PROPERTY_DECL && node.kind != RETURN_EXPR) return ast::NO_PARENT;
+	for (uint i = node.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != stmt_idx) continue;
+		if (pr.nodes[i].kind == ANNOTATION_ENTRY) continue;
+		if (pr.nodes[i].kind == TYPE_REF) continue;
+		switch (pr.nodes[i].kind) {
+			case WHEN_EXPR:
+			case IF_EXPR:
+			case TRY_EXPR:
+				return i;
+			default:
+				// First non-annotation/type child that's not control-flow:
+				// nothing to descend into.
+				return ast::NO_PARENT;
+		}
+	}
+	return ast::NO_PARENT;
 }
 
 fn uint lower_plain(Cfg* cfg, ParseResult* pr, uint stmt_idx, uint pred) {
