@@ -2090,29 +2090,73 @@ fn TypeRef resolve_dot_expr_member_type(ParseResult* pr, TypeInfo* info, uint id
 		if (lambda_body.kind != UNKNOWN) return lambda_body;
 	}
 
+	return lookup_member_anywhere(pr, info, receiver_type, node.name);
+}
+
+/**
+ * Lookup a member on `receiver` across the standard cascade (excluding
+ * stdlib + scope-fn shortcuts which are caller's job): in-file extension
+ * → in-file class member → workspace member → dep member.
+ *
+ * Used by `resolve_dot_expr_member_type` and by operator-call resolvers
+ * (binary/index/prefix/postfix/invoke) which need to find a user-defined
+ * `operator fun plus`/`get`/`invoke`/etc. on a non-stdlib receiver.
+ */
+fn TypeRef lookup_member_anywhere(ParseResult* pr, TypeInfo* info, TypeRef receiver_type, String member_name) {
 	// In-file extension function resolution
-	// Look for `fun ReceiverType.name(): ReturnType` in same file
-	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, node.name);
+	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, member_name);
 	if (ext_result.kind != UNKNOWN) return ext_result;
 
 	// In-file class member resolution
-	// Look for class/interface/object named recv_name with member named node.name
-	TypeRef in_file_result = resolve_in_file_member(pr, receiver_type, node.name);
+	TypeRef in_file_result = resolve_in_file_member(pr, receiver_type, member_name);
 	if (in_file_result.kind != UNKNOWN) return in_file_result;
 
 	// Cross-file: look up member from workspace member_cache
 	if (g_workspace != null) {
-		TypeRef ws = resolve_workspace_member_type(receiver_type, node.name);
+		TypeRef ws = resolve_workspace_member_type(receiver_type, member_name);
 		if (ws.kind != UNKNOWN) return ws;
 
 		// Dependency index: look up member by receiver type name
 		if (g_workspace.dep_index.initialized) {
-			TypeRef dep = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name, pr);
+			TypeRef dep = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, member_name, pr);
 			if (dep.kind != UNKNOWN) return dep;
 		}
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * Map a binary operator symbol to its Kotlin operator-fun method name
+ * per the language spec (§9.6 Operator overloading). Returns "" for
+ * operators that don't map to a method (||, &&, ===, etc. — handled by
+ * the compiler directly) or that are already short-circuited by the
+ * caller (==, <, etc. which always return Boolean).
+ */
+fn String binary_op_method(String op) {
+	if (op == "+") return "plus";
+	if (op == "-") return "minus";
+	if (op == "*") return "times";
+	if (op == "/") return "div";
+	if (op == "%") return "rem";
+	if (op == "..") return "rangeTo";
+	if (op == "..<") return "rangeUntil";
+	if (op == "in" || op == "!in") return "contains";  // receiver = RHS, result = Boolean
+	return "";
+}
+
+/**
+ * Map a unary operator symbol to its Kotlin operator-fun method name.
+ * `prefix` distinguishes `+a`/`-a` (unaryPlus/unaryMinus) from
+ * binary `a+b`/`a-b` (plus/minus).
+ */
+fn String unary_op_method(String op) {
+	if (op == "+") return "unaryPlus";
+	if (op == "-") return "unaryMinus";
+	if (op == "!") return "not";
+	if (op == "++") return "inc";
+	if (op == "--") return "dec";
+	return "";
 }
 
 /**
@@ -2977,9 +3021,6 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 		return TYPE_BOOLEAN;
 	}
 
-	if (op == "..") return { .kind = SIMPLE, .name = "IntRange" };
-
-	// Elvis: T? ?: T -> non-nullable T
 	if (op == "?:") {
 		uint child_count = 0;
 		for (uint j = 0; j < pr.node_count; j++) {
@@ -3000,15 +3041,29 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 		return TYPE_UNKNOWN;
 	}
 
-	// Arithmetic
-	if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+	// Arithmetic — try operator method lookup first (user/data class plus/minus/etc.),
+	// fall back to left-operand type for primitives where stdlib member table covers it.
+	if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == ".." || op == "..<") {
+		TypeRef left_t = TYPE_UNKNOWN;
 		for (uint j = 0; j < pr.node_count; j++) {
 			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				TypeRef left_type = info.node_types[j];
-				if (op == "+" && left_type.name == "String") return TYPE_STRING;
-				return left_type;
+				left_t = info.node_types[j];
+				break;
 			}
 		}
+		if (left_t.kind == UNKNOWN) return TYPE_UNKNOWN;
+		String method = binary_op_method(op);
+		if (method.len > 0) {
+			// String "+" stays special: Kotlin spec says String + Any → String
+			if (op == "+" && left_t.name == "String") return TYPE_STRING;
+			TypeRef looked_up = resolve_member_type(left_t, method);
+			if (looked_up.kind == UNKNOWN) {
+				looked_up = lookup_member_anywhere(pr, info, left_t, method);
+			}
+			if (looked_up.kind != UNKNOWN) return looked_up;
+		}
+		// Fallback: assume same type as left (legacy behaviour for unknown receivers)
+		return left_t;
 	}
 
 	// Infix function calls

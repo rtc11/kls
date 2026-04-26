@@ -4182,3 +4182,147 @@ fn void member_prop_bang_bang_narrows() @test {
 		assert(t == "String", "b.x!! should narrow subsequent b.x; got '%s'", t);
 	};
 }
+
+// ── Operator-call resolution (binary) ─────────────────────────────
+
+fn void user_operator_plus_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Vec(val x: Int, val y: Int) {
+				operator fun plus(o: Vec): Vec = Vec(x + o.x, y + o.y)
+			}
+			fun test(a: Vec, b: Vec) {
+				val s = a + b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Vec", "a + b should resolve via Vec.plus; got '%s'", t);
+	};
+}
+
+fn void user_operator_minus_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Money(val cents: Int) {
+				operator fun minus(o: Money): Money = Money(cents - o.cents)
+			}
+			fun test(a: Money, b: Money) {
+				val d = a - b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "d");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Money", "a - b should resolve via Money.minus; got '%s'", t);
+	};
+}
+
+fn void user_operator_times_returns_different_type() @test {
+	@pool() {
+		// User operator that returns a DIFFERENT type than the left operand
+		// — proves we're consulting the operator method, not just returning
+		// left_type as the legacy fallback.
+		String src =
+			`class Foo {
+				operator fun times(other: Foo): Bar = Bar()
+			}
+			class Bar
+			fun test(a: Foo, b: Foo) {
+				val r = a * b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Bar", "a * b should resolve via Foo.times → Bar; got '%s'", t);
+	};
+}
+
+fn void user_operator_rangeTo_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class DateRange
+			class Day {
+				operator fun rangeTo(other: Day): DateRange = DateRange()
+			}
+			fun test(a: Day, b: Day) {
+				val r = a..b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "DateRange", "a..b should resolve via Day.rangeTo → DateRange; got '%s'", t);
+	};
+}
+
+fn void int_range_still_resolves_via_stdlib() @test {
+	@pool() {
+		// Regression: stdlib Int.rangeTo → IntRange must still work
+		// after removing the hardcoded `..` short-circuit.
+		String src =
+			`fun test() {
+				val r = 1..10
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "IntRange", "1..10 should resolve to IntRange; got '%s'", t);
+	};
+}
+
+fn void int_arithmetic_still_works() @test {
+	@pool() {
+		// Regression: stdlib Int.plus/minus/times must still work
+		String src =
+			`fun test() {
+				val s = 1 + 2
+				val d = 5 - 3
+				val p = 4 * 6
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint si = find_decl(r, "s");
+		uint di = find_decl(r, "d");
+		uint pi = find_decl(r, "p");
+		String ts = types::format_type(&ti.node_types[si]);
+		String td = types::format_type(&ti.node_types[di]);
+		String tp = types::format_type(&ti.node_types[pi]);
+		assert(ts == "Int", "1 + 2 → Int, got '%s'", ts);
+		assert(td == "Int", "5 - 3 → Int, got '%s'", td);
+		assert(tp == "Int", "4 * 6 → Int, got '%s'", tp);
+	};
+}
+
+fn void user_operator_div_via_data_class() @test {
+	@pool() {
+		String src =
+			`data class Ratio(val num: Int, val den: Int) {
+				operator fun div(other: Ratio): Ratio = Ratio(num * other.den, den * other.num)
+			}
+			fun test(a: Ratio, b: Ratio) {
+				val q = a / b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "q");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Ratio", "a / b on data class should resolve via div; got '%s'", t);
+	};
+}
