@@ -372,6 +372,15 @@ fn Object*? handle_definition(DocumentStore* store, WorkspaceIndex* workspace, O
 	uint line = (uint)pos.get_int("line")!;
 	uint character = (uint)pos.get_int("character")!;
 
+	// ── Operator-token dispatch (before identifier path) ─────────
+	// `+`, `-`, `*`, `[`, `++`, etc. don't lex as IDENTIFIER so the
+	// regular resolution context can't see them. Try operator-method
+	// resolution first; on miss, fall through to identifier path.
+	if (try result = resolve_operator_at_position(store, workspace, uri, line, character)) {
+		log::debug("[def] dispatch: operator-token");
+		return result;
+	}
+
 	ResolutionContext ctx;
 	if (try c = build_resolution_context(store, workspace, uri, line, character)) {
 		ctx = c;
@@ -3485,4 +3494,148 @@ fn TokenTarget find_dot_member_by_import(DependencyIndex* dep_index, ParseResult
 	}
 
 	return NO_TARGET;
+}
+
+// ── Operator-token resolution (Phase 6 of operator-call ticket) ───────
+
+faultdef NO_OPERATOR_AT_POSITION;
+
+/**
+ * Map a TokenKind for an operator to its Kotlin operator-fun method name
+ * per spec §9.6, plus a flag indicating whether the receiver is the LEFT
+ * operand (the normal case) or some other position (`in`/`!in` use RHS,
+ * INDEX_EXPR uses the receiver child, PREFIX/POSTFIX use the operand).
+ *
+ * Returns "" when the token isn't an operator that maps to a method.
+ */
+fn String operator_token_method(TokenKind kind) {
+	switch (kind) {
+		case ADD:         return "plus";
+		case SUB:         return "minus";
+		case MULT:        return "times";
+		case DIV:         return "div";
+		case MOD:         return "rem";
+		case RANGE:       return "rangeTo";
+		case RANGE_UNTIL: return "rangeUntil";
+		case KW_IN:       return "contains";
+		case NOT_IN:      return "contains";
+		case LSQUARE:     return "get";
+		case RSQUARE:     return "get";
+		case INCR:        return "inc";
+		case DECR:        return "dec";
+		case EXCL:        return "not";
+		case LANGLE:      return "compareTo";
+		case RANGLE:      return "compareTo";
+		case LE:          return "compareTo";
+		case GE:          return "compareTo";
+		case EQEQ:        return "equals";
+		case EXCL_EQ:     return "equals";
+		default:          return "";
+	}
+}
+
+/**
+ * Find the enclosing AST node for an operator token at the given offset.
+ * Returns the BINARY/INDEX/PREFIX/POSTFIX/CALL node idx, or NO_PARENT if
+ * none. Smallest-enclosing-span wins so chained `a + b + c` picks the
+ * correct subnode.
+ */
+fn uint find_enclosing_op_node(ParseResult* pr, uint offset) {
+	uint best = ast::NO_PARENT;
+	uint best_span = uint.max;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != BINARY_EXPR && n.kind != INDEX_EXPR &&
+		    n.kind != PREFIX_EXPR && n.kind != POSTFIX_EXPR &&
+		    n.kind != CALL_EXPR) continue;
+		if (offset < n.start_offset || offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best = i;
+			best_span = span;
+		}
+	}
+	return best;
+}
+
+/**
+ * Get the receiver type for operator dispatch on the given AST node.
+ * For BINARY: left operand (or RIGHT for `in`/`!in`).
+ * For INDEX/PREFIX/POSTFIX/CALL: first child (the receiver/operand).
+ */
+fn TypeRef operator_receiver_type(ParseResult* pr, TypeInfo* ti, uint node_idx, TokenKind op_kind) {
+	if (ti == null) return types::TYPE_UNKNOWN;
+	bool use_right = (op_kind == NOT_IN || op_kind == KW_IN);
+	uint child_count = 0;
+	uint left_idx = ast::NO_PARENT;
+	uint right_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != node_idx) continue;
+		if (child_count == 0) left_idx = j;
+		if (child_count == 1) right_idx = j;
+		child_count++;
+		if (child_count >= 2) break;
+	}
+	uint pick = use_right ? right_idx : left_idx;
+	if (pick == ast::NO_PARENT) return types::TYPE_UNKNOWN;
+	if (!ti.has_type[pick]) return types::TYPE_UNKNOWN;
+	return ti.node_types[pick];
+}
+
+/**
+ * Operator-token definition resolver.
+ *
+ * Returns a Location JSON for the user-defined `operator fun <method>`
+ * decl, or NO_OPERATOR_AT_POSITION fault when the cursor isn't on a
+ * recognized operator token (or when the receiver type can't be
+ * resolved or no member match is found).
+ */
+fn Object*? resolve_operator_at_position(DocumentStore* store, WorkspaceIndex* workspace,
+		String uri, uint line, uint character) {
+	Document* doc = store.get(uri) ?? null;
+	if (doc == null) return NO_OPERATOR_AT_POSITION~;
+
+	Token tok;
+	if (try t = hover::find_token_at_position(doc.content, line, character)) {
+		tok = t;
+	} else {
+		return NO_OPERATOR_AT_POSITION~;
+	}
+
+	String method = operator_token_method(tok.kind);
+	if (method.len == 0) return NO_OPERATOR_AT_POSITION~;
+
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) return NO_OPERATOR_AT_POSITION~;
+
+	TypeInfo* ti = store.get_types(uri) ?? null;
+	if (ti == null) return NO_OPERATOR_AT_POSITION~;
+
+	uint node_idx = find_enclosing_op_node(pr, tok.offset);
+	if (node_idx == ast::NO_PARENT) return NO_OPERATOR_AT_POSITION~;
+
+	TypeRef receiver = operator_receiver_type(pr, ti, node_idx, tok.kind);
+	if (receiver.kind == UNKNOWN || receiver.name.len == 0) return NO_OPERATOR_AT_POSITION~;
+
+	// Reuse existing member lookup chain.
+	String type_name = receiver.name;
+
+	TokenTarget tgt = find_member_in_class_ast(pr, type_name, method, uri);
+	if (tgt.kind != TargetKind.NONE) return target_to_location(tgt, store, workspace);
+
+	if (workspace != null) {
+		TokenTarget t2 = find_member_in_workspace_class(workspace, store, type_name, method);
+		if (t2.kind != TargetKind.NONE) return target_to_location(t2, store, workspace);
+
+		if (workspace.dep_index.initialized) {
+			TokenTarget t3 = find_dep_member_definition(&workspace.dep_index, type_name, method, pr, receiver.is_class_ref);
+			if (t3.kind != TargetKind.NONE) return target_to_location(t3, store, workspace);
+		}
+
+		// Extension function fallback: `operator fun Type.plus(...)`
+		TokenTarget t4 = find_extension_by_receiver_and_name(workspace, store, type_name, method, uri, pr);
+		if (t4.kind != TargetKind.NONE) return target_to_location(t4, store, workspace);
+	}
+
+	return NO_OPERATOR_AT_POSITION~;
 }

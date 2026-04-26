@@ -95,8 +95,12 @@ fn Object*? handle_hover(DocumentStore* store, WorkspaceIndex* workspace, Object
 			}
 		}
 	} else {
-		if (try desc = describe_token(tok)) {
+		// Operator token: try to describe the resolved operator method
+		// (e.g. clicking `+` shows `operator fun Vec.plus(o: Vec): Vec`).
+		if (try desc = describe_operator_token(store, workspace, uri, tok)) {
 			description = desc;
+		} else if (try desc2 = describe_token(tok)) {
+			description = desc2;
 		} else {
 			return null;
 		}
@@ -1711,4 +1715,155 @@ fn String? describe_identifier_from_deps(DependencyIndex* dep_index, Token tok) 
 	}
 
 	return ds.str_view();
+}
+
+// ── Operator-token hover (Phase 7 of operator-call ticket) ────────────
+
+faultdef NO_OPERATOR_HOVER;
+
+/**
+ * Map an operator TokenKind to its Kotlin method name. Mirrors
+ * `definition::operator_token_method` — kept duplicated here to avoid
+ * an upward import (definition already imports hover).
+ */
+fn String operator_method_name(TokenKind kind) {
+	switch (kind) {
+		case ADD:         return "plus";
+		case SUB:         return "minus";
+		case MULT:        return "times";
+		case DIV:         return "div";
+		case MOD:         return "rem";
+		case RANGE:       return "rangeTo";
+		case RANGE_UNTIL: return "rangeUntil";
+		case KW_IN:       return "contains";
+		case NOT_IN:      return "contains";
+		case LSQUARE:     return "get";
+		case RSQUARE:     return "get";
+		case INCR:        return "inc";
+		case DECR:        return "dec";
+		case EXCL:        return "not";
+		case LANGLE:      return "compareTo";
+		case RANGLE:      return "compareTo";
+		case LE:          return "compareTo";
+		case GE:          return "compareTo";
+		case EQEQ:        return "equals";
+		case EXCL_EQ:     return "equals";
+		default:          return "";
+	}
+}
+
+/**
+ * Find the smallest enclosing operator-bearing AST node at offset.
+ * Mirrors `definition::find_enclosing_op_node`.
+ */
+fn uint find_op_node_at(ParseResult* pr, uint offset) {
+	uint best = ast::NO_PARENT;
+	uint best_span = uint.max;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != BINARY_EXPR && n.kind != INDEX_EXPR &&
+		    n.kind != PREFIX_EXPR && n.kind != POSTFIX_EXPR &&
+		    n.kind != CALL_EXPR) continue;
+		if (offset < n.start_offset || offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best = i;
+			best_span = span;
+		}
+	}
+	return best;
+}
+
+/**
+ * Hover description for an operator token. Locates the enclosing
+ * BINARY/INDEX/PREFIX/POSTFIX node, infers the receiver type, and shows
+ * the resolved `operator fun <method>` signature when found in the same
+ * file's class declaration.
+ *
+ * Cross-file resolution intentionally minimal: returns a generic
+ * "operator: <method>" stub so the user at least sees what method the
+ * operator desugars to.
+ */
+fn String? describe_operator_token(DocumentStore* store, WorkspaceIndex* workspace,
+		String uri, Token tok) {
+	String method = operator_method_name(tok.kind);
+	if (method.len == 0) return NO_OPERATOR_HOVER~;
+
+	ParseResult* pr = store.get_ast(uri) ?? null;
+	if (pr == null) return NO_OPERATOR_HOVER~;
+
+	TypeInfo* ti = store.get_types(uri) ?? null;
+	if (ti == null) return NO_OPERATOR_HOVER~;
+
+	uint node_idx = find_op_node_at(pr, tok.offset);
+	if (node_idx == ast::NO_PARENT) return NO_OPERATOR_HOVER~;
+
+	// Pick receiver: RHS for `in`/`!in`, LHS for everything else.
+	bool use_right = (tok.kind == NOT_IN || tok.kind == KW_IN);
+	uint child_count = 0;
+	uint left_idx = ast::NO_PARENT;
+	uint right_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != node_idx) continue;
+		if (child_count == 0) left_idx = j;
+		if (child_count == 1) right_idx = j;
+		child_count++;
+		if (child_count >= 2) break;
+	}
+	uint recv_idx = use_right ? right_idx : left_idx;
+	if (recv_idx == ast::NO_PARENT) return NO_OPERATOR_HOVER~;
+	if (!ti.has_type[recv_idx]) return NO_OPERATOR_HOVER~;
+	TypeRef receiver = ti.node_types[recv_idx];
+	if (receiver.kind == UNKNOWN || receiver.name.len == 0) return NO_OPERATOR_HOVER~;
+
+	String type_name = receiver.name;
+
+	// In-file class member: walk pr for class+method match, build signature.
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* cls = &pr.nodes[i];
+		if (cls.kind != CLASS_DECL && cls.kind != INTERFACE_DECL && cls.kind != OBJECT_DECL) continue;
+		if (cls.name != type_name) continue;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* m = &pr.nodes[j];
+			if (m.parent != i) continue;
+			if (m.kind != FUN_DECL) continue;
+			if (m.name != method) continue;
+			return build_signature(m, pr, "", ti, j);
+		}
+	}
+
+	// Cross-file: return a stub describing the operator.
+	DString ds;
+	ds.tinit();
+	ds.appendf("```kotlin\n// operator %s desugars to: %s.%s(...)\n```", op_token_text(tok.kind), type_name, method);
+	return ds.str_view();
+}
+
+/**
+ * Human-readable text for an operator token kind (for hover stubs).
+ */
+fn String op_token_text(TokenKind kind) {
+	switch (kind) {
+		case ADD:         return "+";
+		case SUB:         return "-";
+		case MULT:        return "*";
+		case DIV:         return "/";
+		case MOD:         return "%";
+		case RANGE:       return "..";
+		case RANGE_UNTIL: return "..<";
+		case KW_IN:       return "in";
+		case NOT_IN:      return "!in";
+		case LSQUARE:     return "[";
+		case RSQUARE:     return "]";
+		case INCR:        return "++";
+		case DECR:        return "--";
+		case EXCL:        return "!";
+		case LANGLE:      return "<";
+		case RANGLE:      return ">";
+		case LE:          return "<=";
+		case GE:          return ">=";
+		case EQEQ:        return "==";
+		case EXCL_EQ:     return "!=";
+		default:          return "?";
+	}
 }
