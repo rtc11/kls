@@ -1889,7 +1889,11 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 
 	if (found_any) {
 		if (info.has_type[best_idx]) {
-			return info.node_types[best_idx];
+			TypeRef ret = info.node_types[best_idx];
+			// Substitute user-defined generic type parameters using arg types.
+			// Maps fun <T> id(x: T): T → id(42) returns Int (Kotlin spec §11.1.7).
+			ret = substitute_user_type_params(pr, info, best_idx, idx, ret);
+			return ret;
 		}
 		return TYPE_UNKNOWN;
 	}
@@ -2034,6 +2038,110 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 	}
 
 	return base;
+}
+
+/**
+ * Substitute user-defined generic type parameters in a function's return type
+ * by inferring T = arg-type from positional FUN_DECL PARAM ↔ CALL_EXPR ARG
+ * matching (Kotlin spec §11.1.7 type-argument inference).
+ *
+ * Strategy: for each TYPE_PARAM child of the FUN_DECL, find the first PARAM
+ * whose declared type-text mentions the type-param name (top-level, not
+ * inside a generic container). Take the corresponding call argument's
+ * resolved type as the substitution. Then rewrite `ret` if its `name` or
+ * any `type_arg_names[i]` equals a type-param name.
+ *
+ * Limitations:
+ *   - Only top-level param-type matches (`(x: T)`, not `(x: List<T>)`).
+ *   - Only return-type substitution; doesn't propagate into call-arg
+ *     contexts. Sufficient for `identity(x)` / single-T transformers.
+ *   - Up to 4 type parameters per function.
+ */
+fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
+		uint fun_decl_idx, uint call_idx, TypeRef ret) {
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return ret;
+
+	bool ret_uses_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (ret.name == tp_names[t]) { ret_uses_tp = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { ret_uses_tp = true; break; }
+		}
+		if (ret_uses_tp) break;
+	}
+	if (!ret_uses_tp) return ret;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint param_pos = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					subst_names[t] = arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	TypeRef out = ret;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) continue;
+		if (out.name == tp_names[t]) {
+			out.name = subst_names[t];
+			if (subst_nullable[t]) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = subst_names[t];
+				if (subst_nullable[t]) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * Get the resolved type of the Nth positional VALUE_ARGUMENT of a CALL_EXPR.
+ * Returns TYPE_UNKNOWN if absent or unresolved.
+ */
+fn TypeRef nth_call_arg_type(ParseResult* pr, TypeInfo* info, uint call_idx, uint n) {
+	uint pos = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != call_idx) continue;
+		if (child.kind != VALUE_ARGUMENT) continue;
+		if (pos == n) {
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx == uint.max) return TYPE_UNKNOWN;
+			if (info.has_type[expr_idx]) return info.node_types[expr_idx];
+			return TYPE_UNKNOWN;
+		}
+		pos++;
+	}
+	return TYPE_UNKNOWN;
 }
 
 /**

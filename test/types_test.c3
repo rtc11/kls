@@ -4988,3 +4988,62 @@ fn void result_onSuccess_returns_self() @test {
 			s_idx > 0 && ti.has_type[s_idx] ? types::format_type(&ti.node_types[s_idx]) : "<no>");
 	};
 }
+
+// ── User generic function type-param inference (Kotlin spec §11.1.7) ──
+
+fn void user_generic_fun_substitutes_T_from_arg() @test {
+	@pool() {
+		String src = `fun <T> identity(x: T): T = x
+		fun f() {
+			val a = identity(42)
+			val b = identity("hi")
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint a_idx = find_decl(pr, "a");
+		uint b_idx = find_decl(pr, "b");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int (T=Int), got '%s'",
+			a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String",
+			"b: String (T=String), got '%s'",
+			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_fun_two_type_params() @test {
+	@pool() {
+		String src = `fun <K, V> pair(k: K, v: V): K = k
+		fun f() {
+			val a = pair(1, "x")
+			val b = pair("hello", 42)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint a_idx = find_decl(pr, "a");
+		uint b_idx = find_decl(pr, "b");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int (K=Int), got '%s'",
+			a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String", "b: String (K=String)");
+	};
+}
+
+fn void user_generic_fun_no_substitution_for_concrete_param() @test {
+	@pool() {
+		String src = `fun <T> takeIntReturnT(i: Int, t: T): T = t
+		fun f() {
+			val r = takeIntReturnT(42, "hi")
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (T inferred from 2nd arg)");
+	};
+}
