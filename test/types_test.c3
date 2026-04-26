@@ -4587,3 +4587,58 @@ fn void lambda_value_no_params_returns_string() @test {
 		assert(t == "String", "expected s: String, got '%s'", t);
 	};
 }
+
+// ── Callable reference type (Kotlin spec §16.30.5) ──────────────────
+
+fn void callable_ref_to_top_level_fun_has_function_type() @test {
+	@pool() {
+		String src = `fun greet(name: String): Int = 42
+			fun main() {
+				val f = ::greet
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "f");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		assert(ti.node_types[idx].kind == FUNCTION, "expected FUNCTION kind, got %d", (int)ti.node_types[idx].kind);
+		assert(ti.node_types[idx].param_type_count == 1, "expected 1 param, got %d", ti.node_types[idx].param_type_count);
+		assert(ti.node_types[idx].return_type_name == "Int",
+			"expected return Int, got '%s'", ti.node_types[idx].return_type_name);
+	};
+}
+
+fn void callable_ref_call_returns_referenced_fun_return_type() @test {
+	@pool() {
+		String src = `fun greet(name: String): Int = 42
+			fun main() {
+				val f = ::greet
+				val r = f("world")
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "expected r: Int from callable-ref call, got '%s'", t);
+	};
+}
+
+fn void callable_ref_to_unit_fun() @test {
+	@pool() {
+		String src = `fun log() {}
+			fun main() {
+				val f = ::log
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "f");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		assert(ti.node_types[idx].kind == FUNCTION, "expected FUNCTION kind");
+		assert(ti.node_types[idx].param_type_count == 0, "expected 0 params");
+		assert(ti.node_types[idx].return_type_name == "Unit",
+			"expected return Unit, got '%s'", ti.node_types[idx].return_type_name);
+	};
+}

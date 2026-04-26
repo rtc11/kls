@@ -1237,6 +1237,9 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 		case LAMBDA_EXPR:
 			return resolve_lambda_expr_type(pr, info, idx, node);
 
+		case CALLABLE_REF_EXPR:
+			return resolve_callable_ref_type(pr, info, idx, node);
+
 		default:
 			return TYPE_UNKNOWN;
 	}
@@ -3386,6 +3389,65 @@ fn TypeRef resolve_lambda_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 	return result;
 }
 
+
+/**
+ * Build a FUNCTION TypeRef from a FUN_DECL's PARAMs + return type.
+ * Used by callable-reference resolution (`::name`, `Type::name`).
+ */
+fn TypeRef function_type_from_fun_decl(ParseResult* pr, uint fun_decl_idx) {
+	TypeRef result = { .kind = FUNCTION, .name = "Function" };
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != fun_decl_idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (result.param_type_count >= MAX_TYPE_ARGS) break;
+		String pt = pr.nodes[j].type_text;
+		result.param_type_names[result.param_type_count] = pt.len > 0 ? pt : "?";
+		result.param_type_count++;
+	}
+	String rt = pr.nodes[fun_decl_idx].type_text;
+	result.return_type_name = rt.len > 0 ? rt : "Unit";
+	return result;
+}
+
+/**
+ * Resolve a CALLABLE_REF_EXPR node (`::name` or `Type::name`) into a FUNCTION TypeRef
+ * (Kotlin spec §16.30.5). Bare `::name` looks up FUN_DECL via scope chain then
+ * top-level. `Type::name` resolves the receiver child's type and looks up the
+ * method via lookup_member_anywhere; v1 returns a minimal FUNCTION TypeRef with
+ * just the return type populated.
+ */
+fn TypeRef resolve_callable_ref_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	if (node.name.len == 0) return TYPE_UNKNOWN;
+
+	// Check for receiver child (Type::name form).
+	uint recv_child = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx) { recv_child = j; break; }
+	}
+
+	if (recv_child != ast::NO_PARENT) {
+		// Type::name form: look up method on receiver type.
+		if (!info.has_type[recv_child]) return TYPE_UNKNOWN;
+		TypeRef recv = info.node_types[recv_child];
+		TypeRef ret = lookup_member_anywhere(pr, info, recv, node.name);
+		if (ret.kind == UNKNOWN) return TYPE_UNKNOWN;
+		TypeRef result = { .kind = FUNCTION, .name = "Function" };
+		result.return_type_name = ret.name.len > 0 ? ret.name : "Unit";
+		return result;
+	}
+
+	// Bare ::name form: scope-chain lookup, then top-level FUN_DECL fallback.
+	uint decl = find_decl_in_scope_chain(pr, idx, node.name);
+	if (decl != ast::NO_PARENT && pr.nodes[decl].kind == FUN_DECL) {
+		return function_type_from_fun_decl(pr, decl);
+	}
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].kind != FUN_DECL) continue;
+		if (pr.nodes[j].name != node.name) continue;
+		return function_type_from_fun_decl(pr, j);
+	}
+	return TYPE_UNKNOWN;
+}
 
 /**
  * Find last expression type inside a parent node.
