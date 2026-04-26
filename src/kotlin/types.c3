@@ -1150,11 +1150,15 @@ fn void resolve_expression_types(ParseResult* pr, TypeInfo* info) {
 	// Multiple passes to propagate types through chains
 	for (int pass = 0; pass < 3; pass++) {
 		for (uint i = 0; i < pr.node_count; i++) {
-			// On later passes, retry GENERIC nodes with 0 type args
+			// On later passes, retry GENERIC nodes with 0 type args, and
+			// LAMBDA_EXPR nodes whose return type may have been Unit-by-default
+			// because the body expression hadn't been resolved yet.
 			bool is_retry = false;
 			if (info.has_type[i]) {
 				if (pass > 0 && info.node_types[i].kind == GENERIC &&
 				    info.node_types[i].type_arg_count == 0) {
+					is_retry = true;
+				} else if (pass > 0 && pr.nodes[i].kind == LAMBDA_EXPR) {
 					is_retry = true;
 				} else {
 					continue;
@@ -1229,6 +1233,9 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 
 		case TRY_EXPR:
 			return resolve_try_expr_type(pr, info, idx, node);
+
+		case LAMBDA_EXPR:
+			return resolve_lambda_expr_type(pr, info, idx, node);
 
 		default:
 			return TYPE_UNKNOWN;
@@ -1802,6 +1809,10 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 	uint val_decl = find_decl_in_scope_chain(pr, idx, node.name);
 	if (val_decl != ast::NO_PARENT && info.has_type[val_decl]) {
 		TypeRef val_type = info.node_types[val_decl];
+		// Lambda value / function-typed val: return its declared return type.
+		if (val_type.kind == FUNCTION && val_type.return_type_name.len > 0) {
+			return parse_type_text(val_type.return_type_name);
+		}
 		if (val_type.kind != UNKNOWN && val_type.kind != FUNCTION) {
 			TypeRef invoke_result = lookup_member_anywhere(pr, info, val_type, "invoke");
 			if (invoke_result.kind != UNKNOWN) return invoke_result;
@@ -3339,6 +3350,42 @@ fn TypeRef resolve_try_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 	}
 	return result;
 }
+
+/**
+ * Resolve type of a LAMBDA_EXPR node into a FUNCTION TypeRef.
+ *
+ * Builds the function type from:
+ *  - PARAM children (parameter types from explicit annotations; "?" if missing)
+ *  - body's last-expression type as the return type
+ *
+ * Used so `val f = { ... }` infers `f` as a function type, and so a later
+ * `f(args)` call can return the lambda body's type.
+ */
+fn TypeRef resolve_lambda_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	TypeRef result = { .kind = FUNCTION, .name = "Function" };
+
+	// Collect parameter type texts from PARAM children (in source order).
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (result.param_type_count >= MAX_TYPE_ARGS) break;
+
+		String pt = pr.nodes[j].type_text;
+		result.param_type_names[result.param_type_count] = pt.len > 0 ? pt : "?";
+		result.param_type_count++;
+	}
+
+	// Return type: last expression of body. Skip PARAM children.
+	TypeRef body_type = last_expr_type_in(pr, info, idx, true);
+	if (body_type.kind != UNKNOWN && body_type.name.len > 0) {
+		result.return_type_name = body_type.name;
+	} else {
+		result.return_type_name = "Unit";
+	}
+
+	return result;
+}
+
 
 /**
  * Find last expression type inside a parent node.

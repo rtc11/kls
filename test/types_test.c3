@@ -4536,3 +4536,54 @@ fn void boolean_not_still_works() @test {
 		assert(t == "Boolean", "!b → Boolean; got '%s'", t);
 	};
 }
+
+// ── Lambda value type inference (Kotlin spec §17.6) ─────────────────
+
+fn void lambda_value_var_has_function_type() @test {
+	@pool() {
+		String src = `fun f() {
+				val add = { a: Int, b: Int -> a + b }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "add");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		assert(ti.node_types[idx].kind == FUNCTION, "expected FUNCTION kind");
+		assert(ti.node_types[idx].param_type_count == 2, "expected 2 params, got %d", ti.node_types[idx].param_type_count);
+		assert(ti.node_types[idx].return_type_name == "Int",
+			"expected return Int, got '%s'", ti.node_types[idx].return_type_name);
+	};
+}
+
+fn void lambda_value_call_returns_body_type() @test {
+	@pool() {
+		String src = `fun f() {
+				val add = { a: Int, b: Int -> a + b }
+				val r = add(1, 2)
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "expected r: Int from lambda call, got '%s'", t);
+	};
+}
+
+fn void lambda_value_no_params_returns_string() @test {
+	@pool() {
+		String src = `fun f() {
+				val greet = { "hello" }
+				val s = greet()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "expected s: String, got '%s'", t);
+	};
+}
