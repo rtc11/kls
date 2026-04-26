@@ -2302,6 +2302,8 @@ fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
 		if (child.parent != class_decl_idx) continue;
 		if (child.kind != PARAM) continue;
 		String pt = child.type_text;
+		// Top-level T match: (val x: T) → bind T = arg type directly.
+		bool top_level_bound = false;
 		for (usz t = 0; t < tp_count; t++) {
 			if (subst_known[t]) continue;
 			if (pt == tp_names[t]) {
@@ -2310,10 +2312,43 @@ fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
 					subst_names[t] = arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		// Nested unification: (val xs: List<T>) ↔ List<Int> → T=Int.
+		// (val store: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0
+					&& param_tref.name == arg.name) {
+					unify_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
 				}
 			}
 		}
 		param_pos++;
+	}
+
+	// If any TP remains unbound AND the call has at least one arg, defer:
+	// arg types may not be resolved yet. Returning UNKNOWN (rather than a
+	// placeholder GENERIC) prevents caching, so a later pass retries
+	// (mirrors the FUN_DECL incomplete-defer pattern).
+	bool any_unbound = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) { any_unbound = true; break; }
+	}
+	if (any_unbound) {
+		// Count call args
+		uint arg_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == call_idx
+				&& pr.nodes[j].kind == VALUE_ARGUMENT) arg_count++;
+		}
+		if (arg_count > 0) return TYPE_UNKNOWN;
 	}
 
 	// Build GENERIC TypeRef with type-args (UNKNOWN slot for unbound TPs)

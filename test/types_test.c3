@@ -5175,3 +5175,39 @@ fn void user_generic_fn_nested_map_param() @test {
 			k_idx > 0 && ti.has_type[k_idx] ? types::format_type(&ti.node_types[k_idx]) : "<no>");
 	};
 }
+
+// ── Class type-param nested unification probes (Kotlin spec §11.1.7) ───
+
+fn void user_generic_class_nested_list() @test {
+	@pool() {
+		String src = `class Bag<T>(val items: List<T>)
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val b = Bag(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint b_idx = find_decl(pr, "b");
+		String tb = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "Bag<Int>",
+			"b: Bag<Int> (T inferred from List<Int>), got '%s'", tb);
+	};
+}
+
+fn void user_generic_class_nested_map() @test {
+	@pool() {
+		String src = `class Cache<K, V>(val store: Map<K, V>)
+		fun f() {
+			val m: Map<String, Int> = mapOf("a" to 1)
+			val c = Cache(m)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint c_idx = find_decl(pr, "c");
+		String tc = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx > 0 && ti.has_type[c_idx]
+			&& types::format_type(&ti.node_types[c_idx]) == "Cache<String, Int>",
+			"c: Cache<String, Int>, got '%s'", tc);
+	};
+}
