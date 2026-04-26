@@ -2053,6 +2053,11 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, node.name);
 	if (ext_result.kind != UNKNOWN) return ext_result;
 
+	// In-file class member resolution
+	// Look for class/interface/object named recv_name with member named node.name
+	TypeRef in_file_result = resolve_in_file_member(pr, receiver_type, node.name);
+	if (in_file_result.kind != UNKNOWN) return in_file_result;
+
 	// Cross-file: look up member from workspace member_cache
 	if (g_workspace != null) {
 		result = resolve_workspace_member_type(receiver_type, node.name);
@@ -2099,6 +2104,62 @@ fn TypeRef resolve_in_file_extension(ParseResult* pr, TypeInfo* info, TypeRef re
 		}
 		if (node.kind == FUN_DECL) return TYPE_UNIT;
 		return TYPE_UNKNOWN;
+	}
+	return TYPE_UNKNOWN;
+}
+
+// ── In-file class member resolution ────────────────────────────────
+
+/**
+ * Look for a property/function/primary-ctor-val-or-var member named `member_name`
+ * inside a CLASS_DECL/INTERFACE_DECL/OBJECT_DECL named `receiver.name` in the
+ * current file's AST.
+ *
+ * Handles three declaration shapes:
+ *  - PROPERTY_DECL child         (val/var x: T)
+ *  - FUN_DECL child              (fun f(): T)
+ *  - PARAM child with MOD_FINAL  (primary-ctor `val x: T`)
+ *  - PARAM child with MOD_VAR    (primary-ctor `var x: T`)
+ *
+ * Returns TYPE_UNKNOWN if no match. Does not walk supertypes (workspace path
+ * handles that for cross-file; in-file supertype walk falls through to the
+ * workspace path which already handles the current file when indexed).
+ */
+fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String member_name) {
+	String recv_name = receiver.name;
+	if (recv_name.len == 0 || member_name.len == 0) return TYPE_UNKNOWN;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* cls = &pr.nodes[i];
+		if (cls.kind != CLASS_DECL && cls.kind != INTERFACE_DECL && cls.kind != OBJECT_DECL) continue;
+		if (cls.name != recv_name) continue;
+
+		// Scan direct children for matching member
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != i) continue;
+			AstNode* child = &pr.nodes[j];
+			if (child.name != member_name) continue;
+
+			switch (child.kind) {
+				case PROPERTY_DECL:
+				case FUN_DECL:
+					if (child.type_text.len > 0) {
+						return parse_type_text(child.type_text);
+					}
+					if (child.kind == FUN_DECL) return TYPE_UNIT;
+					return TYPE_UNKNOWN;
+				case PARAM:
+					// Primary-ctor val/var only — plain params aren't members
+					uint mods = child.mod_flags;
+					if ((mods & ast::MOD_FINAL) == 0 && (mods & ast::MOD_VAR) == 0) continue;
+					if (child.type_text.len > 0) {
+						return parse_type_text(child.type_text);
+					}
+					return TYPE_UNKNOWN;
+				default:
+					continue;
+			}
+		}
 	}
 	return TYPE_UNKNOWN;
 }

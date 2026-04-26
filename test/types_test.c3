@@ -3875,3 +3875,113 @@ fn void smart_cast_top_level_val_is_check_narrows() @test {
 		assert(t == "String", "top-level val should narrow on `is`; got '%s'", t);
 	};
 }
+
+// ── In-file class member resolution ────────────────────────────────
+
+fn void in_file_member_property_dot_resolves_type() @test {
+	@pool() {
+		// `b.x` where Box has `val x: String` — DOT_EXPR should resolve to String.
+		String src =
+			`class Box { val x: String = "hi" }
+			fun test(b: Box) {
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "in-file member-prop access resolves to String; got '%s'", t);
+	};
+}
+
+fn void in_file_member_property_nullable_dot_resolves_type() @test {
+	@pool() {
+		String src =
+			`class Box { val x: String? = null }
+			fun test(b: Box) {
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "nullable member resolves to String?; got '%s'", t);
+	};
+}
+
+fn void in_file_primary_ctor_val_member_resolves_type() @test {
+	@pool() {
+		// Primary-ctor `val x: T` is a member.
+		String src =
+			`class Box(val x: Int)
+			fun test(b: Box) {
+				val n = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "primary-ctor val member resolves; got '%s'", t);
+	};
+}
+
+fn void in_file_primary_ctor_var_member_resolves_type() @test {
+	@pool() {
+		String src =
+			`class Box(var x: String)
+			fun test(b: Box) {
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "primary-ctor var member resolves; got '%s'", t);
+	};
+}
+
+fn void in_file_primary_ctor_plain_param_is_not_member() @test {
+	@pool() {
+		// Plain ctor params (no val/var) are NOT members — `b.x` must not resolve.
+		String src =
+			`class Box(x: Int)
+			fun test(b: Box) {
+				val n = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0, "found decl");
+		// Resolution should fail (UNKNOWN) — the plain param isn't a member.
+		assert(ti.node_types[idx].kind == types::TypeKind.UNKNOWN,
+			"plain ctor param must not be exposed as member; got kind=%d name='%s'",
+			(int)ti.node_types[idx].kind, ti.node_types[idx].name);
+	};
+}
+
+fn void in_file_member_function_dot_resolves_type() @test {
+	@pool() {
+		// `b.f()` where Box.f returns Int — DOT_EXPR should be Int.
+		String src =
+			`class Box { fun f(): Int = 42 }
+			fun test(b: Box) {
+				val n = b.f()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "in-file member fn resolves; got '%s'", t);
+	};
+}
