@@ -5495,3 +5495,58 @@ fn void cross_file_generic_fn_top_level_T() @test {
 			"r: String (xfile id(x: T): T), got '%s'", tr);
 	};
 }
+
+fn void cross_file_ext_fn_class_tp_from_receiver() @test {
+	// Extension fn references receiver's class TP in return type.
+	// fun <U> List<U>.firstOr(d: U): U — TP "U" comes from fn's own decl
+	// but is bound to receiver List<U>. With receiver List<Int>, U=Int.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <U> List<U>.firstOr(d: U): U = d");
+
+		String src = `fun main() {
+			val xs: List<Int> = listOf(1, 2)
+			val r = xs.firstOr(0)
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (xfile ext fn TP from receiver), got '%s'", tr);
+	};
+}
+
+fn void cross_file_ext_fn_arg_only_tp() @test {
+	// Extension fn's TP determined ONLY by call arg, not receiver.
+	// fun <T> String.wrap(x: T): T — receiver is String (no TP), arg gives T.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <T> String.wrap(x: T): T = x");
+
+		String src = `fun main() {
+			val s = "hi"
+			val r = s.wrap(42)
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (xfile ext fn arg-only TP), got '%s'", tr);
+	};
+}

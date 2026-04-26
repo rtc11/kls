@@ -2027,7 +2027,7 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			TypeRef member_result = resolve_member_type(receiver_type, node.name);
 			if (member_result.kind != UNKNOWN) return member_result;
 			// Try workspace member cache
-			member_result = resolve_workspace_member_type(receiver_type, node.name);
+			member_result = resolve_workspace_member_type(receiver_type, node.name, pr, info, idx);
 			if (member_result.kind != UNKNOWN) return member_result;
 			// Try dependency index
 			if (g_workspace.dep_index.initialized) {
@@ -3952,6 +3952,187 @@ fn TypeRef infer_xfile_fun_type_args(ParseResult* pr, TypeInfo* info,
  * Skips unbound or empty cases — returns raw unchanged so caller can fall
  * back to whatever the source said.
  */
+/**
+ * Infer return type of a cross-file extension function with TYPE_PARAMs.
+ * `fun <U> List<U>.firstOr(d: U): U` — TPs come from the FUN_DECL itself,
+ * but may be bound by either receiver type-args (`List<Int>` → U=Int) or
+ * call args. (Kotlin spec §11.1.7.)
+ *
+ * Strategy: find the FUN_DECL in the cached AST (by name + line). Collect
+ * its TYPE_PARAMs. Bind TPs by unifying the parsed receiver text
+ * (`extra_text` like "List<U>") against the actual receiver TypeRef. Then
+ * unify each PARAM type against call args (mirroring substitute_user_type_params).
+ * Substitute bound TPs into the raw return type.
+ *
+ * Returns UNKNOWN to defer when ret references unbound TPs.
+ */
+fn TypeRef infer_xfile_ext_fn_return(String fun_uri, String fun_name, uint fun_line,
+		TypeRef receiver, ParseResult* pr, TypeInfo* info, uint call_idx, TypeRef raw_ret) {
+	if (g_workspace == null) return raw_ret;
+
+	ParseResult*? other_pr_opt = g_workspace.get_cached_ast(fun_uri);
+	if (catch other_pr_opt) return raw_ret;
+	if (other_pr_opt == null) return raw_ret;
+	ParseResult* other_pr = other_pr_opt;
+
+	// Find FUN_DECL by name + line; fallback to first match.
+	uint fun_idx = uint.max;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* n = &other_pr.nodes[j];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name != fun_name) continue;
+		if (n.name_line == fun_line) { fun_idx = j; break; }
+	}
+	if (fun_idx == uint.max) {
+		for (uint j = 0; j < other_pr.node_count; j++) {
+			AstNode* n = &other_pr.nodes[j];
+			if (n.kind == FUN_DECL && n.name == fun_name) { fun_idx = j; break; }
+		}
+		if (fun_idx == uint.max) return raw_ret;
+	}
+
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return raw_ret;
+
+	bool ret_uses_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (raw_ret.name == tp_names[t]) { ret_uses_tp = true; break; }
+		for (uint a = 0; a < raw_ret.type_arg_count; a++) {
+			if (raw_ret.type_arg_names[a] == tp_names[t]) { ret_uses_tp = true; break; }
+		}
+		if (ret_uses_tp) break;
+	}
+	if (!ret_uses_tp) return raw_ret;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	// Bind TPs from receiver: parse FUN_DECL.extra_text (e.g. "List<U>") and
+	// unify against receiver TypeRef. Top-level "T" form treats receiver as
+	// the bound directly.
+	String recv_text = other_pr.nodes[fun_idx].extra_text;
+	if (recv_text.len > 0 && receiver.kind != UNKNOWN && receiver.name.len > 0) {
+		// Top-level: receiver is just "T"
+		bool recv_top_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (recv_text == tp_names[t]) {
+				subst_names[t] = receiver.name;
+				subst_nullable[t] = receiver.nullable;
+				subst_known[t] = true;
+				recv_top_bound = true;
+			}
+		}
+		if (!recv_top_bound) {
+			TypeRef recv_tref = parse_type_text(recv_text);
+			if (recv_tref.kind != UNKNOWN && recv_tref.type_arg_count > 0
+				&& receiver.type_arg_count > 0) {
+				if (recv_tref.name == receiver.name) {
+					unify_tps_into_subst(recv_tref, receiver,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				} else {
+					TypeRef lifted = lift_to_supertype(receiver, recv_tref.name);
+					if (lifted.kind != UNKNOWN) {
+						unify_tps_into_subst(recv_tref, lifted,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					}
+				}
+			}
+		}
+	}
+
+	// Bind remaining TPs from call args.
+	uint param_pos = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		bool top_level_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					subst_names[t] = arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// Defer if ret references unbound TP.
+	bool incomplete = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) continue;
+		if (raw_ret.name == tp_names[t]) { incomplete = true; break; }
+		for (uint a = 0; a < raw_ret.type_arg_count; a++) {
+			if (raw_ret.type_arg_names[a] == tp_names[t]) { incomplete = true; break; }
+		}
+		if (incomplete) break;
+	}
+	if (incomplete) return TYPE_UNKNOWN;
+
+	TypeRef out = raw_ret;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) continue;
+		if (out.name == tp_names[t]) {
+			out.name = subst_names[t];
+			if (subst_nullable[t]) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = subst_names[t];
+				if (subst_nullable[t]) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
 fn TypeRef substitute_class_tps_from_receiver(TypeRef raw, TypeRef receiver, String class_name) {
 	if (g_workspace == null) return raw;
 	if (receiver.type_arg_count == 0) return raw;
@@ -3987,7 +4168,8 @@ fn TypeRef substitute_class_tps_from_receiver(TypeRef raw, TypeRef receiver, Str
 	return out;
 }
 
-fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
+fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name,
+		ParseResult* pr = null, TypeInfo* info = null, uint call_idx = 0) {
 	if (g_workspace == null) return TYPE_UNKNOWN;
 	String type_name = receiver.name;
 	if (type_name.len == 0) return TYPE_UNKNOWN;
@@ -3999,6 +4181,18 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 			if (m.name == member_name) {
 				if (m.type_text.len > 0) {
 					TypeRef raw = parse_type_text(m.type_text);
+					// Extension-fn TP substitution from receiver + call args
+					// (Kotlin spec §11.1.7). Mirrors top-level cross-file path.
+					if (m.node_kind == FUN_DECL && pr != null && call_idx > 0) {
+						TypeRef ext_subst = infer_xfile_ext_fn_return(
+							m.uri, m.name, m.line, receiver, pr, info, call_idx, raw);
+						if (ext_subst.kind != UNKNOWN) {
+							// Also apply class-TP substitution for non-fn TPs
+							return substitute_class_tps_from_receiver(ext_subst, receiver, type_name);
+						}
+						// Defer: incomplete substitution
+						return TYPE_UNKNOWN;
+					}
 					return substitute_class_tps_from_receiver(raw, receiver, type_name);
 				}
 				// Function with no explicit return type — assume Unit
