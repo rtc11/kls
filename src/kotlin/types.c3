@@ -1795,6 +1795,19 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		}
 	}
 
+	// `operator fun invoke()` resolution per Kotlin spec §9.6: when the
+	// callee `name` resolves to a value of some type T (not a function),
+	// the call is rewritten to `name.invoke(...)`. Look up T.invoke and
+	// return its result type.
+	uint val_decl = find_decl_in_scope_chain(pr, idx, node.name);
+	if (val_decl != ast::NO_PARENT && info.has_type[val_decl]) {
+		TypeRef val_type = info.node_types[val_decl];
+		if (val_type.kind != UNKNOWN && val_type.kind != FUNCTION) {
+			TypeRef invoke_result = lookup_member_anywhere(pr, info, val_type, "invoke");
+			if (invoke_result.kind != UNKNOWN) return invoke_result;
+		}
+	}
+
 	return TYPE_UNKNOWN;
 }
 

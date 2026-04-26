@@ -4402,3 +4402,44 @@ fn void map_index_still_resolves_via_stdlib() @test {
 		assert(t == "Int?", "m[\"key\"] → Int?; got '%s'", t);
 	};
 }
+
+// ── Operator-call resolution (invoke) ─────────────────────────────
+
+fn void user_operator_invoke_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Greeting
+			class Greeter {
+				operator fun invoke(name: String): Greeting = Greeting()
+			}
+			fun test(g: Greeter) {
+				val msg = g("Bob")
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "msg");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Greeting", "g(\"Bob\") should resolve via Greeter.invoke → Greeting; got '%s'", t);
+	};
+}
+
+fn void user_operator_invoke_returns_primitive() @test {
+	@pool() {
+		String src =
+			`class Counter {
+				operator fun invoke(): Int = 42
+			}
+			fun test(c: Counter) {
+				val n = c()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "c() should resolve via Counter.invoke → Int; got '%s'", t);
+	};
+}
