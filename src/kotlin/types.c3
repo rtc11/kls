@@ -2088,6 +2088,61 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 }
 
 /**
+ * Lift a stdlib container TypeRef to a named supertype, projecting type args
+ * (Kotlin spec §7.1 supertype hierarchy). Returns UNKNOWN if no path found.
+ *
+ * Hardcoded stdlib hierarchy:
+ *   List<T>, MutableList<T>        → Collection<T> → Iterable<T>
+ *   Set<T>, MutableSet<T>, HashSet<T>, LinkedHashSet<T> → Collection<T> → Iterable<T>
+ *   ArrayList<T>                   → MutableList<T> → List<T> → Collection<T> → Iterable<T>
+ *   Sequence<T>                    → (no Iterable supertype in projection table)
+ *   Array<T>                       → (separate hierarchy, no Collection)
+ *   Map<K, V>, MutableMap<K, V>    → (separate, not Collection)
+ *
+ * Slot mapping is identity for collection projections (single TP T at slot 0).
+ */
+fn TypeRef lift_to_supertype(TypeRef arg, String target_name) {
+	if (arg.name == target_name) return arg;
+	if (arg.type_arg_count == 0) return TYPE_UNKNOWN;
+
+	// Single-TP collection family → Collection / Iterable
+	String n = arg.name;
+	bool is_collection_family = (n == "List" || n == "MutableList"
+		|| n == "ArrayList" || n == "Set" || n == "MutableSet"
+		|| n == "HashSet" || n == "LinkedHashSet" || n == "Collection"
+		|| n == "MutableCollection");
+	if (is_collection_family) {
+		if (target_name == "Collection" || target_name == "MutableCollection"
+			|| target_name == "Iterable" || target_name == "MutableIterable") {
+			TypeRef out = arg;
+			out.name = target_name;
+			return out;
+		}
+	}
+	// MutableList<T> <: List<T>
+	if ((n == "MutableList" || n == "ArrayList") && target_name == "List") {
+		TypeRef out = arg;
+		out.name = "List";
+		return out;
+	}
+	// MutableSet<T> <: Set<T>
+	if ((n == "MutableSet" || n == "HashSet" || n == "LinkedHashSet")
+		&& target_name == "Set") {
+		TypeRef out = arg;
+		out.name = "Set";
+		return out;
+	}
+	// MutableMap<K, V> <: Map<K, V>
+	if ((n == "MutableMap" || n == "HashMap" || n == "LinkedHashMap")
+		&& target_name == "Map") {
+		TypeRef out = arg;
+		out.name = "Map";
+		return out;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
  * Unify a parameter TypeRef against an argument TypeRef and record any
  * type-parameter bindings discovered (Kotlin spec §11.1.7 structural
  * unification). Used by substitute_user_type_params to support nested
@@ -2198,15 +2253,25 @@ fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
 		// Nested unification: (xs: List<T>) ↔ List<Int> → T=Int.
 		// (xs: Pair<A, B>) ↔ Pair<Int, String> → A=Int, B=String.
 		// (xs: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
+		// Supertype unification: (xs: Iterable<T>) ↔ List<Int> → T=Int
+		// via stdlib hierarchy table (Kotlin spec §11.1.7 + §7.1).
 		if (!top_level_bound && pt.len > 0) {
 			TypeRef param_tref = parse_type_text(pt);
 			if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
-				if (arg.kind != UNKNOWN && arg.type_arg_count > 0
-					&& param_tref.name == arg.name) {
-					unify_tps_into_subst(param_tref, arg,
-						tp_names, &tp_count,
-						&subst_names, &subst_nullable, &subst_known);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
 				}
 			}
 		}
@@ -2318,15 +2383,24 @@ fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
 		}
 		// Nested unification: (val xs: List<T>) ↔ List<Int> → T=Int.
 		// (val store: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
+		// Supertype unification: (val xs: Iterable<T>) ↔ List<Int> → T=Int.
 		if (!top_level_bound && pt.len > 0) {
 			TypeRef param_tref = parse_type_text(pt);
 			if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
-				if (arg.kind != UNKNOWN && arg.type_arg_count > 0
-					&& param_tref.name == arg.name) {
-					unify_tps_into_subst(param_tref, arg,
-						tp_names, &tp_count,
-						&subst_names, &subst_nullable, &subst_known);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
 				}
 			}
 		}

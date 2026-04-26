@@ -5211,3 +5211,71 @@ fn void user_generic_class_nested_map() @test {
 			"c: Cache<String, Int>, got '%s'", tc);
 	};
 }
+
+fn void user_generic_fn_supertype_iterable() @test {
+	@pool() {
+		String src = `fun <T> sum(xs: Iterable<T>): T = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val r = sum(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (T inferred via List <: Iterable), got '%s'", tr);
+	};
+}
+
+fn void user_generic_fn_supertype_collection() @test {
+	@pool() {
+		String src = `fun <T> first(xs: Collection<T>): T = TODO()
+		fun f() {
+			val xs: Set<String> = setOf("a", "b")
+			val r = first(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (T inferred via Set <: Collection), got '%s'", tr);
+	};
+}
+
+fn void user_generic_class_supertype() @test {
+	@pool() {
+		String src = `class Wrap<T>(val items: Iterable<T>)
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val w = Wrap(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint w_idx = find_decl(pr, "w");
+		String tw = w_idx > 0 && ti.has_type[w_idx] ? types::format_type(&ti.node_types[w_idx]) : "<no>";
+		assert(w_idx > 0 && ti.has_type[w_idx]
+			&& types::format_type(&ti.node_types[w_idx]) == "Wrap<Int>",
+			"w: Wrap<Int> (List <: Iterable), got '%s'", tw);
+	};
+}
+
+fn void user_generic_fn_supertype_mutable_to_immutable() @test {
+	@pool() {
+		String src = `fun <T> sz(xs: List<T>): T = TODO()
+		fun f() {
+			val xs: MutableList<String> = mutableListOf("a")
+			val r = sz(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (T via MutableList <: List), got '%s'", tr);
+	};
+}
