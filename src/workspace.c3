@@ -84,6 +84,7 @@ struct WorkspaceIndex {
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
+	HashMap{String, uint} class_mod_flags;           // class name -> mod_flags of CLASS_DECL (MOD_ENUM, MOD_DATA, MOD_VALUE, etc.)
 	HashMap{String, List{String}} class_type_params; // class name -> generic type parameter names (e.g. MappedStream -> [K, V])
 	HashMap{String, AstCacheEntry} ast_cache; // uri -> cached (content, ParseResult) for cross-file lookups
 	List{String} ext_cache_keys;                     // heap-allocated keys for extension entries
@@ -99,6 +100,7 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.name_index.init(mem);
 	self.super_index.init(mem);
 	self.member_cache.init(mem);
+	self.class_mod_flags.init(mem);
 	self.class_type_params.init(mem);
 	self.ast_cache.init(mem);
 	self.ext_cache_keys.init(mem);
@@ -199,6 +201,10 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 		}
 	};
 	self.class_type_params.free();
+
+	// class_mod_flags has only primitive uint values; HashMap key strings
+	// share storage with class names (no separate allocations to free).
+	self.class_mod_flags.free();
 
 	// Free heap-allocated extension cache keys
 	for (usz i = 0; i < self.ext_cache_keys.len(); i++) {
@@ -305,6 +311,13 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 					tparams.free();
 				}
 			}
+
+			// Record class mod_flags so cross-file resolvers can detect
+			// MOD_ENUM / MOD_DATA / MOD_VALUE for synthetic-member synthesis
+			// (Kotlin spec §11.2.4 data, §11.2.6 enum). Last-write wins on
+			// duplicate class names — acceptable since modifiers shouldn't
+			// vary across files for the same class.
+			self.class_mod_flags.set(class_name, n.mod_flags);
 
 			// Found the class — create member list
 			List{MemberDecl} members;
@@ -456,6 +469,24 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 							};
 							valid = true;
 						}
+					case ENUM_ENTRY:
+						// Enum entries are accessible as ClassName.ENTRY
+						// cross-file (Kotlin spec §11.2.6). Type is the
+						// enclosing enum class itself; encoded as type_text
+						// so resolve_workspace_member_type handles it via
+						// the standard parse_type_text path.
+						m = {
+							.name = child.name.copy(mem),
+							.type_text = class_name.copy(mem),
+							.uri = uri.copy(mem),
+							.node_kind = ENUM_ENTRY,
+							.mod_flags = child.mod_flags,
+							.line = child.name_line,
+							.col = child.name_col,
+							.name_len = child.name_len,
+							.param_count = 0,
+						};
+						valid = true;
 					default:
 				}
 
@@ -553,6 +584,15 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
  */
 fn List{MemberDecl}*? WorkspaceIndex.lookup_members(WorkspaceIndex* self, String class_name) {
 	return self.member_cache.get_ref(class_name);
+}
+
+/**
+ * Look up the indexed mod_flags for a class declaration. Returns 0 when
+ * unknown. Used by cross-file resolvers to detect MOD_ENUM / MOD_DATA /
+ * MOD_VALUE without re-walking the AST.
+ */
+fn uint WorkspaceIndex.lookup_class_mod_flags(WorkspaceIndex* self, String class_name) {
+	return self.class_mod_flags.get(class_name) ?? 0;
 }
 
 /**

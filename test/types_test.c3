@@ -5983,3 +5983,102 @@ fun main() {
 		assert(n_idx != 0 && t == "Int", "n: Int (alias to user class), got '%s'", t);
 	};
 }
+
+// ── Cross-file enum + data class ──────────────────────────────────
+
+fn void cross_file_enum_entry_resolves_to_class() @test {
+	// `Color.RED` cross-file: receiver is enum class-ref, member is entry.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///color.kt", "enum class Color { RED, GREEN, BLUE }");
+
+		String src = `fun main() {
+	val c = Color.RED
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint c_idx = find_decl(pr, "c");
+		String t = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx != 0 && t == "Color", "c should be Color, got '%s'", t);
+	};
+}
+
+fn void cross_file_enum_synthetic_name_ordinal() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///color.kt", "enum class Color { RED, GREEN, BLUE }");
+
+		String src = `fun main() {
+	val c = Color.RED
+	val n = c.name
+	val o = c.ordinal
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String nt = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && nt == "String", "n: String, got '%s'", nt);
+
+		uint o_idx = find_decl(pr, "o");
+		String ot = o_idx > 0 && ti.has_type[o_idx] ? types::format_type(&ti.node_types[o_idx]) : "<no>";
+		assert(o_idx != 0 && ot == "Int", "o: Int, got '%s'", ot);
+	};
+}
+
+fn void cross_file_enum_static_values_valueOf() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///color.kt", "enum class Color { RED, GREEN, BLUE }");
+
+		String src = `fun main() {
+	val a = Color.values()
+	val v = Color.valueOf("RED")
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String at = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && at == "Array<Color>", "a: Array<Color>, got '%s'", at);
+
+		uint v_idx = find_decl(pr, "v");
+		String vt = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && vt == "Color", "v: Color, got '%s'", vt);
+	};
+}
+
+fn void cross_file_data_class_copy_returns_self() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///foo.kt", "data class Foo(val x: Int)");
+
+		String src = `fun main() {
+	val a = Foo(1)
+	val b = a.copy(x = 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		String t = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx != 0 && t == "Foo", "b: Foo, got '%s'", t);
+	};
+}

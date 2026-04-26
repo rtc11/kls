@@ -4285,6 +4285,29 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name,
 	String type_name = receiver.name;
 	if (type_name.len == 0) return TYPE_UNKNOWN;
 
+	// Synthetic enum + data class members (Kotlin spec §11.2.4 data,
+	// §11.2.6 enum). Mirrors in-file resolve_in_file_member synthesis.
+	uint cls_flags = g_workspace.lookup_class_mod_flags(type_name);
+	if ((cls_flags & ast::MOD_ENUM) != 0) {
+		if (member_name == "name") return TYPE_STRING;
+		if (member_name == "ordinal") return TYPE_INT;
+		if (receiver.is_class_ref) {
+			if (member_name == "values") {
+				TypeRef arr = { .kind = GENERIC, .name = "Array", .type_arg_count = 1 };
+				arr.type_arg_names[0] = type_name;
+				return arr;
+			}
+			if (member_name == "valueOf") {
+				return { .kind = SIMPLE, .name = type_name };
+			}
+		}
+	}
+	if ((cls_flags & ast::MOD_DATA) != 0 && !receiver.is_class_ref && member_name == "copy") {
+		// Return self type. TODO: substitute generic type args from
+		// receiver if data class is generic — currently returns bare name.
+		return { .kind = SIMPLE, .name = type_name };
+	}
+
 	// Direct lookup in member cache
 	if (try members = g_workspace.member_cache.get_ref(type_name)) {
 		for (usz i = 0; i < members.len(); i++) {
