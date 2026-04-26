@@ -621,27 +621,31 @@ fn void apply_when_entry_facts(ParseResult* pr, uint entry_idx, FlowState* true_
 		return;
 	}
 
-	// Multi-condition arm: only narrow if all conditions are `is T` with
-	// the SAME T. Disjunction over different types would require LUB
-	// computation across arbitrary class hierarchies; conservative skip.
-	String agreed_type = "";
-	bool all_same_is = true;
+	// Multi-condition arm. Two cases (Kotlin spec §16.30):
+	//   1. All `is T` with same T → narrow to T.
+	//   2. All `is T_i` with distinct T_i → narrow to LUB(T_1, ..., T_n).
+	// Mixed `is` + null literal or other → conservative skip.
+	String[8] cond_type_texts;
+	usz cond_type_count = 0;
+	bool all_is = true;
+	bool any_nullable_cond = false;
 	for (usz k = 0; k < cond_count; k++) {
 		AstNode* c = &pr.nodes[cond_children[k]];
 		if (c.kind != TYPE_CHECK_EXPR || c.extra_text != "is") {
-			all_same_is = false;
+			all_is = false;
 			break;
 		}
-		if (k == 0) {
-			agreed_type = c.type_text;
-		} else if (c.type_text != agreed_type) {
-			all_same_is = false;
-			break;
+		if (cond_type_count < 8) {
+			cond_type_texts[cond_type_count++] = c.type_text;
+			TypeRef tt = types::parse_type_text(c.type_text);
+			if (tt.nullable) any_nullable_cond = true;
 		}
 	}
-	if (all_same_is && agreed_type.len > 0) {
-		TypeRef t = types::parse_type_text(agreed_type);
-		true_out.add_fact(ast::NO_PARENT, subject_name, t, !t.nullable);
+	if (all_is && cond_type_count > 0) {
+		TypeRef lub = types::compute_lub_of_names(&cond_type_texts, cond_type_count, any_nullable_cond);
+		if (lub.kind != UNKNOWN) {
+			true_out.add_fact(ast::NO_PARENT, subject_name, lub, !lub.nullable);
+		}
 	}
 }
 

@@ -5270,6 +5270,106 @@ fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, As
 
 // ── Helper: common supertype ───────────────────────────────────────
 
+/**
+ * Build the supertype chain (including the type itself) in BFS order.
+ * Stdlib hierarchy via STDLIB_SUPERTYPES, workspace via g_workspace
+ * symbol supertypes. Caps at `cap` entries. Last entry is always "Any".
+ *
+ * Returns the number of names written to `out`.
+ */
+fn usz collect_supertype_chain(String name, String[] out, usz cap) {
+	if (name.len == 0 || cap == 0) return 0;
+	usz n = 0;
+	out[n++] = name;
+
+	// BFS using `out` itself as visited set
+	usz cursor = 0;
+	while (cursor < n && n < cap) {
+		String cur = out[cursor++];
+
+		// Stdlib first
+		bool found_stdlib = false;
+		foreach (entry : STDLIB_SUPERTYPES) {
+			if (entry.name == cur) {
+				found_stdlib = true;
+				for (usz s = 0; s < entry.super_count && n < cap; s++) {
+					String sup = entry.supertypes[s];
+					if (sup.len == 0) continue;
+					bool seen = false;
+					for (usz i = 0; i < n; i++) if (out[i] == sup) { seen = true; break; }
+					if (!seen) out[n++] = sup;
+				}
+				break;
+			}
+		}
+		if (found_stdlib) continue;
+
+		// Workspace lookup
+		if (g_workspace == null) continue;
+		if (try indices = g_workspace.lookup_by_name(cur)) {
+			for (usz i = 0; i < indices.len() && n < cap; i++) {
+				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
+				for (usz s = 0; s < sym.supertype_count && n < cap; s++) {
+					String sup = sym.supertypes[s];
+					if (sup.len == 0) continue;
+					bool seen = false;
+					for (usz k = 0; k < n; k++) if (out[k] == sup) { seen = true; break; }
+					if (!seen) out[n++] = sup;
+				}
+			}
+		}
+	}
+
+	// Ensure Any is reachable
+	bool has_any = false;
+	for (usz i = 0; i < n; i++) if (out[i] == "Any") { has_any = true; break; }
+	if (!has_any && n < cap) out[n++] = "Any";
+	return n;
+}
+
+/**
+ * Compute the least upper bound (LUB) of N type names.
+ * Returns the most specific common supertype, walking stdlib + workspace.
+ * Falls back to "Any" when no shared ancestor is found.
+ *
+ * Used by multi-condition `when` arms (Kotlin spec §16.30): the subject
+ * narrows to the LUB of the arm's `is T` conditions.
+ */
+fn TypeRef compute_lub_of_names(String[] names, usz count, bool any_nullable) {
+	if (count == 0) return TYPE_UNKNOWN;
+	if (count == 1) {
+		TypeRef r = { .kind = SIMPLE, .name = names[0] };
+		r.nullable = any_nullable;
+		return r;
+	}
+
+	String[32] chain0;
+	usz chain0_len = collect_supertype_chain(names[0], &chain0, 32);
+
+	// For each candidate in chain0 (in BFS order = closest-first), check
+	// if every other name has it in their chain. First hit = LUB.
+	String[32] chain_n;
+	for (usz c = 0; c < chain0_len; c++) {
+		String cand = chain0[c];
+		bool common = true;
+		for (usz i = 1; i < count; i++) {
+			usz ln = collect_supertype_chain(names[i], &chain_n, 32);
+			bool found = false;
+			for (usz k = 0; k < ln; k++) if (chain_n[k] == cand) { found = true; break; }
+			if (!found) { common = false; break; }
+		}
+		if (common) {
+			TypeRef r = { .kind = SIMPLE, .name = cand };
+			r.nullable = any_nullable;
+			return r;
+		}
+	}
+
+	TypeRef any_r = TYPE_ANY;
+	any_r.nullable = any_nullable;
+	return any_r;
+}
+
 fn TypeRef common_type(TypeRef a, TypeRef b) {
 	if (a.kind == UNKNOWN) return b;
 	if (b.kind == UNKNOWN) return a;

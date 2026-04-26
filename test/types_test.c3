@@ -6344,3 +6344,37 @@ fun main() {
 		assert(e_idx != 0 && t == "Int", "e: Int (own body 'extra' beyond supertype), got '%s'", t);
 	};
 }
+
+// ── Multi-condition when LUB across distinct user types ────────────
+
+fn void when_multi_condition_lub_user_types() @test {
+	// is Cat, is Dog where both extend Animal → narrow to Animal (LUB).
+	// Then x.speak() resolves to String via Animal's open method.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///animals.kt",
+			"open class Animal { open fun speak(): String = \"\" }\n"
+			"class Cat : Animal()\n"
+			"class Dog : Animal()");
+
+		String src = `fun f(x: Any): String {
+	when (x) {
+		is Cat, is Dog -> {
+			val r = x.speak()
+			return r
+		}
+		else -> return "other"
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && t == "String", "r: String (LUB Animal → speak()), got '%s'", t);
+	};
+}
