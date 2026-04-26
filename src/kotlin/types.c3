@@ -1453,6 +1453,13 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		}
 	}
 
+	// Hardcoded stdlib class-ref fallback (Kotlin spec stdlib). Recognises
+	// well-known stdlib type names (Result, ...) as class-ref TypeRefs so
+	// `Result.success(x)` can resolve `Result` even when the workspace
+	// dep index is unavailable (tests, no kotlin-stdlib jar).
+	TypeRef stdlib_class = resolve_stdlib_class_name(node.name);
+	if (stdlib_class.kind != UNKNOWN) return stdlib_class;
+
 	return TYPE_UNKNOWN;
 }
 
@@ -1830,6 +1837,28 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		return known;
 	}
 
+	// `runCatching { ... }` → Result<T> where T = lambda body type.
+	// (Kotlin spec stdlib: kotlin.runCatching). Top-level form only;
+	// receiver form `x.runCatching { }` falls through to DOT_EXPR path.
+	if (node.name == "runCatching") {
+		TypeRef body = find_trailing_lambda_body_in_call(pr, info, idx);
+		TypeRef result = { .kind = GENERIC, .name = "Result" };
+		if (body.kind != UNKNOWN && body.name.len > 0) {
+			result.type_arg_count = 1;
+			result.type_arg_names[0] = body.name;
+			result.type_arg_nullable[0] = body.nullable;
+		}
+		return result;
+	}
+
+	// Stdlib static factories on class refs: `Result.success(x)` / `Result.failure(e)`.
+	// CALL_EXPR has DOT_EXPR child whose receiver is a class-ref NAME_EXPR.
+	// Decoded here so we can pull the argument type for the type parameter.
+	if (node.name == "success" || node.name == "failure") {
+		TypeRef factory = resolve_static_factory_call(pr, info, idx);
+		if (factory.kind != UNKNOWN) return factory;
+	}
+
 	// Count arguments of this call expression
 	uint call_arg_count = count_call_args(pr, idx, node.name);
 
@@ -2008,10 +2037,25 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 }
 
 /**
+ * Hardcoded stdlib class-ref name table. Recognises well-known stdlib type
+ * names so they can be referenced as bare class refs (`Result.success(x)`,
+ * `Pair.…`, etc.) without requiring the workspace dep index to be available.
+ *
+ * Returns a class-ref TypeRef (`is_class_ref = true`) so DOT_EXPR member
+ * resolution treats the receiver as a static-member lookup (Kotlin spec
+ * companion-object access semantics).
+ */
+fn TypeRef resolve_stdlib_class_name(String name) {
+	if (name == "Result") {
+		return { .kind = SIMPLE, .name = "Result", .is_class_ref = true };
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
  * Resolve well-known stdlib factory/constructor calls.
  */
-fn TypeRef resolve_known_call(String name) {
-	if (name == "listOf" || name == "emptyList") {
+fn TypeRef resolve_known_call(String name) {	if (name == "listOf" || name == "emptyList") {
 		return { .kind = GENERIC, .name = "List" };
 	}
 	if (name == "mutableListOf" || name == "arrayListOf") {
@@ -2050,6 +2094,69 @@ fn TypeRef resolve_known_call(String name) {
 	if (name == "require" || name == "check" || name == "assert") return TYPE_UNIT;
 	if (name == "println" || name == "print") return TYPE_UNIT;
 
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Resolve a stdlib static factory call of the form `<ClassRef>.<method>(args)`.
+ * Currently handles `Result.success(x) → Result<T>` and `Result.failure(e) → Result<T>`.
+ *
+ * Looks up the CALL_EXPR's DOT_EXPR child, checks the receiver is a class-ref
+ * NAME_EXPR for "Result", then derives T from the first argument's type
+ * (success: arg type; failure: explicit `Result.failure<T>(e)` requires
+ * arg-type-independent T which we don't have without explicit type args, so
+ * we return bare `Result` in that case).
+ */
+fn TypeRef resolve_static_factory_call(ParseResult* pr, TypeInfo* info, uint call_idx) {
+	// Find DOT_EXPR child of CALL_EXPR
+	uint dot_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind == DOT_EXPR) { dot_idx = j; break; }
+	}
+	if (dot_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	AstNode* dot = &pr.nodes[dot_idx];
+	String method = dot.name;
+
+	// Find DOT_EXPR's receiver child
+	uint recv_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == dot_idx) { recv_idx = j; break; }
+	}
+	if (recv_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+	AstNode* recv = &pr.nodes[recv_idx];
+	if (recv.kind != NAME_EXPR) return TYPE_UNKNOWN;
+
+	// Result class-ref
+	if (recv.name != "Result") return TYPE_UNKNOWN;
+
+	TypeRef result = { .kind = GENERIC, .name = "Result" };
+	if (method == "success") {
+		// T = first arg type
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != call_idx) continue;
+			if (child.kind != VALUE_ARGUMENT) continue;
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx == uint.max) break;
+			if (info.has_type[expr_idx]) {
+				TypeRef arg = info.node_types[expr_idx];
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					result.type_arg_count = 1;
+					result.type_arg_names[0] = arg.name;
+					result.type_arg_nullable[0] = arg.nullable;
+				}
+			}
+			break;
+		}
+		return result;
+	}
+	if (method == "failure") {
+		// T not derivable from Throwable arg without explicit type-arg parsing;
+		// return bare `Result` (callers can still use isFailure/exceptionOrNull).
+		return result;
+	}
 	return TYPE_UNKNOWN;
 }
 
@@ -2708,6 +2815,37 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 		if (member_name == "iterator") {
 			return make_generic_with_receiver_args("Iterator", receiver);
 		}
+	}
+
+	// Result members (Kotlin spec stdlib: kotlin.Result<T>)
+	if (type_name == "Result") {
+		if (member_name == "isSuccess" || member_name == "isFailure") return TYPE_BOOLEAN;
+		if (member_name == "getOrNull") {
+			return extract_element_type(receiver, true);  // T?
+		}
+		if (member_name == "getOrThrow" || member_name == "getOrDefault") {
+			return extract_element_type(receiver, false); // T
+		}
+		if (member_name == "exceptionOrNull") {
+			return { .kind = SIMPLE, .name = "Throwable", .nullable = true };
+		}
+		if (member_name == "getOrElse") {
+			return extract_element_type(receiver, false); // T (from default fn)
+		}
+		if (member_name == "fold" || member_name == "recover" || member_name == "recoverCatching") {
+			// fold transforms via two lambdas; return type unknown without analysis
+			return TYPE_UNKNOWN;
+		}
+		if (member_name == "map" || member_name == "mapCatching") {
+			// transforms T → R; return bare Result (R inferred elsewhere)
+			return { .kind = GENERIC, .name = "Result" };
+		}
+		if (member_name == "onSuccess" || member_name == "onFailure") {
+			return receiver;  // returns this Result<T> for chaining
+		}
+		if (member_name == "toString") return TYPE_STRING;
+		if (member_name == "hashCode") return TYPE_INT;
+		if (member_name == "equals") return TYPE_BOOLEAN;
 	}
 
 	// Map members

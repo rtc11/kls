@@ -4892,3 +4892,99 @@ fn void val_assignment_lazy_call_not_delegated() @test {
 		assert(t != "Int", "expected x to NOT be Int (only delegated `by lazy` unwraps), got '%s'", t);
 	};
 }
+
+// ── Stdlib Result<T> inference (Kotlin spec stdlib) ─────────────────
+
+fn void result_success_factory_and_getOrNull() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = Result.success(42)
+			val v = r.getOrNull()
+			val w = r.getOrThrow()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		uint v_idx = find_decl(pr, "v");
+		uint w_idx = find_decl(pr, "w");
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Result<Int>",
+			"r: Result<Int>, got '%s'",
+			r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int?",
+			"v: Int?, got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+		assert(w_idx > 0 && ti.has_type[w_idx]
+			&& types::format_type(&ti.node_types[w_idx]) == "Int",
+			"w: Int (getOrThrow), got '%s'",
+			w_idx > 0 && ti.has_type[w_idx] ? types::format_type(&ti.node_types[w_idx]) : "<no>");
+	};
+}
+
+fn void result_isSuccess_isFailure_exceptionOrNull() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = Result.success(42)
+			val ok = r.isSuccess
+			val bad = r.isFailure
+			val ex = r.exceptionOrNull()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint ok_idx = find_decl(pr, "ok");
+		uint bad_idx = find_decl(pr, "bad");
+		uint ex_idx = find_decl(pr, "ex");
+		assert(ok_idx > 0 && ti.has_type[ok_idx]
+			&& types::format_type(&ti.node_types[ok_idx]) == "Boolean", "ok: Boolean");
+		assert(bad_idx > 0 && ti.has_type[bad_idx]
+			&& types::format_type(&ti.node_types[bad_idx]) == "Boolean", "bad: Boolean");
+		assert(ex_idx > 0 && ti.has_type[ex_idx]
+			&& types::format_type(&ti.node_types[ex_idx]) == "Throwable?",
+			"ex: Throwable?, got '%s'",
+			ex_idx > 0 && ti.has_type[ex_idx] ? types::format_type(&ti.node_types[ex_idx]) : "<no>");
+	};
+}
+
+fn void run_catching_returns_Result_T() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = runCatching { 42 }
+			val v = r.getOrNull()
+			val w = r.getOrElse { 0 }
+			val x = r.getOrThrow()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		uint v_idx = find_decl(pr, "v");
+		uint w_idx = find_decl(pr, "w");
+		uint x_idx = find_decl(pr, "x");
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Result<Int>",
+			"r: Result<Int>, got '%s'",
+			r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int?", "v: Int?");
+		assert(w_idx > 0 && ti.has_type[w_idx]
+			&& types::format_type(&ti.node_types[w_idx]) == "Int", "w: Int");
+		assert(x_idx > 0 && ti.has_type[x_idx]
+			&& types::format_type(&ti.node_types[x_idx]) == "Int", "x: Int");
+	};
+}
+
+fn void result_onSuccess_returns_self() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = Result.success(42)
+			val s = r.onSuccess { }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint s_idx = find_decl(pr, "s");
+		assert(s_idx > 0 && ti.has_type[s_idx]
+			&& types::format_type(&ti.node_types[s_idx]) == "Result<Int>",
+			"s: Result<Int> (chained), got '%s'",
+			s_idx > 0 && ti.has_type[s_idx] ? types::format_type(&ti.node_types[s_idx]) : "<no>");
+	};
+}
