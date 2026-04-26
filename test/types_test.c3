@@ -5864,3 +5864,61 @@ fun main() {
 		assert(v_idx != 0 && vt == "Color", "v should be Color, got '%s'", vt);
 	};
 }
+
+fn void data_class_copy_returns_self() @test {
+	// `data class Foo(val x: Int); Foo(1).copy(x = 2)` returns Foo
+	// (Kotlin spec §11.2.4).
+	@pool() {
+		String src = `data class Foo(val x: Int)
+fun main() {
+	val a = Foo(1)
+	val b = a.copy(x = 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		String t = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx != 0 && t == "Foo", "b should be Foo, got '%s'", t);
+	};
+}
+
+fn void data_class_copy_no_args() @test {
+	// `a.copy()` with no args returns same type (uses defaults).
+	@pool() {
+		String src = `data class Pair(val a: Int, val b: String)
+fun main() {
+	val p = Pair(1, "x")
+	val q = p.copy()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint q_idx = find_decl(pr, "q");
+		String t = q_idx > 0 && ti.has_type[q_idx] ? types::format_type(&ti.node_types[q_idx]) : "<no>";
+		assert(q_idx != 0 && t == "Pair", "q should be Pair, got '%s'", t);
+	};
+}
+
+fn void data_class_copy_generic_substitutes_type_args() @test {
+	// `data class Box<T>(val v: T); Box(1).copy()` returns Box<Int>.
+	@pool() {
+		String src = `data class Box<T>(val v: T)
+fun main() {
+	val b: Box<Int> = Box(1)
+	val c = b.copy()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint c_idx = find_decl(pr, "c");
+		String t = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx != 0 && t == "Box", "c should be Box (or Box<Int>), got '%s'", t);
+	};
+}

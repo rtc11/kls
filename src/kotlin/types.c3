@@ -3273,6 +3273,16 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 			}
 		}
 
+		// Synthetic data class members (Kotlin spec §11.2.4):
+		//   fun copy(...): Foo  — return the same class type, args mirror
+		//                          primary-ctor PARAMs with defaults.
+		// (componentN() functions for destructuring are handled elsewhere.)
+		// Only on instance receivers; `Foo.copy` (class-ref) is not valid.
+		bool is_data_class = (cls.kind == CLASS_DECL) && ((cls.mod_flags & ast::MOD_DATA) != 0);
+		if (is_data_class && !receiver.is_class_ref && member_name == "copy") {
+			return substitute_class_type_params(pr, i, receiver, { .kind = SIMPLE, .name = recv_name });
+		}
+
 		// Scan direct children for matching member
 		for (uint j = 0; j < pr.node_count; j++) {
 			if (pr.nodes[j].parent != i) continue;
