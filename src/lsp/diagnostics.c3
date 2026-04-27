@@ -12,11 +12,12 @@ import kls::kotlin::stdlib;
 import kls::kotlin::jdk_symbols;
 import kls::kotlin::types;
 import kls::kotlin::symbols;
+import kls::kotlin::cfg;
+import kls::kotlin::flow;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::log;
 import kls::config;
-import kls::kotlin::flow;
 
 /**
  * Run the lexer on content and return a JSON array of LSP Diagnostic
@@ -146,6 +147,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			}
 		}
 		add_unreachable_code_diagnostics(diagnostics, ast);
+		if (type_info != null) {
+			add_unreachable_cfg_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -976,6 +980,76 @@ fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) 
 			}
 		}
 	}
+}
+
+/**
+ * CFG-based unreachable detection. Catches cases the AST-sibling pass
+ * misses: `if (b) return else throw`, `when` whose every arm returns,
+ * etc. Walks each function's CFG, looking for STATEMENT / terminator
+ * CFG nodes whose in-state is TOP (never reached by the worklist
+ * solver) and emits a diagnostic at the corresponding AST node.
+ *
+ * Dedupes against the AST-sibling pass: skips when the parent block
+ * has a divergent prior sibling that the existing pass would already
+ * flag. Also dedupes within itself by tracking flagged AST indices.
+ */
+fn void add_unreachable_cfg_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
+	if (type_info == null) return;
+	bool[ast::MAX_NODES] flagged;
+	for (uint i = 0; i < type_info.func_flow_count; i++) {
+		FunctionFlow* ff = &type_info.func_flows[i];
+		if (ff.cfg == null || ff.fa == null) continue;
+		for (uint k = 0; k < ff.cfg.node_count; k++) {
+			CfgNode* cn = &ff.cfg.nodes[k];
+			switch (cn.kind) {
+				case STATEMENT:
+				case RETURN:
+				case THROW:
+				case BREAK:
+				case CONTINUE:
+					break;
+				default:
+					continue;
+			}
+			if (k == ff.cfg.entry) continue;
+			FlowState* in_s = &ff.fa.in_state[k];
+			if (!in_s.top) continue;
+			uint ast_idx = cn.ast_idx;
+			if (ast_idx >= ast.node_count) continue;
+			if (flagged[ast_idx]) continue;
+			// Skip cases the AST-sibling pass already handles.
+			if (ast_already_flagged_by_sibling_pass(ast, ast_idx)) continue;
+			AstNode* node = &ast.nodes[ast_idx];
+			Object* diag = make_diagnostic(node.start_line, node.start_col,
+				node.end_line, node.end_col, 2, "Unreachable code");
+			Object* tags = object::new_obj(tmem);
+			tags.push(object::new_int(1, tmem));
+			diag.set("tags", tags);
+			diagnostics.push(diag);
+			flagged[ast_idx] = true;
+		}
+	}
+}
+
+/**
+ * True when `node_idx` would already be flagged by the AST-sibling
+ * pass: there is a direct prior sibling in the same BLOCK that is a
+ * RETURN_EXPR / THROW_EXPR / BREAK_EXPR / CONTINUE_EXPR.
+ */
+fn bool ast_already_flagged_by_sibling_pass(ParseResult* ast, uint node_idx) {
+	uint parent = ast.nodes[node_idx].parent;
+	if (parent == ast::NO_PARENT || parent >= ast.node_count) return false;
+	if (ast.nodes[parent].kind != BLOCK) return false;
+	bool seen_terminator = false;
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent != parent) continue;
+		if (j == node_idx) return seen_terminator;
+		NodeKind k = ast.nodes[j].kind;
+		if (k == RETURN_EXPR || k == THROW_EXPR || k == BREAK_EXPR || k == CONTINUE_EXPR) {
+			seen_terminator = true;
+		}
+	}
+	return false;
 }
 
 // ── Receiver lambda member resolution ────────────────────────────
