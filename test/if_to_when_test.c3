@@ -134,3 +134,101 @@ fn void simple_if_no_action() @test {
 		assert(text.len == 0, "should not offer convert for simple if");
 	};
 }
+
+// ── Probe: subject form for `x is A` chain ──────────────────────
+
+fn void if_chain_is_check_subject_form() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`fun describe(x: Any): String {
+	if (x is String) {
+		return "str"
+	} else if (x is Int) {
+		return "int"
+	} else {
+		return "?"
+	}
+}
+`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 1, 2);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String text = find_action_text(result, "Convert to when");
+		assert(text.len > 0, "expected action");
+		assert(text.contains("when (x)"), "expected subject form 'when (x)', got '%s'", text);
+		assert(text.contains("is String ->"), "expected 'is String ->' arm, got '%s'", text);
+		assert(text.contains("is Int ->"), "expected 'is Int ->' arm, got '%s'", text);
+		assert(text.contains("else ->"), "expected 'else ->' arm, got '%s'", text);
+	};
+}
+
+// ── Probe: subject form for `x == lit` chain ────────────────────
+
+fn void if_chain_eq_literal_subject_form() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`fun pick(x: Int): String {
+	if (x == 1) {
+		return "one"
+	} else if (x == 2) {
+		return "two"
+	} else {
+		return "other"
+	}
+}
+`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 1, 2);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String text = find_action_text(result, "Convert to when");
+		assert(text.len > 0, "expected action");
+		assert(text.contains("when (x)"), "expected subject form 'when (x)', got '%s'", text);
+		assert(text.contains("1 ->"), "expected '1 ->' arm, got '%s'", text);
+		assert(text.contains("2 ->"), "expected '2 ->' arm, got '%s'", text);
+	};
+}
+
+// ── Probe: mixed subjects → falls back to subject-less form ─────
+
+fn void if_chain_mixed_subjects_fallback() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content =
+			`fun foo(x: Any, y: Any) {
+	if (x is String) {
+		println("xs")
+	} else if (y is Int) {
+		println("yi")
+	} else {
+		println("?")
+	}
+}
+`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///test.kt", 1, 2);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String text = find_action_text(result, "Convert to when");
+		assert(text.len > 0, "expected action");
+		// Should be subject-less since subjects differ
+		assert(!text.contains("when (x)"), "expected NO subject (mixed), got '%s'", text);
+		assert(!text.contains("when (y)"), "expected NO subject (mixed), got '%s'", text);
+		assert(text.contains("when {"), "expected subject-less 'when {', got '%s'", text);
+	};
+}

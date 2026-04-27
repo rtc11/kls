@@ -401,6 +401,63 @@ fn String extract_if_cond_text(String content, AstNode* if_node, uint* cond_end_
 	return "";
 }
 
+/**
+ * Classify a condition AST node into (subject_name, arm_label) for `when (x)` form.
+ *  - `x is T` / `x !is T`     → subject=x, label="is T" / "!is T"
+ *  - `x == lit` / `x === lit` → subject=x, label=literal/expr text
+ *  - `x in r`  / `x !in r`    → subject=x, label="in r" / "!in r"
+ *  - else                     → subject="" (unclassifiable)
+ *
+ * Subject must be a NAME_EXPR. Multi-level (a.b) deliberately rejected.
+ */
+fn void classify_subject_cond(ParseResult* ast, String content, uint cond_idx, String* subject, String* label) {
+	*subject = "";
+	*label = "";
+	AstNode* n = &ast.nodes[cond_idx];
+
+	if (n.kind == TYPE_CHECK_EXPR) {
+		uint subj_idx = uint.max;
+		for (uint i = 1; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent == cond_idx) { subj_idx = i; break; }
+		}
+		if (subj_idx == uint.max) return;
+		AstNode* subj = &ast.nodes[subj_idx];
+		if (subj.kind != NAME_EXPR) return;
+		*subject = subj.name;
+		*label = string::tformat("%s %s", n.extra_text, n.type_text);
+		return;
+	}
+
+	if (n.kind == BINARY_EXPR) {
+		String op = n.extra_text;
+		bool is_eq = (op == "==" || op == "===");
+		bool is_in = (op == "in" || op == "!in");
+		if (!is_eq && !is_in) return;
+		uint left_idx = uint.max;
+		uint right_idx = uint.max;
+		for (uint i = 1; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent != cond_idx) continue;
+			if (left_idx == uint.max) {
+				left_idx = i;
+			} else if (right_idx == uint.max) {
+				right_idx = i;
+			}
+		}
+		if (left_idx == uint.max || right_idx == uint.max) return;
+		AstNode* left = &ast.nodes[left_idx];
+		if (left.kind != NAME_EXPR) return;
+		*subject = left.name;
+		AstNode* right = &ast.nodes[right_idx];
+		String right_text = content[(usz)right.start_offset..(usz)right.end_offset - 1];
+		if (is_eq) {
+			*label = right_text;
+		} else {
+			*label = string::tformat("%s %s", op, right_text);
+		}
+		return;
+	}
+}
+
 fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* ast, Object* params) {
 	if (doc == null || ast == null) return null;
 
@@ -434,10 +491,12 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 
 	// Walk down chain. For each IF_EXPR:
 	//  - cond text via source scan (parser may not adopt cond as child)
-	//  - then body = first child whose start_offset > cond_end
+	//  - cond AST via direct-child whose start_offset falls inside cond range (may be uint.max)
+	//  - then body = first child whose start_offset >= cond_end
 	//  - else = next child after then; if IF_EXPR continue, else terminal
 	String[16] cond_texts;
 	String[16] body_texts;
+	uint[16] cond_ast;
 	usz arm_count = 0;
 	String else_body_text = "";
 	bool has_else = false;
@@ -449,12 +508,21 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 		String cond_text = extract_if_cond_text(doc.content, cur_n, &cond_end);
 		if (cond_text.len == 0) return null;
 
-		// Iterate direct children, picking those after cond_end as then/else
+		// Find cond AST node (direct child of cur with start_offset in cond range)
+		uint cond_node = uint.max;
 		uint then_idx = uint.max;
 		uint else_idx = uint.max;
 		for (uint i = 1; i < ast.node_count; i++) {
 			if (ast.nodes[i].parent != cur) continue;
-			if (ast.nodes[i].start_offset < cond_end) continue; // skip any cond children
+			if (ast.nodes[i].start_offset < cond_end) {
+				// cond child — pick outermost (smallest start_offset, largest span) if multiple
+				if (cond_node == uint.max ||
+					ast.nodes[i].end_offset - ast.nodes[i].start_offset >
+					ast.nodes[cond_node].end_offset - ast.nodes[cond_node].start_offset) {
+					cond_node = i;
+				}
+				continue;
+			}
 			if (then_idx == uint.max) {
 				then_idx = i;
 			} else if (else_idx == uint.max) {
@@ -465,6 +533,7 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 
 		AstNode* then_n = &ast.nodes[then_idx];
 		cond_texts[arm_count] = cond_text;
+		cond_ast[arm_count] = cond_node;
 		body_texts[arm_count] = doc.content[(usz)then_n.start_offset..(usz)then_n.end_offset - 1];
 		arm_count++;
 
@@ -481,15 +550,47 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 
 	if (arm_count < 2) return null;
 
+	// Try to detect a common subject across all arms.
+	// Each arm classified into (subject_name, arm_label).
+	// If all share the same non-empty subject → emit `when (subject) { label -> body; ... }`.
+	String[16] arm_subjects;
+	String[16] arm_labels;
+	String common_subject = "";
+	bool subject_form = true;
+	for (usz i = 0; i < arm_count; i++) {
+		String subj = "";
+		String label = "";
+		if (cond_ast[i] != uint.max) {
+			classify_subject_cond(ast, doc.content, cond_ast[i], &subj, &label);
+		}
+		arm_subjects[i] = subj;
+		arm_labels[i] = label;
+		if (subj.len == 0) {
+			subject_form = false;
+		} else if (i == 0) {
+			common_subject = subj;
+		} else if (subj != common_subject) {
+			subject_form = false;
+		}
+	}
+
 	String outer_indent = line_leading_indent(doc.content, top.start_line);
 	String inner_indent = string::tformat("%s\t", outer_indent);
 
 	DString out;
 	out.tinit();
-	out.append("when {\n");
+	if (subject_form) {
+		out.appendf("when (%s) {\n", common_subject);
+	} else {
+		out.append("when {\n");
+	}
 	for (usz i = 0; i < arm_count; i++) {
 		out.append(inner_indent);
-		out.append(cond_texts[i]);
+		if (subject_form) {
+			out.append(arm_labels[i]);
+		} else {
+			out.append(cond_texts[i]);
+		}
 		out.append(" -> ");
 		String reindented = reindent_block(body_texts[i], inner_indent);
 		out.append(reindented);
