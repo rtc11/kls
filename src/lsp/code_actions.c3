@@ -254,6 +254,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			actions.push(expr_to_block);
 		}
 		add_scope_function_actions(actions, uri, doc, ast, params);
+		Object* split_decl = try_split_declaration_assignment(uri, doc, ast, params);
+		if (split_decl != null) {
+			actions.push(split_decl);
+		}
 	}
 
 	// ── Cursor-context: add import for identifier under cursor ───
@@ -4056,4 +4060,180 @@ fn void add_scope_function_actions(Object* actions, String uri, Document* doc,
 	actions.push(build_scope_function_action(uri, expr_text, "run", "this", expr));
 	actions.push(build_scope_function_action(uri, expr_text, "apply", "", expr));
 	actions.push(build_scope_function_action(uri, expr_text, "also", "it", expr));
+}
+
+// ── Refactor: split declaration and assignment ──────────────────
+
+/**
+ * Cursor on `var x: T = expr` (local) → offer
+ * "Split declaration and assignment" → rewrites to
+ *
+ *     var x: T
+ *     x = expr
+ *
+ * Only offered for `var` (since `val x: T` would be uncompilable).
+ * Requires explicit type annotation. Skips destructuring,
+ * properties with custom accessors, `by` delegation, and non-local
+ * properties (top-level / class members).
+ */
+fn Object* try_split_declaration_assignment(String uri, Document* doc,
+		ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest PROPERTY_DECL containing cursor.
+	uint prop_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if ((uint)cursor_offset < n.start_offset) continue;
+		if ((uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			prop_idx = i;
+		}
+	}
+	if (prop_idx == uint.max) return null;
+
+	AstNode* prop = &ast.nodes[prop_idx];
+
+	// Must be `var` (val x: T would be uncompilable after split).
+	if ((prop.mod_flags & ast::MOD_VAR) == 0) return null;
+
+	// Must have explicit type annotation.
+	if (prop.type_text.len == 0) return null;
+
+	// Skip destructuring / no-name.
+	if (prop.name.len == 0 || prop.name == "(destructuring)") return null;
+
+	// Must be local (parent is BLOCK).
+	if (prop.parent >= ast.node_count) return null;
+	if (ast.nodes[prop.parent].kind != BLOCK) return null;
+
+	// Walk children (iterate from 0 — initializer expr may have lower
+	// index in some shapes, but typically higher; safe either way).
+	// Find: the lone non-FUN_DECL non-PARAM child = initializer expr.
+	// Reject if any FUN_DECL child (custom accessor) found.
+	uint init_idx = uint.max;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != prop_idx) continue;
+		NodeKind ck = ast.nodes[c].kind;
+		if (ck == FUN_DECL) return null; // custom get/set accessor
+		if (ck == PARAM || ck == TYPE_PARAM) continue;
+		// First non-decl child is initializer (or `by` delegate root).
+		if (init_idx == uint.max) {
+			init_idx = c;
+		}
+	}
+	if (init_idx == uint.max) return null; // no initializer
+
+	AstNode* init = &ast.nodes[init_idx];
+
+	// Skip `by` delegation.
+	if (init.extra_text == "delegate") return null;
+
+	// Compute indentation of the property's start line.
+	String content = doc.content;
+	uint line_start = prop.start_offset;
+	while (line_start > 0 && content[line_start - 1] != '\n') {
+		line_start--;
+	}
+	uint indent_end = line_start;
+	while (indent_end < prop.start_offset
+		&& (content[indent_end] == ' ' || content[indent_end] == '\t')) {
+		indent_end++;
+	}
+	String indent = content[line_start:indent_end - line_start];
+
+	// Locate the type annotation end. The PROPERTY_DECL's range covers
+	// `var x: T = expr`. We want to replace from end of type to end of
+	// initializer with newline + indent + name = expr.
+	// Find type_text end: search for type_text starting after `:`.
+	// Simpler: find the `=` token between cursor and init.start_offset.
+	uint scan = prop.start_offset;
+	uint eq_offset = uint.max;
+	while (scan < init.start_offset) {
+		if (content[scan] == '=' && (scan + 1 >= content.len || content[scan + 1] != '=')) {
+			eq_offset = scan;
+			break;
+		}
+		scan++;
+	}
+	if (eq_offset == uint.max) return null;
+
+	// Trim trailing whitespace from before `=` (so we don't leave
+	// `var x: Int ` with trailing space). Find first non-WS char before `=`.
+	uint pre_eq_end = eq_offset;
+	while (pre_eq_end > prop.start_offset
+		&& (content[pre_eq_end - 1] == ' ' || content[pre_eq_end - 1] == '\t')) {
+		pre_eq_end--;
+	}
+
+	uint init_end = init.end_offset;
+	if (init_end > content.len) init_end = (uint)content.len;
+	if (pre_eq_end >= init_end) return null;
+
+	String init_text = content[init.start_offset:init_end - init.start_offset];
+
+	// Build replacement: newline + indent + name + " = " + init.
+	// Range: from end of trimmed-WS-before-`=` up to end of init.
+	DString new_text;
+	new_text.tinit();
+	new_text.appendf("\n%s%s = %s", indent, prop.name, init_text);
+
+	// Compute line/col for pre_eq_end (same line as `=`, so use `=` line
+	// from scan; col = pre_eq_end - line_start_of_eq).
+	uint eq_line_start = eq_offset;
+	while (eq_line_start > 0 && content[eq_line_start - 1] != '\n') {
+		eq_line_start--;
+	}
+	// Count newlines from 0 to eq_line_start to get line number.
+	uint start_line2 = 0;
+	for (uint i = 0; i < eq_line_start; i++) {
+		if (content[i] == '\n') start_line2++;
+	}
+	uint start_col2 = pre_eq_end - eq_line_start;
+
+	// init.end_line/end_col already computed by parser.
+	uint end_line2 = init.end_line;
+	uint end_col2 = init.end_col;
+
+	Object* start_pos = object::new_obj(tmem);
+	start_pos.set("line", (int)start_line2);
+	start_pos.set("character", (int)start_col2);
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)end_line2);
+	end_pos.set("character", (int)end_col2);
+	Object* edit_range = object::new_obj(tmem);
+	edit_range.set("start", start_pos);
+	edit_range.set("end", end_pos);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Split declaration and assignment");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
 }

@@ -2788,3 +2788,109 @@ fn void scope_wrap_skips_dot_receiver() @test {
 			"expected no action or whole DOT wrap, got '%s'", new_text);
 	};
 }
+
+fn void split_decl_basic_var() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `fun foo() { var x: Int = 42 }` — cursor on `x` (col 16)
+		String content = `fun foo() { var x: Int = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "\nx = 42", "expected '\\nx = 42', got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_val() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val x: Int = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action for val, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_no_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { var x = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action without type, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_no_init() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { var x: Int }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action without init, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_top_level() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `var x: Int = 42`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 4, 0, 4);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action for top-level var, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_preserves_indent() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// 4-space indented var inside nested block
+		String content = "fun foo() {\n    var x: String = \"hi\"\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// `x` is at line 1, col ~8
+		Object* params = make_extract_params("file:///test.kt", 1, 8, 1, 8);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "\n    x = \"hi\"",
+			"expected '\\n    x = \"hi\"', got '%s'", new_text);
+	};
+}
