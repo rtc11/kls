@@ -181,6 +181,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (if_to_when != null) {
 			actions.push(if_to_when);
 		}
+		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
+		if (when_to_if != null) {
+			actions.push(when_to_if);
+		}
 	}
 
 	// ── Cursor-context: add import for identifier under cursor ───
@@ -630,6 +634,201 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Convert to when");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ── Refactor: convert when → if-chain ────────────────────────────
+
+/**
+ * Translate a when-arm condition (verbatim source text from the cond AST node)
+ * into an if-chain condition.
+ *  - subject empty       → cond_text returned verbatim
+ *  - cond is "is T"/"!is T" or "in r"/"!in r" → "subject <op> ..."
+ *  - else                → "subject == cond_text"
+ */
+fn String arm_label_to_if_cond(String subject, String cond_text) {
+	if (subject.len == 0) return cond_text;
+	String t = cond_text.trim();
+	if (t.starts_with("is ") || t.starts_with("!is ")) {
+		return string::tformat("%s %s", subject, t);
+	}
+	if (t.starts_with("in ") || t.starts_with("!in ")) {
+		return string::tformat("%s %s", subject, t);
+	}
+	return string::tformat("%s == %s", subject, t);
+}
+
+fn Object* try_convert_when_to_if_chain(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest WHEN_EXPR containing cursor
+	uint when_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_EXPR) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			when_idx = i;
+		}
+	}
+	if (when_idx == uint.max) return null;
+
+	AstNode* when_n = &ast.nodes[when_idx];
+
+	// Walk direct children: subject (optional, kind != WHEN_ENTRY) then WHEN_ENTRYs.
+	String subject = "";
+	uint[64] entries;
+	usz entry_count = 0;
+	for (uint i = 1; i < ast.node_count; i++) {
+		if (ast.nodes[i].parent != when_idx) continue;
+		AstNode* c = &ast.nodes[i];
+		if (c.kind == WHEN_ENTRY) {
+			if (entry_count >= 64) return null;
+			entries[entry_count++] = i;
+			continue;
+		}
+		// Subject candidate. Bail if it's a property decl (when (val x = ...)).
+		if (c.kind == PROPERTY_DECL) return null;
+		if (subject.len == 0) {
+			subject = doc.content[(usz)c.start_offset..(usz)c.end_offset - 1];
+		}
+	}
+	if (entry_count == 0) return null;
+
+	String outer_indent = line_leading_indent(doc.content, when_n.start_line);
+	String inner_indent = string::tformat("%s\t", outer_indent);
+
+	DString out;
+	out.tinit();
+	bool first_arm = true;
+	bool emitted_else = false;
+
+	for (usz e = 0; e < entry_count; e++) {
+		uint eidx = entries[e];
+		AstNode* en = &ast.nodes[eidx];
+		bool is_else = en.extra_text == "else";
+
+		// Children of this WHEN_ENTRY: cond exprs then body. Body = last child.
+		uint[16] kids;
+		usz kid_count = 0;
+		for (uint j = 1; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent != eidx) continue;
+			if (kid_count >= 16) return null;
+			kids[kid_count++] = j;
+		}
+		if (kid_count == 0) return null;
+
+		uint body_idx = kids[kid_count - 1];
+		usz cond_count = is_else ? 0 : kid_count - 1;
+
+		AstNode* body_n = &ast.nodes[body_idx];
+		String body_text = doc.content[(usz)body_n.start_offset..(usz)body_n.end_offset - 1];
+
+		// If non-else and cond_count == 0, parser may have failed to adopt
+		// cond AST (e.g. angle-bracket ambiguity). Fall back to source text
+		// from entry start up to "->".
+		String fallback_cond = "";
+		if (!is_else && cond_count == 0) {
+			uint p = en.start_offset;
+			uint limit = body_n.start_offset;
+			while (p + 1 < limit) {
+				if (doc.content[p] == '-' && doc.content[p + 1] == '>') break;
+				p++;
+			}
+			if (p + 1 >= limit) return null;
+			fallback_cond = doc.content[(usz)en.start_offset..(usz)p - 1].trim();
+			if (fallback_cond.len == 0) return null;
+		}
+
+		// Wrap body in {} if not already a block
+		bool body_is_block = body_n.kind == BLOCK;
+		String wrapped_body;
+		if (body_is_block) {
+			wrapped_body = reindent_block(body_text, outer_indent);
+		} else {
+			DString bb;
+			bb.tinit();
+			bb.append("{\n");
+			bb.append(inner_indent);
+			bb.append(body_text.trim());
+			bb.append("\n");
+			bb.append(outer_indent);
+			bb.append("}");
+			wrapped_body = bb.str_view();
+		}
+
+		if (is_else) {
+			out.append(" else ");
+			out.append(wrapped_body);
+			emitted_else = true;
+		} else {
+			// Translate cond(s) and join with ||
+			DString cond_buf;
+			cond_buf.tinit();
+			if (cond_count == 0) {
+				// Use source-text fallback (single cond)
+				String if_cond = arm_label_to_if_cond(subject, fallback_cond);
+				cond_buf.append(if_cond);
+			} else {
+				for (usz c = 0; c < cond_count; c++) {
+					AstNode* cn = &ast.nodes[kids[c]];
+					String cond_src = doc.content[(usz)cn.start_offset..(usz)cn.end_offset - 1];
+					String if_cond = arm_label_to_if_cond(subject, cond_src);
+					if (c > 0) cond_buf.append(" || ");
+					cond_buf.append(if_cond);
+				}
+			}
+			if (first_arm) {
+				out.appendf("if (%s) ", cond_buf.str_view());
+				first_arm = false;
+			} else {
+				out.appendf(" else if (%s) ", cond_buf.str_view());
+			}
+			out.append(wrapped_body);
+		}
+	}
+
+	if (first_arm) return null; // only had else?
+
+	Object* rs = object::new_obj(tmem);
+	rs.set("line", (int)when_n.start_line);
+	rs.set("character", (int)when_n.start_col);
+	Object* re = object::new_obj(tmem);
+	re.set("line", (int)when_n.end_line);
+	re.set("character", (int)when_n.end_col);
+	Object* rrange = object::new_obj(tmem);
+	rrange.set("start", rs);
+	rrange.set("end", re);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", rrange);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert to if-chain");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
