@@ -2862,6 +2862,45 @@ fn void catch_param_typed_from_annotation() @test {
 
 // ── Phase 2: Lambda body type inference ─────────────────────────────
 
+fn void infix_extension_fun_call_resolves_return_type() @test {
+	// `a plus b` where plus is `infix fun Int.plus2(other: Int): String`
+	// should be typed via extension-fn return type, not stdlib Int.plus.
+	@pool() {
+		String src = `infix fun Int.combine(other: Int): String = ""
+fun f() {
+	val r = 1 combine 2
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && t == "String", "r: String (infix ext combine), got '%s'", t);
+	};
+}
+
+fn void infix_member_fun_call_resolves_return_type() @test {
+	// Member infix on user class.
+	@pool() {
+		String src = `class M { infix fun glue(s: String): Int = 0 }
+fun f() {
+	val m = M()
+	val r = m glue "x"
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && t == "Int", "r: Int (member infix glue), got '%s'", t);
+	};
+}
+
+
 fn void map_infers_return_type_from_lambda() @test {
 	@pool() {
 		String src = `

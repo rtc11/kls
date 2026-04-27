@@ -4975,7 +4975,44 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 	}
 	if (op == "until" || op == "downTo") return { .kind = SIMPLE, .name = "IntRange" };
 
+	// Generic infix call: `a NAME b` where NAME is a user-defined infix
+	// function (member or extension) on left receiver. Kotlin spec §17.6
+	// (infix function calls). Lookup uses standard cascade; matches only
+	// on name (overload by parameter type not modelled).
+	if (op.len > 0 && is_identifier_op(op)) {
+		TypeRef left_t = TYPE_UNKNOWN;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				left_t = info.node_types[j];
+				break;
+			}
+		}
+		if (left_t.kind != UNKNOWN) {
+			TypeRef looked_up = lookup_member_anywhere(pr, info, left_t, op);
+			if (looked_up.kind != UNKNOWN) return looked_up;
+		}
+	}
+
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * True when `op` looks like an identifier (alphanumeric + underscore,
+ * starts with letter or underscore) — i.e. likely an infix function
+ * name rather than a punctuation operator.
+ */
+fn bool is_identifier_op(String op) {
+	if (op.len == 0) return false;
+	char c0 = op[0];
+	bool first_ok = (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_';
+	if (!first_ok) return false;
+	for (usz i = 1; i < op.len; i++) {
+		char c = op[i];
+		bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		       || (c >= '0' && c <= '9') || c == '_';
+		if (!ok) return false;
+	}
+	return true;
 }
 
 // ── Prefix expression resolution ───────────────────────────────────
