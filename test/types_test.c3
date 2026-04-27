@@ -6155,6 +6155,37 @@ fn void cross_file_typealias_to_user_class() @test {
 	};
 }
 
+fn void cross_file_nested_generic_property_chain() @test {
+	// Box<T> from another file. Box(Box(42)).v.v should give Int via
+	// nested TP substitution along chained .v access (Kotlin spec §9.1).
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///box.kt", "class Box<T>(val v: T)");
+
+		String src = `fun main() {
+	val nested = Box(Box(42))
+	val inner = nested.v
+	val n = inner.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint nested_idx = find_decl(pr, "nested");
+		uint inner_idx = find_decl(pr, "inner");
+		uint n_idx = find_decl(pr, "n");
+		String nt = nested_idx > 0 && ti.has_type[nested_idx] ? types::format_type(&ti.node_types[nested_idx]) : "<no>";
+		String it = inner_idx > 0 && ti.has_type[inner_idx] ? types::format_type(&ti.node_types[inner_idx]) : "<no>";
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(nested_idx != 0 && nt == "Box<Box<Int>>", "nested: Box<Box<Int>>, got '%s'", nt);
+		assert(inner_idx != 0 && it == "Box<Int>", "inner: Box<Int>, got '%s'", it);
+		assert(n_idx != 0 && t == "Int", "n: Int (nested .v.v substitution), got '%s'", t);
+	};
+}
+
 // ── Multi-condition when arms (LUB) ───────────────────────────────
 
 fn void when_multi_condition_same_type_narrows() @test {

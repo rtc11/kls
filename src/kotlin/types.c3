@@ -2437,7 +2437,10 @@ fn TypeRef infer_implicit_it_from_user_call(ParseResult* pr, TypeInfo* info,
 			if (pt == tp_names[t]) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
 				if (arg.kind != UNKNOWN && arg.name.len > 0) {
-					subst_names[t] = arg.name;
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
 					top_bound = true;
@@ -2580,7 +2583,10 @@ fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
 			if (pt == tp_names[t]) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
 				if (arg.kind != UNKNOWN && arg.name.len > 0) {
-					subst_names[t] = arg.name;
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
 					top_level_bound = true;
@@ -2720,7 +2726,10 @@ fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
 			if (pt == tp_names[t]) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
 				if (arg.kind != UNKNOWN && arg.name.len > 0) {
-					subst_names[t] = arg.name;
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
 					top_level_bound = true;
@@ -3949,7 +3958,8 @@ fn TypeRef infer_xfile_class_type_args(ParseResult* pr, TypeInfo* info,
 				if (pt == tp_names[t]) {
 					TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
 					if (arg.kind != UNKNOWN && arg.name.len > 0) {
-						subst_names[t] = arg.name;
+						// Preserve nested generics (see §9.1).
+						subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
 						subst_nullable[t] = arg.nullable;
 						subst_known[t] = true;
 						top_bound = true;
@@ -4091,7 +4101,10 @@ fn TypeRef infer_xfile_fun_type_args(ParseResult* pr, TypeInfo* info,
 			if (pt == tp_names[t]) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
 				if (arg.kind != UNKNOWN && arg.name.len > 0) {
-					subst_names[t] = arg.name;
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
 					top_level_bound = true;
@@ -4288,7 +4301,10 @@ fn TypeRef infer_xfile_ext_fn_return(String fun_uri, String fun_name, uint fun_l
 			if (pt == tp_names[t]) {
 				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
 				if (arg.kind != UNKNOWN && arg.name.len > 0) {
-					subst_names[t] = arg.name;
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
 					subst_nullable[t] = arg.nullable;
 					subst_known[t] = true;
 					top_level_bound = true;
@@ -4372,13 +4388,28 @@ fn TypeRef substitute_class_tps_from_receiver(TypeRef raw, TypeRef receiver, Str
 		String binding = receiver.type_arg_names[t];
 		if (binding.len == 0) continue;
 		bool b_nullable = receiver.type_arg_nullable[t];
-
-		// Top-level: raw.name == TP
-		if (out.name == tp) {
-			out.name = binding;
-			if (b_nullable) out.nullable = true;
+		bool binding_is_generic = false;
+		for (usz i = 0; i < binding.len; i++) {
+			if (binding[i] == '<') { binding_is_generic = true; break; }
 		}
-		// Nested: raw.type_arg_names[i] == TP
+
+		// Top-level: raw.name == TP. If binding is generic (e.g. "Box<Int>"),
+		// reparse so kind/type_arg_count/type_arg_names are populated;
+		// otherwise SIMPLE name swap is enough (Kotlin spec §9.1).
+		if (out.name == tp) {
+			if (binding_is_generic) {
+				TypeRef parsed = parse_type_text(binding);
+				bool was_nullable = out.nullable || b_nullable;
+				out = parsed;
+				if (was_nullable) out.nullable = true;
+			} else {
+				out.name = binding;
+				if (b_nullable) out.nullable = true;
+			}
+		}
+		// Nested: raw.type_arg_names[i] == TP. Slot stores name string only;
+		// nested generics inside a slot can't be expressed here, but for the
+		// bare-TP case the swap is correct.
 		for (uint a = 0; a < out.type_arg_count; a++) {
 			if (out.type_arg_names[a] == tp) {
 				out.type_arg_names[a] = binding;
