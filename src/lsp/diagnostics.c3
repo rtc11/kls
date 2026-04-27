@@ -173,6 +173,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null && config::unnecessary_elvis_diagnostic_enabled()) {
 			add_unnecessary_elvis_diagnostics(diagnostics, ast, type_info);
 		}
+		if (config::empty_catch_diagnostic_enabled()) {
+			add_empty_catch_diagnostics(diagnostics, ast);
+		}
 	}
 
 	return diagnostics;
@@ -3213,6 +3216,55 @@ fn void add_unnecessary_elvis_diagnostics(Object* diagnostics, ParseResult* ast,
 		diag.set("tags", tags);
 
 		diag.set("message", "Elvis operator (?:) on non-null value is redundant");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Empty catch block ──────────────────────────────────────────
+//
+// Detect CATCH_CLAUSE whose BLOCK body has zero statement children.
+// Emits a Hint suggesting the catch should log or rethrow.
+fn void add_empty_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != CATCH_CLAUSE) continue;
+
+		// Find BLOCK child (last child, kind == BLOCK)
+		uint block_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == BLOCK) {
+				block_idx = c;
+			}
+		}
+		if (block_idx == ast::NO_PARENT) continue;
+
+		AstNode* block = &ast.nodes[block_idx];
+
+		// Count statement children of BLOCK
+		uint stmt_count = 0;
+		for (uint c = block.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != block_idx) continue;
+			stmt_count++;
+		}
+		if (stmt_count > 0) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)block.start_line);
+		start.set("character", (int)block.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)block.end_line);
+		end_pos.set("character", (int)block.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		diag.set("message", "Empty catch block; consider logging or rethrowing");
 
 		diagnostics.push(diag);
 	}

@@ -31,6 +31,7 @@ struct ServerConfig {
 	bool unnecessary_safe_call_diagnostic; // emit warnings for `x?.foo` where x is statically non-null
 	bool redundant_if_bool_diagnostic;  // emit warnings for `if (cond) true else false` and `if (cond) false else true`
 	bool unnecessary_elvis_diagnostic;  // emit warnings for `x ?: y` where x is statically non-null
+	bool empty_catch_diagnostic;        // emit hints for catch clauses with empty bodies
 }
 
 // Module-level global with defaults
@@ -48,6 +49,7 @@ ServerConfig g_config = {
 	.unnecessary_safe_call_diagnostic = true,
 	.redundant_if_bool_diagnostic = true,
 	.unnecessary_elvis_diagnostic = true,
+	.empty_catch_diagnostic = true,
 };
 
 /**
@@ -160,6 +162,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unnecessary_elvis_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("emptyCatchDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.empty_catch_diagnostic = val.b;
+			log::debug("[kls] config: emptyCatchDiagnostic = %s",
+				g_config.empty_catch_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -268,6 +278,14 @@ fn bool redundant_if_bool_diagnostic_enabled() {
  */
 fn bool unnecessary_elvis_diagnostic_enabled() {
 	return g_config.unnecessary_elvis_diagnostic;
+}
+
+/**
+ * Whether to emit "Empty catch block" hints for catch clauses with
+ * empty bodies (no statements).
+ */
+fn bool empty_catch_diagnostic_enabled() {
+	return g_config.empty_catch_diagnostic;
 }
 
 /**
