@@ -253,6 +253,7 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (expr_to_block != null) {
 			actions.push(expr_to_block);
 		}
+		add_scope_function_actions(actions, uri, doc, ast, params);
 	}
 
 	// ── Cursor-context: add import for identifier under cursor ───
@@ -3911,4 +3912,148 @@ fn Object* try_remove_redundant_override(String uri, Document* doc, ParseResult*
 	action.set("diagnostics", action_diags);
 
 	return action;
+}
+
+// ── Refactor: convert to scope function (let/run/apply/also) ────
+//
+// When the cursor is on an expression, offer 4 actions to wrap it
+// in a Kotlin scope function. The expression becomes the receiver;
+// the body is a placeholder so the user can fill it in.
+//
+//   let   → expr.let { it }
+//   run   → expr.run { this }
+//   apply → expr.apply { }
+//   also  → expr.also { it }
+//
+// Skipped when the expression is the receiver of an enclosing DOT_EXPR
+// (would break the chain). User can wrap at the DOT_EXPR level instead.
+
+/**
+ * Find the smallest "wrappable" expression containing the given byte
+ * offset. Returns NO_PARENT if none.
+ */
+fn uint find_wrappable_expr_at(ParseResult* ast, long offset) {
+	uint best_idx = ast::NO_PARENT;
+	uint best_size = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		bool eligible = false;
+		switch (n.kind) {
+			case NAME_EXPR:
+			case DOT_EXPR:
+			case CALL_EXPR:
+			case LITERAL_EXPR:
+			case STRING_TEMPLATE_EXPR:
+			case PAREN_EXPR:
+			case BINARY_EXPR:
+			case POSTFIX_EXPR:
+			case PREFIX_EXPR:
+			case THIS_EXPR:
+			case SUPER_EXPR:
+				eligible = true;
+				break;
+			default:
+				break;
+		}
+		if (!eligible) continue;
+		if ((long)n.start_offset > offset) continue;
+		if ((long)n.end_offset < offset) continue;
+		uint size = n.end_offset - n.start_offset;
+		if (size < best_size) {
+			best_size = size;
+			best_idx = i;
+		}
+	}
+	return best_idx;
+}
+
+/**
+ * Build a single scope-function action.
+ */
+fn Object* build_scope_function_action(String uri, String expr_text, String fn_name,
+		String body_placeholder, AstNode* expr_node) {
+	String new_text;
+	if (body_placeholder.len == 0) {
+		new_text = string::tformat("%s.%s {  }", expr_text, fn_name);
+	} else {
+		new_text = string::tformat("%s.%s { %s }", expr_text, fn_name, body_placeholder);
+	}
+
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)expr_node.start_line);
+	edit_start.set("character", (int)expr_node.start_col);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", (int)expr_node.end_line);
+	edit_end.set("character", (int)expr_node.end_col);
+	Object* edit_range = object::new_obj(tmem);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit_obj = object::new_obj(tmem);
+	edit_obj.set("range", edit_range);
+	edit_obj.set("newText", new_text);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit_obj);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	String title = string::tformat("Wrap in '%s'", fn_name);
+	action.set("title", title);
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+
+	return action;
+}
+
+fn void add_scope_function_actions(Object* actions, String uri, Document* doc,
+		ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return;
+	int cursor_line;
+	int cursor_col;
+	if (try v = start.get_int("line")) { cursor_line = v; } else { return; }
+	if (try v = start.get_int("character")) { cursor_col = v; } else { return; }
+
+	long cursor_offset = document::position_to_byte_offset(doc.content, (uint)cursor_line, (uint)cursor_col);
+	if (cursor_offset < 0) return;
+
+	uint expr_idx = find_wrappable_expr_at(ast, cursor_offset);
+	if (expr_idx == ast::NO_PARENT) return;
+
+	AstNode* expr = &ast.nodes[expr_idx];
+
+	// Skip if the expression is the receiver of an enclosing DOT_EXPR
+	// (would break member access chains). The receiver is the first
+	// child of DOT_EXPR by parent link. Detect by walking up.
+	if (expr.parent < ast.node_count) {
+		AstNode* parent = &ast.nodes[expr.parent];
+		if (parent.kind == DOT_EXPR) {
+			// Find first child of parent
+			for (uint c = 0; c < ast.node_count; c++) {
+				if (ast.nodes[c].parent != expr.parent) continue;
+				if (c == expr_idx) return; // expr is the receiver — skip
+				break;
+			}
+		}
+	}
+
+	if (expr.start_offset >= expr.end_offset) return;
+	if (expr.end_offset > doc.content.len) return;
+
+	String expr_text = doc.content[expr.start_offset:expr.end_offset - expr.start_offset];
+
+	actions.push(build_scope_function_action(uri, expr_text, "let", "it", expr));
+	actions.push(build_scope_function_action(uri, expr_text, "run", "this", expr));
+	actions.push(build_scope_function_action(uri, expr_text, "apply", "", expr));
+	actions.push(build_scope_function_action(uri, expr_text, "also", "it", expr));
 }
