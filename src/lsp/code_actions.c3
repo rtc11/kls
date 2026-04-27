@@ -149,6 +149,14 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		}
 	}
 
+	// ── Refactor: surround with try/catch ───────────────────────
+	if (doc != null && ast != null && is_kind_wanted("refactor.rewrite", only_kinds[:only_count])) {
+		Object* surround = try_surround_with_try_catch(uri, doc, ast, params);
+		if (surround != null) {
+			actions.push(surround);
+		}
+	}
+
 	// ── Source: generate data class methods ──────────────────────
 	if (doc != null && ast != null && is_kind_wanted("source.generate", only_kinds[:only_count])) {
 		add_data_class_actions(actions, uri, doc, ast, params);
@@ -1962,4 +1970,143 @@ fn String build_indent_for_column(String content, uint target_col) {
 	s.tinit();
 	for (uint i = 1; i < target_col; i++) s.append_char(' ');
 	return s.str_view();
+}
+
+// ── Refactor: surround with try/catch ─────────────────────────────
+
+/**
+ * Build a "Surround with try/catch" code action for the given selection.
+ *
+ * Wraps the selected text in:
+ *   try {
+ *       <selected text>
+ *   } catch (e: Exception) {
+ *       TODO("Handle exception")
+ *   }
+ *
+ * Selection rules:
+ *   - Empty selection: no action.
+ *   - Selection must lie inside a function/lambda body (BLOCK ancestor).
+ *   - Indent inferred from the line where selection starts.
+ *   - The selected text is re-indented one extra level (4 spaces) inside
+ *     the try block.
+ */
+fn Object* try_surround_with_try_catch(String uri, Document* doc, ParseResult* ast, Object* params) {
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	Object* end_pos = range.get("end") ?? null;
+	if (start == null || end_pos == null) return null;
+
+	uint start_line = (uint)(start.get_int("line") ?? 0);
+	uint start_col = (uint)(start.get_int("character") ?? 0);
+	uint end_line = (uint)(end_pos.get_int("line") ?? 0);
+	uint end_col = (uint)(end_pos.get_int("character") ?? 0);
+
+	// Empty selection → nothing to surround
+	if (start_line == end_line && start_col == end_col) return null;
+
+	long sel_start = document::position_to_byte_offset(doc.content, start_line, start_col);
+	long sel_end = document::position_to_byte_offset(doc.content, end_line, end_col);
+	if (sel_start < 0 || sel_end < 0 || sel_end <= sel_start) return null;
+
+	// Require the selection to be inside a BLOCK (function/lambda body),
+	// otherwise wrapping with try/catch is meaningless (e.g. at top level).
+	bool inside_block = false;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BLOCK) continue;
+		if (n.start_offset <= (uint)sel_start && n.end_offset >= (uint)sel_end) {
+			inside_block = true;
+			break;
+		}
+	}
+	if (!inside_block) return null;
+
+	// Compute base indent from the start line
+	String base_indent = line_leading_indent(doc.content, start_line);
+
+	// Get selected text
+	String selected = doc.content[(usz)sel_start..(usz)sel_end - 1];
+
+	// Re-indent selected text: every line gets one extra indent level (4 spaces)
+	// The first line keeps no leading indent (we'll insert it inline after `try {\n`).
+	String inner_indent = string::tformat("%s    ", base_indent);
+	String reindented = reindent_block(selected, inner_indent);
+
+	DString out;
+	out.tinit();
+	out.appendf("try {\n%s%s\n%s} catch (e: Exception) {\n%s    TODO(\"Handle exception\")\n%s}",
+		inner_indent, reindented, base_indent, base_indent, base_indent);
+
+	Object* edit_obj = object::new_obj(tmem);
+	edit_obj.set("range", range);
+	edit_obj.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit_obj);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Surround with try/catch");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+
+	return action;
+}
+
+/**
+ * Get the leading whitespace of the given 0-indexed line.
+ * Returns an empty string for missing lines or lines that start with non-whitespace.
+ */
+fn String line_leading_indent(String content, uint line) {
+	uint cur = 0;
+	usz line_start = 0;
+	while (line_start < content.len && cur < line) {
+		if (content[line_start] == '\n') cur++;
+		line_start++;
+	}
+	if (cur < line) return "";
+	usz ws_end = line_start;
+	while (ws_end < content.len && (content[ws_end] == ' ' || content[ws_end] == '\t')) {
+		ws_end++;
+	}
+	if (ws_end == line_start) return "";
+	return content[line_start..ws_end - 1];
+}
+
+/**
+ * Re-indent a multi-line block: every line *after* the first gets `prefix`
+ * prepended. The first line is left alone (caller positions it).
+ */
+fn String reindent_block(String text, String prefix) {
+	DString out;
+	out.tinit();
+	usz i = 0;
+	bool first_line = true;
+	while (i < text.len) {
+		if (first_line) {
+			while (i < text.len && text[i] != '\n') {
+				out.append_char(text[i]);
+				i++;
+			}
+			first_line = false;
+		} else {
+			out.append(prefix);
+			while (i < text.len && text[i] != '\n') {
+				out.append_char(text[i]);
+				i++;
+			}
+		}
+		if (i < text.len && text[i] == '\n') {
+			out.append_char('\n');
+			i++;
+		}
+	}
+	return out.str_view();
 }
