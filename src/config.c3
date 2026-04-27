@@ -30,6 +30,7 @@ struct ServerConfig {
 	bool unreachable_catch_diagnostic;  // emit warnings for catch clauses shadowed by an earlier supertype catch
 	bool unnecessary_safe_call_diagnostic; // emit warnings for `x?.foo` where x is statically non-null
 	bool redundant_if_bool_diagnostic;  // emit warnings for `if (cond) true else false` and `if (cond) false else true`
+	bool unnecessary_elvis_diagnostic;  // emit warnings for `x ?: y` where x is statically non-null
 }
 
 // Module-level global with defaults
@@ -46,6 +47,7 @@ ServerConfig g_config = {
 	.unreachable_catch_diagnostic = true,
 	.unnecessary_safe_call_diagnostic = true,
 	.redundant_if_bool_diagnostic = true,
+	.unnecessary_elvis_diagnostic = true,
 };
 
 /**
@@ -150,6 +152,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_if_bool_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unnecessaryElvisDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unnecessary_elvis_diagnostic = val.b;
+			log::debug("[kls] config: unnecessaryElvisDiagnostic = %s",
+				g_config.unnecessary_elvis_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -250,6 +260,14 @@ fn bool unnecessary_safe_call_diagnostic_enabled() {
  */
 fn bool redundant_if_bool_diagnostic_enabled() {
 	return g_config.redundant_if_bool_diagnostic;
+}
+
+/**
+ * Whether to emit "Elvis operator (?:) on non-null value is redundant"
+ * warnings when the LHS of `?:` is statically non-null.
+ */
+fn bool unnecessary_elvis_diagnostic_enabled() {
+	return g_config.unnecessary_elvis_diagnostic;
 }
 
 /**

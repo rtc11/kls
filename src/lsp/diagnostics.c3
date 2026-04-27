@@ -170,6 +170,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::redundant_if_bool_diagnostic_enabled()) {
 			add_redundant_if_bool_diagnostics(diagnostics, ast);
 		}
+		if (type_info != null && config::unnecessary_elvis_diagnostic_enabled()) {
+			add_unnecessary_elvis_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -3135,4 +3138,82 @@ fn String unwrap_bool_literal(ParseResult* ast, uint idx) {
 		return unwrap_bool_literal(ast, sole_child);
 	}
 	return "";
+}
+
+// ── Unnecessary elvis (?:) ──────────────────────────────────────
+//
+// Detect BINARY_EXPR `lhs ?: rhs` where lhs is statically non-null.
+// Per Kotlin spec: ?: evaluates rhs only if lhs is null. If lhs is
+// non-null, rhs is dead code and the whole expression equals lhs.
+fn void add_unnecessary_elvis_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		if (node.extra_text != "?:") continue;
+
+		// LHS = first child by parent index
+		uint lhs_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			lhs_idx = c;
+			break;
+		}
+		if (lhs_idx == ast::NO_PARENT) continue;
+
+		AstNode* lhs = &ast.nodes[lhs_idx];
+
+		// Skip null-literal LHS (?: is meaningful: always picks RHS)
+		if (lhs.kind == LITERAL_EXPR && lhs.extra_text == "null") continue;
+
+		bool is_non_null = false;
+
+		// Syntactic always-non-null shapes
+		switch (lhs.kind) {
+			case THIS_EXPR:
+			case SUPER_EXPR:
+			case STRING_TEMPLATE_EXPR:
+				is_non_null = true;
+				break;
+			case LITERAL_EXPR:
+				if (lhs.extra_text != "null") is_non_null = true;
+				break;
+			default:
+				break;
+		}
+
+		// Type-based check (covers smart-cast narrowing via phase 10)
+		if (!is_non_null && type_info.has_type[lhs_idx]) {
+			TypeRef tr = type_info.node_types[lhs_idx];
+			if (!tr.nullable && tr.kind != UNKNOWN) {
+				is_non_null = true;
+			}
+		}
+
+		if (!is_non_null) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", "Elvis operator (?:) on non-null value is redundant");
+
+		diagnostics.push(diag);
+	}
 }

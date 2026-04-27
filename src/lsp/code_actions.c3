@@ -94,6 +94,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: remove redundant elvis `?:` on non-null LHS
+		if (message.starts_with("Elvis operator (?:) on non-null") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_remove_redundant_elvis(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -3747,4 +3756,74 @@ fn void flatten_concat(ParseResult* ast, uint idx, uint[] out, uint* count) {
 		out[*count] = idx;
 		(*count)++;
 	}
+}
+
+// ── Quickfix: remove redundant elvis (?:) ───────────────────────
+//
+// For `lhs ?: rhs` flagged as redundant, replace the whole BINARY_EXPR
+// with the LHS source text.
+fn Object* try_remove_redundant_elvis(String uri, Document* doc, ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate elvis BINARY_EXPR matching diag start position
+	uint elvis_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		if (n.extra_text != "?:") continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			elvis_idx = i;
+			break;
+		}
+	}
+	if (elvis_idx == (uint)-1) return null;
+	AstNode* elvis = &ast.nodes[elvis_idx];
+
+	// Find LHS (first child)
+	uint lhs_idx = (uint)-1;
+	for (uint c = elvis.children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != elvis_idx) continue;
+		lhs_idx = c;
+		break;
+	}
+	if (lhs_idx == (uint)-1) return null;
+	AstNode* lhs = &ast.nodes[lhs_idx];
+
+	if (lhs.start_offset >= lhs.end_offset) return null;
+	if (lhs.end_offset > doc.content.len) return null;
+
+	String lhs_text = doc.content[lhs.start_offset:lhs.end_offset - lhs.start_offset];
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", range);
+	edit.set("newText", lhs_text);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Remove redundant '?:'");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
 }
