@@ -192,6 +192,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (add_type != null) {
 			actions.push(add_type);
 		}
+		Object* add_ret = try_add_return_type(uri, doc, ast, ti_aet, params);
+		if (add_ret != null) {
+			actions.push(add_ret);
+		}
 	}
 
 	// ── Cursor-context: add import for identifier under cursor ───
@@ -2853,5 +2857,108 @@ fn Object* try_add_missing_enum_branches(String uri, Document* doc, ParseResult*
 	action_diags.push(diag);
 	action.set("diagnostics", action_diags);
 
+	return action;
+}
+
+// ── Refactor: add explicit return type to function ───────────────
+
+/**
+ * Cursor on `fun foo(...) = expr` or `fun foo(...) { ... }` (no
+ * declared return type) → offer "Add return type" → inserts `: T`
+ * between `)` and the body. Reuses
+ * `inlay_hints::infer_fun_return_type` so the type matches what
+ * users already see as a hint.
+ *
+ * Skips: functions with explicit return type, anonymous funs,
+ * Unit/Nothing/UNKNOWN inferred types.
+ */
+fn Object* try_add_return_type(String uri, Document* doc, ParseResult* ast,
+		TypeInfo* ti, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest FUN_DECL containing cursor
+	uint fun_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if ((uint)cursor_offset < n.start_offset) continue;
+		if ((uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			fun_idx = i;
+		}
+	}
+	if (fun_idx == uint.max) return null;
+
+	AstNode* fun_node = &ast.nodes[fun_idx];
+
+	// Skip if return type already present
+	if (fun_node.type_text.len > 0) return null;
+
+	// Skip anonymous funs
+	if (fun_node.name.len == 0) return null;
+
+	// Infer return type from body
+	String return_type = "";
+	if (try rt = inlay_hints::infer_fun_return_type(ast, ti, fun_idx, doc.content)) {
+		return_type = rt;
+	} else {
+		return null;
+	}
+
+	// Reject useless types
+	if (return_type.len == 0) return null;
+	if (return_type == "Unit" || return_type == "Nothing") return null;
+	if (return_type.contains("UNKNOWN") || return_type == "?") return null;
+
+	// Find position: just after closing ')' of param list
+	uint hint_line;
+	uint hint_col;
+	if (try pos = inlay_hints::find_fun_paren_close(doc.content, fun_node)) {
+		hint_line = pos.line;
+		hint_col = pos.col + 1;
+	} else {
+		return null;
+	}
+
+	DString new_text;
+	new_text.tinit();
+	new_text.appendf(": %s", return_type);
+
+	Object* insert_pos = object::new_obj(tmem);
+	insert_pos.set("line", (int)hint_line);
+	insert_pos.set("character", (int)hint_col);
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_pos);
+	insert_range.set("end", insert_pos);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", insert_range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Add return type");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
 	return action;
 }
