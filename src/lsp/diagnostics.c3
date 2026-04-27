@@ -127,6 +127,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	// Flag val/var inside function bodies that are never read.
 	if (lexer_error_count == 0 && ast != null) {
 		add_unused_local_diagnostics(diagnostics, content, ast);
+		add_unused_parameter_diagnostics(diagnostics, content, ast);
 	}
 
 	// ── Val reassignment (Error) ─────────────────────────────────
@@ -1894,6 +1895,121 @@ fn void add_unused_local_diagnostics(Object* diagnostics, String content, ParseR
 
 			diagnostics.push(diag);
 		}
+	}
+}
+
+// ── Unused parameter diagnostics ──────────────────────────────────
+
+/**
+ * Check if a PARAM's enclosing function-like decl is in a context where
+ * unreferenced parameters are normal: override, open, abstract, external,
+ * expect, operator, or interface body.
+ */
+fn bool param_in_skip_context(ParseResult* ast, uint param_idx) {
+	AstNode* p = &ast.nodes[param_idx];
+	uint cur = p.parent;
+	while (cur != ast::NO_PARENT) {
+		AstNode* n = &ast.nodes[cur];
+		switch (n.kind) {
+			case FUN_DECL:
+				uint flags = n.mod_flags;
+				if ((flags & ast::MOD_OVERRIDE) != 0) return true;
+				if ((flags & ast::MOD_OPEN) != 0) return true;
+				if ((flags & ast::MOD_ABSTRACT) != 0) return true;
+				if ((flags & ast::MOD_EXTERNAL) != 0) return true;
+				if ((flags & ast::MOD_EXPECT) != 0) return true;
+				if ((flags & ast::MOD_OPERATOR) != 0) return true;
+				// Enclosing class is interface? Skip.
+				uint cls = n.parent;
+				while (cls != ast::NO_PARENT) {
+					AstNode* cn = &ast.nodes[cls];
+					if (cn.kind == INTERFACE_DECL) return true;
+					if (cn.kind == CLASS_DECL || cn.kind == OBJECT_DECL
+						|| cn.kind == COMPANION_OBJECT_DECL || cn.kind == FUN_DECL
+						|| cn.kind == FILE) break;
+					cls = cn.parent;
+				}
+				// FUN_DECL with no body: parser may still create FUN_DECL but
+				// without a BLOCK child. Skip in that case (abstract-like).
+				bool has_body = false;
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == cur && ast.nodes[j].kind == BLOCK) {
+						has_body = true;
+						break;
+					}
+				}
+				if (!has_body) return true;
+				return false;
+			case CONSTRUCTOR_DECL:
+				return false;
+			case LAMBDA_EXPR:
+			case ANONYMOUS_FUN_EXPR:
+				return true;
+			default:
+				break;
+		}
+		cur = n.parent;
+	}
+	return true;
+}
+
+fn bool is_param_name_used(ParseResult* ast, uint param_idx) {
+	AstNode* p = &ast.nodes[param_idx];
+	String name = p.name;
+	if (name.len == 0) return true;
+	for (uint i = 0; i < ast.node_count; i++) {
+		if (i == param_idx) continue;
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != NAME_EXPR) continue;
+		if (n.name != name) continue;
+		if (n.start_offset > p.start_offset) return true;
+	}
+	return false;
+}
+
+fn void add_unused_parameter_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	if (!config::unused_parameter_diagnostic_enabled()) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PARAM) continue;
+		if (n.name.len == 0) continue;
+		if (n.name[0] == '_') continue;
+
+		// Primary-ctor val/var PARAM is a public property — skip.
+		// `val` PARAMs get MOD_FINAL (added by parse_primary_constructor),
+		// `var` PARAMs get MOD_VAR. Regular fn params have neither.
+		if ((n.mod_flags & (ast::MOD_FINAL | ast::MOD_VAR)) != 0) continue;
+
+		if (param_in_skip_context(ast, i)) continue;
+		if (is_param_name_used(ast, i)) continue;
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.name_line);
+		start.set("character", (int)n.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.name_line);
+		end_pos.set("character", (int)(n.name_col + n.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Parameter '%s' is never used", n.name);
+		diag.set("message", message.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
 	}
 }
 

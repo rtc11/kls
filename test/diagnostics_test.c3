@@ -241,14 +241,20 @@ fun main() { val _x: Foo = Foo(); val _y: Baz = Baz() }`
 
 fn void import_used_in_type_annotation() @test {
 	@pool() {
-		// The imported name appears only as a type annotation
+		// The imported name appears only as a type annotation.
+		// Test scoped to: no "Unused import" diagnostic should appear.
+		// (An "unused parameter" hint for `x` is expected and unrelated.)
 		Object* result = build_test_diagnostics(
 			`import com.example.MyType
 fun process(x: MyType) {}`
 		);
 		assert(result.is_indexable());
 		if (result.is_array()) {
-			assert(result.get_len() == 0, "expected 0 diagnostics when import used as type, got %d", (int)result.get_len());
+			for (usz i = 0; i < result.get_len(); i++) {
+				String msg = result.get_at(i).get_string("message") ?? "";
+				assert(!msg.contains("Unused import"),
+					"unexpected unused-import diagnostic: %s", msg);
+			}
 		}
 	};
 }

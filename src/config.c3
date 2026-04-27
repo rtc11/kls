@@ -23,6 +23,7 @@ struct ServerConfig {
 	bool sealed_exhaustive_diagnostic;  // emit "non-exhaustive when on sealed type" warnings
 	bool enum_exhaustive_diagnostic;    // emit "non-exhaustive when on enum class" warnings
 	bool useless_cast_diagnostic;       // emit "useless cast" warnings for `x as T` when typeOf(x) == T
+	bool unused_parameter_diagnostic;   // emit hints for function PARAMs never referenced in body
 }
 
 // Module-level global with defaults
@@ -32,6 +33,7 @@ ServerConfig g_config = {
 	.sealed_exhaustive_diagnostic = true,
 	.enum_exhaustive_diagnostic = true,
 	.useless_cast_diagnostic = true,
+	.unused_parameter_diagnostic = true,
 };
 
 /**
@@ -80,6 +82,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.useless_cast_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unusedParameterDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unused_parameter_diagnostic = val.b;
+			log::debug("[kls] config: unusedParameterDiagnostic = %s",
+				g_config.unused_parameter_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -123,6 +133,14 @@ fn bool enum_exhaustive_diagnostic_enabled() {
  */
 fn bool useless_cast_diagnostic_enabled() {
 	return g_config.useless_cast_diagnostic;
+}
+
+/**
+ * Whether to emit "Parameter 'x' is never used" hints for function
+ * parameters that are never referenced in the body.
+ */
+fn bool unused_parameter_diagnostic_enabled() {
+	return g_config.unused_parameter_diagnostic;
 }
 
 /**
