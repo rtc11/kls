@@ -94,6 +94,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 				actions.push(sealed_action);
 			}
 		}
+
+		// Quick fix: add missing branches to non-exhaustive enum when
+		if (message.starts_with("'when' on enum class ") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* enum_action = try_add_missing_enum_branches(uri, doc, ast, diag, message);
+			if (enum_action != null) {
+				actions.push(enum_action);
+			}
+		}
 	}
 
 	// ── Quick fix: import all unresolved references at once ─────
@@ -2109,4 +2118,130 @@ fn String reindent_block(String text, String prefix) {
 		}
 	}
 	return out.str_view();
+}
+
+// ── Quick fix: add missing branches to non-exhaustive enum when ───
+
+/**
+ * Build "Add missing branches" code action for a non-exhaustive enum
+ * `when` diagnostic. Inserts `<EnumName>.<ENTRY> -> TODO()` arms.
+ *
+ * Diagnostic message format:
+ *   "'when' on enum class 'X' is non-exhaustive: missing 'A', 'B', ..."
+ */
+fn Object* try_add_missing_enum_branches(String uri, Document* doc, ParseResult* ast,
+		Object* diag, String message) {
+	if (doc == null || ast == null) return null;
+
+	// Parse range start (line/col) — locate WHEN_EXPR
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate WHEN_EXPR with matching start position
+	uint when_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_EXPR) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			when_idx = i;
+			break;
+		}
+	}
+	if (when_idx == (uint)-1) return null;
+	AstNode* when_node = &ast.nodes[when_idx];
+
+	// Extract enum class name from message after "enum class '"
+	String enum_name = "";
+	String anchor = "enum class '";
+	usz a_pos = 0;
+	bool found_anchor = false;
+	for (usz i = 0; i + anchor.len <= message.len; i++) {
+		if (message[i:anchor.len] == anchor) {
+			a_pos = i + anchor.len;
+			found_anchor = true;
+			break;
+		}
+	}
+	if (!found_anchor) return null;
+	usz e_end = a_pos;
+	while (e_end < message.len && message[e_end] != '\'') e_end++;
+	if (e_end == a_pos || e_end >= message.len) return null;
+	enum_name = message[a_pos..e_end - 1];
+
+	// Parse missing entry names from message after "missing "
+	usz missing_pos = 0;
+	bool have_missing = false;
+	for (usz i = 0; i + 8 <= message.len; i++) {
+		if (message[i:8] == "missing ") {
+			missing_pos = i + 8;
+			have_missing = true;
+			break;
+		}
+	}
+	if (!have_missing) return null;
+	String[] names = parse_quoted_names(message[missing_pos..]);
+	if (names.len == 0) return null;
+
+	// Indent from first WHEN_ENTRY
+	uint entry_col = when_node.start_col + 1;
+	for (uint j = when_node.children_start; j < ast.node_count; j++) {
+		AstNode* child = &ast.nodes[j];
+		if (child.parent != when_idx) continue;
+		if (child.kind == WHEN_ENTRY) {
+			entry_col = child.start_col;
+			break;
+		}
+	}
+	String indent = build_indent_for_column(doc.content, entry_col);
+
+	// Build newText: one `<Enum>.<Entry> -> TODO()\n<indent>` per missing
+	DString text;
+	text.tinit();
+	for (usz i = 0; i < names.len; i++) {
+		text.appendf("%s.%s -> TODO()\n%s", enum_name, names[i], indent);
+	}
+
+	// Insertion at `(end_line, end_col - 1)` — just before closing `}`
+	int insert_line = (int)when_node.end_line;
+	int insert_col = (int)when_node.end_col - 1;
+	if (insert_col < 0) insert_col = 0;
+
+	Object* pos = object::new_obj(tmem);
+	pos.set("line", (int128)insert_line);
+	pos.set("character", (int128)insert_col);
+
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", pos);
+	insert_range.set("end", pos);
+
+	Object* edit_obj = object::new_obj(tmem);
+	edit_obj.set("range", insert_range);
+	edit_obj.set("newText", text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit_obj);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Add missing branches");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
 }
