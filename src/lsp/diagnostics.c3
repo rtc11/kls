@@ -167,6 +167,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null && config::unnecessary_safe_call_diagnostic_enabled()) {
 			add_unnecessary_safe_call_diagnostics(diagnostics, ast, type_info);
 		}
+		if (config::redundant_if_bool_diagnostic_enabled()) {
+			add_redundant_if_bool_diagnostics(diagnostics, ast);
+		}
 	}
 
 	return diagnostics;
@@ -3044,4 +3047,92 @@ fn void add_unnecessary_safe_call_diagnostics(Object* diagnostics, ParseResult* 
 
 		diagnostics.push(diag);
 	}
+}
+
+// ── Redundant if/else returning bool ──────────────────────────
+//
+// Detect IF_EXPR of the form `if (cond) true else false` or
+// `if (cond) false else true` (with or without surrounding blocks).
+// Per Kotlin spec §17.6.4: cond is always Boolean, so the if-expression
+// reduces to the condition itself (or its negation).
+//
+// Children of IF_EXPR: [cond?, then, else]. Cond may be absent if parser
+// fell back to skip_balanced_parens (angle-bracket ambiguity), so we
+// identify then/else as the last two children.
+fn void add_redundant_if_bool_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != IF_EXPR) continue;
+
+		// Collect children by parent index
+		uint[8] children;
+		uint child_count = 0;
+		for (uint c = node.children_start; c < ast.node_count && child_count < 8; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			children[child_count++] = c;
+		}
+		if (child_count < 2) continue; // need both then and else
+
+		// Last two = then, else
+		uint then_idx = children[child_count - 2];
+		uint else_idx = children[child_count - 1];
+
+		String then_val = unwrap_bool_literal(ast, then_idx);
+		String else_val = unwrap_bool_literal(ast, else_idx);
+		if (then_val.len == 0 || else_val.len == 0) continue;
+		if (then_val == else_val) continue; // same literal both sides — different smell
+
+		bool negated = (then_val == "false" && else_val == "true");
+		bool direct = (then_val == "true" && else_val == "false");
+		if (!direct && !negated) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", negated
+			? "Redundant 'if': replace with negated condition"
+			: "Redundant 'if': replace with condition");
+
+		diagnostics.push(diag);
+	}
+}
+
+// Returns "true" / "false" if the node is (directly, or via a single-stmt
+// BLOCK) a LITERAL_EXPR with that value. Empty string otherwise.
+fn String unwrap_bool_literal(ParseResult* ast, uint idx) {
+	AstNode* n = &ast.nodes[idx];
+	if (n.kind == LITERAL_EXPR) {
+		if (n.extra_text == "true" || n.extra_text == "false") return n.extra_text;
+		return "";
+	}
+	if (n.kind == BLOCK) {
+		// Find single direct child
+		uint stmt_count = 0;
+		uint sole_child = 0;
+		for (uint c = n.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != idx) continue;
+			sole_child = c;
+			stmt_count++;
+			if (stmt_count > 1) return "";
+		}
+		if (stmt_count != 1) return "";
+		return unwrap_bool_literal(ast, sole_child);
+	}
+	return "";
 }

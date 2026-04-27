@@ -85,6 +85,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: simplify `if (cond) true else false` → `cond`
+		if (message.starts_with("Redundant 'if'") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_simplify_redundant_if_bool(uri, doc, ast, diag, message);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -3286,4 +3295,116 @@ fn Object* try_remove_not_null_assertion(String uri, Document* doc, Object* diag
 	action.set("diagnostics", action_diags);
 
 	return action;
+}
+
+// ── Quickfix: simplify redundant if-bool ──────────────────────
+//
+// For `if (cond) true else false` → replace IF_EXPR with cond text.
+// For `if (cond) false else true` → replace with `!(cond)` or `!cond`
+// (parens added when cond is a compound expression).
+fn Object* try_simplify_redundant_if_bool(String uri, Document* doc, ParseResult* ast,
+		Object* diag, String message) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate IF_EXPR matching diag start position
+	uint if_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != IF_EXPR) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			if_idx = i;
+			break;
+		}
+	}
+	if (if_idx == (uint)-1) return null;
+	AstNode* if_node = &ast.nodes[if_idx];
+
+	// Find cond child: first NON-block child whose kind is an expression.
+	// IF_EXPR layout: [cond?, then, else]. Cond may be missing if parser
+	// fell back; in that case give up (can't synthesize from source — would
+	// need to parse the parenthesized region).
+	uint cond_idx = (uint)-1;
+	uint child_count = 0;
+	for (uint c = if_node.children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != if_idx) continue;
+		child_count++;
+	}
+	if (child_count < 3) return null; // need cond + then + else
+
+	uint first_child = (uint)-1;
+	for (uint c = if_node.children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != if_idx) continue;
+		first_child = c;
+		break;
+	}
+	if (first_child == (uint)-1) return null;
+	cond_idx = first_child;
+
+	AstNode* cond = &ast.nodes[cond_idx];
+	String content = doc.content;
+	if (cond.start_offset >= content.len || cond.end_offset > content.len) return null;
+	if (cond.end_offset <= cond.start_offset) return null;
+	String cond_text = content[cond.start_offset:cond.end_offset - cond.start_offset];
+
+	bool negated = message.contains("negated");
+	DString new_text;
+	new_text.tinit();
+	if (negated) {
+		// Wrap in parens unless cond is a simple atom
+		if (needs_parens_for_negation(cond.kind)) {
+			new_text.appendf("!(%s)", cond_text);
+		} else {
+			new_text.appendf("!%s", cond_text);
+		}
+	} else {
+		new_text.append(cond_text);
+	}
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", negated ? "Replace with negated condition" : "Replace with condition");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+fn bool needs_parens_for_negation(NodeKind k) {
+	switch (k) {
+		case NAME_EXPR:
+		case CALL_EXPR:
+		case DOT_EXPR:
+		case LITERAL_EXPR:
+		case THIS_EXPR:
+		case SUPER_EXPR:
+		case PAREN_EXPR:
+			return false;
+		default:
+			return true;
+	}
 }
