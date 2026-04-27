@@ -22,6 +22,7 @@ struct ServerConfig {
 	bool smart_cast_diagnostic;    // emit "smart cast to T is impossible" warnings
 	bool sealed_exhaustive_diagnostic;  // emit "non-exhaustive when on sealed type" warnings
 	bool enum_exhaustive_diagnostic;    // emit "non-exhaustive when on enum class" warnings
+	bool useless_cast_diagnostic;       // emit "useless cast" warnings for `x as T` when typeOf(x) == T
 }
 
 // Module-level global with defaults
@@ -30,6 +31,7 @@ ServerConfig g_config = {
 	.smart_cast_diagnostic = true,
 	.sealed_exhaustive_diagnostic = true,
 	.enum_exhaustive_diagnostic = true,
+	.useless_cast_diagnostic = true,
 };
 
 /**
@@ -70,6 +72,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.enum_exhaustive_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("uselessCastDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.useless_cast_diagnostic = val.b;
+			log::debug("[kls] config: uselessCastDiagnostic = %s",
+				g_config.useless_cast_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -105,6 +115,14 @@ fn bool sealed_exhaustive_diagnostic_enabled() {
  */
 fn bool enum_exhaustive_diagnostic_enabled() {
 	return g_config.enum_exhaustive_diagnostic;
+}
+
+/**
+ * Whether to emit "useless cast" warnings for `x as T` where the source
+ * type already conforms exactly to T (same name + null-safety).
+ */
+fn bool useless_cast_diagnostic_enabled() {
+	return g_config.useless_cast_diagnostic;
 }
 
 /**

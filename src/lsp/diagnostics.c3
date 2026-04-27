@@ -141,6 +141,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null) {
 			add_type_mismatch_diagnostics(diagnostics, ast, type_info, workspace);
 			add_smart_cast_impossible_diagnostics(diagnostics, ast, type_info);
+			add_useless_cast_diagnostics(diagnostics, ast, type_info);
 			if (workspace != null) {
 				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
 				add_enum_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
@@ -2123,6 +2124,79 @@ fn void emit_smart_cast_impossible_named(Object* diagnostics, AstNode* node, Str
  * Mirrors the scope walk in `types::resolve_name_expr_type` but returns
  * the index instead of the type. Returns NO_PARENT when not found.
  */
+/**
+ * Emit "useless cast" warning for `x as T` when typeOf(x) already exactly
+ * conforms to T (same name + same null-safety). Skips:
+ *  - safe cast `as? T` (always returns nullable, never useless even when types match)
+ *  - source type unknown
+ *  - target type empty
+ *  - source nullable + target non-null (cast performs runtime null check)
+ *  - source non-null + target nullable (informational only — Kotlin compiler
+ *    doesn't flag this)
+ *
+ * Conservative: equal types only, no subtyping.
+ */
+fn void add_useless_cast_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (!config::useless_cast_diagnostic_enabled()) return;
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != TYPE_CAST_EXPR) continue;
+		// Safe cast `as?` never useless — produces nullable result regardless
+		if (node.extra_text == "as?") continue;
+		String target_text = node.type_text.trim();
+		if (target_text.len == 0) continue;
+
+		// Target null-safety from text suffix
+		bool target_nullable = target_text.ends_with("?");
+		String target_name = target_nullable
+			? target_text[..target_text.len - 2].trim()
+			: target_text;
+
+		// Find source expression: first child of TYPE_CAST_EXPR
+		uint src_idx = uint.max;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) { src_idx = j; break; }
+		}
+		if (src_idx == uint.max) continue;
+		if (!type_info.has_type[src_idx]) continue;
+		types::TypeRef src = type_info.node_types[src_idx];
+		if (src.kind == types::TypeKind.UNKNOWN) continue;
+		if (src.name.len == 0) continue;
+
+		// Name-equal check
+		if (src.name != target_name) continue;
+		// Null-safety check: useless only if both match exactly
+		if (src.nullable != target_nullable) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end = object::new_obj(tmem);
+		end.set("line", (int)node.end_line);
+		end.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Useless cast: '%s' is already of type '%s'",
+			src.name, target_text);
+		diag.set("message", message.str_view());
+		// Use specific tag so future tests / clients can filter; KLS uses "useless"
+		// as the canonical keyword in the message.
+
+		diagnostics.push(diag);
+	}
+}
+
 fn uint find_decl_for_name(ParseResult* ast, uint use_idx, String name) {
 	uint scope_idx = 0;
 	uint offset = ast.nodes[use_idx].start_offset;
