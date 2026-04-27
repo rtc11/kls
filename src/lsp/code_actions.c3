@@ -218,6 +218,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (when_to_if != null) {
 			actions.push(when_to_if);
 		}
+		Object* concat_to_tpl = try_convert_concat_to_template(uri, doc, ast, params);
+		if (concat_to_tpl != null) {
+			actions.push(concat_to_tpl);
+		}
 		TypeInfo* ti_aet = store.get_types(uri) ?? null;
 		Object* add_type = try_add_explicit_type(uri, doc, ast, ti_aet, params);
 		if (add_type != null) {
@@ -3575,4 +3579,172 @@ fn Object* try_extract_variable_all_occurrences(String uri, Document* doc, Parse
 	action.set("edit", workspace_edit);
 
 	return action;
+}
+
+// ── Refactor: convert string concatenation to template ────────
+//
+// `"a" + x + "b"` → `"a${x}b"`
+//
+// Detection: cursor inside a `+` BINARY_EXPR. Walk up while parent is
+// also `+` BINARY_EXPR (find topmost concat chain). Flatten chain into
+// operands. Require ≥1 STRING_TEMPLATE_EXPR operand (regular string).
+// Skip multi-line strings (different quoting).
+fn Object* try_convert_concat_to_template(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cur_line = (uint)(start.get_int("line") ?? 0);
+	uint cur_col = (uint)(start.get_int("character") ?? 0);
+	long cur_off_l = document::position_to_byte_offset(doc.content, cur_line, cur_col);
+	if (cur_off_l < 0) return null;
+	uint cur_off = (uint)cur_off_l;
+
+	// Find smallest BINARY_EXPR("+") containing cursor
+	uint best_idx = uint.max;
+	uint best_size = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		if (n.extra_text != "+") continue;
+		if (cur_off < n.start_offset || cur_off > n.end_offset) continue;
+		uint size = n.end_offset - n.start_offset;
+		if (size < best_size) {
+			best_size = size;
+			best_idx = i;
+		}
+	}
+	if (best_idx == uint.max) return null;
+
+	// Walk up while parent is also `+` BINARY_EXPR
+	uint top_idx = best_idx;
+	while (true) {
+		uint p = ast.nodes[top_idx].parent;
+		if (p == ast::NO_PARENT) break;
+		AstNode* parent = &ast.nodes[p];
+		if (parent.kind != BINARY_EXPR || parent.extra_text != "+") break;
+		top_idx = p;
+	}
+
+	// Flatten the concat chain into operands
+	uint[32] operands;
+	uint op_count = 0;
+	flatten_concat(ast, top_idx, operands[..], &op_count);
+	if (op_count < 2) return null;
+
+	// Require ≥1 STRING_TEMPLATE_EXPR operand (regular, not multi-line)
+	bool has_string = false;
+	for (uint k = 0; k < op_count; k++) {
+		AstNode* op = &ast.nodes[operands[k]];
+		if (op.kind == STRING_TEMPLATE_EXPR) {
+			// Skip multi-line strings (start with """)
+			if (op.start_offset + 3 <= doc.content.len) {
+				String prefix = doc.content[(usz)op.start_offset:3];
+				if (prefix == `"""`) return null;
+			}
+			has_string = true;
+		}
+	}
+	if (!has_string) return null;
+
+	// Build template
+	DString out;
+	out.tinit();
+	out.append_char('"');
+	for (uint k = 0; k < op_count; k++) {
+		AstNode* op = &ast.nodes[operands[k]];
+		if (op.kind == STRING_TEMPLATE_EXPR) {
+			// Strip surrounding quotes
+			if (op.end_offset <= op.start_offset + 1) continue;
+			usz s = (usz)op.start_offset + 1;
+			usz e = (usz)op.end_offset - 1;
+			if (e > s) out.append(doc.content[s..e - 1]);
+		} else if (op.kind == NAME_EXPR) {
+			// If the next operand is a STRING_TEMPLATE_EXPR whose first
+			// content char is an identifier-continuation char (alnum / _),
+			// the bare `$name` form would absorb it. Use `${name}` to be safe.
+			bool need_braces = false;
+			if (k + 1 < op_count) {
+				AstNode* next = &ast.nodes[operands[k + 1]];
+				if (next.kind == STRING_TEMPLATE_EXPR && next.end_offset > next.start_offset + 1) {
+					usz s = (usz)next.start_offset + 1;
+					if (s < doc.content.len) {
+						char ch = doc.content[s];
+						if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+							|| (ch >= '0' && ch <= '9') || ch == '_') {
+							need_braces = true;
+						}
+					}
+				}
+			}
+			if (need_braces) {
+				out.append("${");
+				out.append(doc.content[(usz)op.start_offset..(usz)op.end_offset - 1]);
+				out.append_char('}');
+			} else {
+				out.append_char('$');
+				out.append(doc.content[(usz)op.start_offset..(usz)op.end_offset - 1]);
+			}
+		} else {
+			out.append("${");
+			out.append(doc.content[(usz)op.start_offset..(usz)op.end_offset - 1]);
+			out.append_char('}');
+		}
+	}
+	out.append_char('"');
+
+	AstNode* top = &ast.nodes[top_idx];
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)top.start_line);
+	es.set("character", (int)top.start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)top.end_line);
+	ee.set("character", (int)top.end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert concatenation to template");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+
+	return action;
+}
+
+// Recursively flatten a `+` chain. If a node is a `+` BINARY_EXPR, descend
+// into both children (left then right). Otherwise add as operand.
+fn void flatten_concat(ParseResult* ast, uint idx, uint[] out, uint* count) {
+	AstNode* n = &ast.nodes[idx];
+	if (n.kind == BINARY_EXPR && n.extra_text == "+") {
+		// Children in source order
+		uint[2] kids;
+		uint k = 0;
+		for (uint c = n.children_start; c < ast.node_count && k < 2; c++) {
+			if (ast.nodes[c].parent != idx) continue;
+			kids[k++] = c;
+		}
+		for (uint i = 0; i < k; i++) {
+			flatten_concat(ast, kids[i], out, count);
+		}
+		return;
+	}
+	if (*count < out.len) {
+		out[*count] = idx;
+		(*count)++;
+	}
 }

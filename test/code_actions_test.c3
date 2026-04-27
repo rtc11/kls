@@ -2545,3 +2545,131 @@ fun bar() {
 		}
 	};
 }
+
+// ── Tests: convert string concatenation to template ───────────
+
+fn String find_action_by_title(Object* actions, String title_needle) {
+	for (sz i = 0; i < actions.get_len(); i++) {
+		Object* a = actions.get_at((usz)i);
+		String title = a.get_string("title") ?? "";
+		if (title.contains(title_needle)) {
+			Object* edit = a.get("edit") ?? null;
+			if (edit == null) continue;
+			Object* changes = edit.get("changes") ?? null;
+			if (changes == null) continue;
+			Object* edits = changes.get("file:///test.kt") ?? null;
+			if (edits == null || edits.get_len() == 0) continue;
+			return edits.get_at(0).get_string("newText") ?? "";
+		}
+	}
+	return "";
+}
+
+fn void concat_to_template_basic() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `fun foo(x: Int) { val s = "a" + x + "b" }`
+		// cursor inside the concat at col ~30 (anywhere over the chain)
+		String content = `fun foo(x: Int) { val s = "a" + x + "b" }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 30, 0, 30);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"a${x}b"` || new_text == `"a$x" + "b"` /* wrong */ || new_text == `"a${x}b"`,
+			"expected '\"a${x}b\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_string_then_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo(name: String) { val s = "hello " + name }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 40, 0, 40);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"hello $name"`,
+			"expected '\"hello $name\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_name_then_string() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo(name: String) { val s = name + " world" }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 38, 0, 38);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"$name world"`,
+			"expected '\"$name world\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_no_string_no_action() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 22, 0, 22);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == "", "should not offer action for pure numeric concat");
+	};
+}
+
+fn void concat_to_template_call_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = "x=" + bar() }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 26, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"x=${bar()}"`,
+			"expected '\"x=${bar()}\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_three_strings_and_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo(x: Int) { val s = "[" + x + "]" }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 30, 0, 30);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"[$x]"`,
+			"expected '\"[$x]\"', got '%s'", new_text);
+	};
+}
