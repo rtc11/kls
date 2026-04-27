@@ -177,6 +177,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (expr_body != null) {
 			actions.push(expr_body);
 		}
+		Object* if_to_when = try_convert_if_chain_to_when(uri, doc, ast, params);
+		if (if_to_when != null) {
+			actions.push(if_to_when);
+		}
 	}
 
 	// ── Cursor-context: add import for identifier under cursor ───
@@ -336,6 +340,197 @@ fn Object* try_fix_operator(String uri, Object* diag, String message) {
 	action_diags.push(diag);
 	action.set("diagnostics", action_diags);
 
+	return action;
+}
+
+// ── Refactor: convert if/else-if chain → when ──────────────────
+
+/**
+ * Find the TOP of an if-chain: walk up while parent is IF_EXPR with `cur`
+ * sitting in its else-slot (3rd child).
+ */
+fn uint top_of_if_chain(ParseResult* ast, uint if_idx) {
+	uint cur = if_idx;
+	while (true) {
+		AstNode* n = &ast.nodes[cur];
+		uint p = n.parent;
+		if (p == 0 || p >= ast.node_count) return cur;
+		if (ast.nodes[p].kind != IF_EXPR) return cur;
+		uint count = 0;
+		uint else_idx = uint.max;
+		for (uint i = 1; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent != p) continue;
+			count++;
+			if (count == 3) { else_idx = i; break; }
+		}
+		if (else_idx != cur) return cur;
+		cur = p;
+	}
+}
+
+/**
+ * Build "Convert to when" code action. Cursor must be on or in an IF_EXPR
+ * that starts an if/else-if chain (≥ 1 else-if).
+ */
+/**
+ * Extract the condition text from an IF_EXPR by scanning source for `(` after
+ * `if` keyword and matching `)`. Returns "" on failure.
+ * Sets `cond_end_offset` to the byte offset just after the closing `)`.
+ */
+fn String extract_if_cond_text(String content, AstNode* if_node, uint* cond_end_offset) {
+	uint p = if_node.start_offset;
+	// Skip "if" keyword
+	while (p < if_node.end_offset && content[p] != '(') p++;
+	if (p >= if_node.end_offset || content[p] != '(') return "";
+	uint open = p;
+	uint depth = 0;
+	while (p < if_node.end_offset) {
+		char c = content[p];
+		if (c == '(') {
+			depth++;
+		} else if (c == ')') {
+			depth--;
+			if (depth == 0) {
+				*cond_end_offset = p + 1;
+				if (open + 1 > p) return "";
+				return content[(usz)(open + 1)..(usz)p - 1];
+			}
+		}
+		p++;
+	}
+	return "";
+}
+
+fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest IF_EXPR containing cursor
+	uint if_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != IF_EXPR) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			if_idx = i;
+		}
+	}
+	if (if_idx == uint.max) return null;
+
+	uint top_idx = top_of_if_chain(ast, if_idx);
+	AstNode* top = &ast.nodes[top_idx];
+
+	// Walk down chain. For each IF_EXPR:
+	//  - cond text via source scan (parser may not adopt cond as child)
+	//  - then body = first child whose start_offset > cond_end
+	//  - else = next child after then; if IF_EXPR continue, else terminal
+	String[16] cond_texts;
+	String[16] body_texts;
+	usz arm_count = 0;
+	String else_body_text = "";
+	bool has_else = false;
+
+	uint cur = top_idx;
+	while (arm_count < 16) {
+		AstNode* cur_n = &ast.nodes[cur];
+		uint cond_end = 0;
+		String cond_text = extract_if_cond_text(doc.content, cur_n, &cond_end);
+		if (cond_text.len == 0) return null;
+
+		// Iterate direct children, picking those after cond_end as then/else
+		uint then_idx = uint.max;
+		uint else_idx = uint.max;
+		for (uint i = 1; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent != cur) continue;
+			if (ast.nodes[i].start_offset < cond_end) continue; // skip any cond children
+			if (then_idx == uint.max) {
+				then_idx = i;
+			} else if (else_idx == uint.max) {
+				else_idx = i;
+			}
+		}
+		if (then_idx == uint.max) return null;
+
+		AstNode* then_n = &ast.nodes[then_idx];
+		cond_texts[arm_count] = cond_text;
+		body_texts[arm_count] = doc.content[(usz)then_n.start_offset..(usz)then_n.end_offset - 1];
+		arm_count++;
+
+		if (else_idx == uint.max) break;
+		AstNode* else_n = &ast.nodes[else_idx];
+		if (else_n.kind == IF_EXPR) {
+			cur = else_idx;
+			continue;
+		}
+		else_body_text = doc.content[(usz)else_n.start_offset..(usz)else_n.end_offset - 1];
+		has_else = true;
+		break;
+	}
+
+	if (arm_count < 2) return null;
+
+	String outer_indent = line_leading_indent(doc.content, top.start_line);
+	String inner_indent = string::tformat("%s\t", outer_indent);
+
+	DString out;
+	out.tinit();
+	out.append("when {\n");
+	for (usz i = 0; i < arm_count; i++) {
+		out.append(inner_indent);
+		out.append(cond_texts[i]);
+		out.append(" -> ");
+		String reindented = reindent_block(body_texts[i], inner_indent);
+		out.append(reindented);
+		out.append("\n");
+	}
+	if (has_else) {
+		out.append(inner_indent);
+		out.append("else -> ");
+		String reindented = reindent_block(else_body_text, inner_indent);
+		out.append(reindented);
+		out.append("\n");
+	}
+	out.append(outer_indent);
+	out.append("}");
+
+	Object* rs = object::new_obj(tmem);
+	rs.set("line", (int)top.start_line);
+	rs.set("character", (int)top.start_col);
+	Object* re = object::new_obj(tmem);
+	re.set("line", (int)top.end_line);
+	re.set("character", (int)top.end_col);
+	Object* rrange = object::new_obj(tmem);
+	rrange.set("start", rs);
+	rrange.set("end", re);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", rrange);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert to when");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
 	return action;
 }
 
