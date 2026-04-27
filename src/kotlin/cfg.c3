@@ -245,7 +245,7 @@ fn uint lower_stmt(Cfg* cfg, ParseResult* pr, uint stmt_idx, uint pred, LoopStac
 fn uint find_control_flow_value(ParseResult* pr, uint stmt_idx) {
 	if (stmt_idx >= pr.node_count) return ast::NO_PARENT;
 	AstNode* node = &pr.nodes[stmt_idx];
-	if (node.kind != PROPERTY_DECL && node.kind != RETURN_EXPR) return ast::NO_PARENT;
+	if (node.kind != PROPERTY_DECL && node.kind != RETURN_EXPR && node.kind != THROW_EXPR) return ast::NO_PARENT;
 	for (uint i = node.children_start; i < pr.node_count; i++) {
 		if (pr.nodes[i].parent != stmt_idx) continue;
 		if (pr.nodes[i].kind == ANNOTATION_ENTRY) continue;
@@ -553,8 +553,18 @@ fn uint lower_return(Cfg* cfg, ParseResult* pr, uint ret_idx, uint pred) {
 }
 
 fn uint lower_throw(Cfg* cfg, ParseResult* pr, uint th_idx, uint pred) {
+	// Lower a control-flow value child (when/if/try) first so its COND
+	// nodes exist for smart-cast narrowing inside the arms.
+	uint cf_child = find_control_flow_value(pr, th_idx);
+	uint after = pred;
+	if (cf_child != ast::NO_PARENT) {
+		LoopStack empty_loops;
+		empty_loops.depth = 0;
+		uint cf_after = lower_stmt(cfg, pr, cf_child, pred, &empty_loops);
+		if (cf_after != NO_CFG) after = cf_after;
+	}
 	uint n = cfg.add_node(THROW, th_idx);
-	if (pred != NO_CFG) cfg.add_edge(pred, n);
+	if (after != NO_CFG) cfg.add_edge(after, n);
 	cfg.add_edge(n, cfg.exit);
 	return NO_CFG;
 }
