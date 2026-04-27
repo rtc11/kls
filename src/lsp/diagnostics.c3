@@ -146,6 +146,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			add_type_mismatch_diagnostics(diagnostics, ast, type_info, workspace);
 			add_smart_cast_impossible_diagnostics(diagnostics, ast, type_info);
 			add_useless_cast_diagnostics(diagnostics, ast, type_info);
+			if (config::unnecessary_not_null_diagnostic_enabled()) {
+				add_unnecessary_not_null_diagnostics(diagnostics, ast, type_info);
+			}
 			if (workspace != null) {
 				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
 				add_enum_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
@@ -2688,6 +2691,88 @@ fn void add_enum_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
 			node.start_line, node.start_col,
 			node.start_line, node.start_col + 4,
 			2, msg.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ── Unnecessary !! diagnostics ───────────────────────────────────
+
+/**
+ * Walk every POSTFIX_EXPR with `extra_text == "!!"`. If the operand
+ * is known non-null (by static type, smart-cast fact, or syntactic
+ * shape), emit a Warning "Unnecessary !! on non-null value".
+ *
+ * Operand is non-null if:
+ *  - LITERAL_EXPR, THIS_EXPR, SUPER_EXPR (always non-null in Kotlin)
+ *  - TypeInfo gives a resolved non-nullable type for it
+ *
+ * Conservative: skip when operand kind is unsupported or its type
+ * is UNKNOWN to avoid false positives.
+ */
+fn void add_unnecessary_not_null_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != POSTFIX_EXPR) continue;
+		if (node.extra_text != "!!") continue;
+
+		// Find operand (first child)
+		uint operand_idx = uint.max;
+		for (uint j = 1; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) {
+				operand_idx = j;
+				break;
+			}
+		}
+		if (operand_idx == uint.max) continue;
+
+		AstNode* operand = &ast.nodes[operand_idx];
+
+		bool operand_non_null = false;
+
+		// Syntactic always-non-null shapes
+		switch (operand.kind) {
+			case LITERAL_EXPR:
+			case THIS_EXPR:
+			case SUPER_EXPR:
+			case STRING_TEMPLATE_EXPR:
+				operand_non_null = true;
+				break;
+			default:
+				break;
+		}
+
+		// Type-based check
+		if (!operand_non_null && type_info.has_type[operand_idx]) {
+			types::TypeRef tr = type_info.node_types[operand_idx];
+			if (tr.kind != types::TypeKind.UNKNOWN && !tr.nullable) {
+				operand_non_null = true;
+			}
+		}
+
+		if (!operand_non_null) continue;
+
+		// Build diagnostic — range covers the `!!` operator (last 2 chars
+		// of the POSTFIX_EXPR)
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		uint diag_start_col = node.end_col >= 2 ? node.end_col - 2 : node.end_col;
+		start.set("line", (int)node.end_line);
+		start.set("character", (int)diag_start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+		diag.set("message", "Unnecessary '!!' on non-null value");
+
 		diagnostics.push(diag);
 	}
 }

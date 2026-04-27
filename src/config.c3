@@ -25,6 +25,7 @@ struct ServerConfig {
 	bool useless_cast_diagnostic;       // emit "useless cast" warnings for `x as T` when typeOf(x) == T
 	bool unused_parameter_diagnostic;   // emit hints for function PARAMs never referenced in body
 	bool var_can_be_val_diagnostic;     // emit hints for local `var` never reassigned
+	bool unnecessary_not_null_diagnostic; // emit warnings for `x!!` on non-null values
 }
 
 // Module-level global with defaults
@@ -36,6 +37,7 @@ ServerConfig g_config = {
 	.useless_cast_diagnostic = true,
 	.unused_parameter_diagnostic = true,
 	.var_can_be_val_diagnostic = true,
+	.unnecessary_not_null_diagnostic = true,
 };
 
 /**
@@ -100,6 +102,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.var_can_be_val_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unnecessaryNotNullDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unnecessary_not_null_diagnostic = val.b;
+			log::debug("[kls] config: unnecessaryNotNullDiagnostic = %s",
+				g_config.unnecessary_not_null_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -159,6 +169,15 @@ fn bool unused_parameter_diagnostic_enabled() {
  */
 fn bool var_can_be_val_diagnostic_enabled() {
 	return g_config.var_can_be_val_diagnostic;
+}
+
+/**
+ * Whether to emit "Unnecessary !! on non-null value" warnings when a
+ * not-null assertion is applied to a value the type system or flow
+ * analysis already knows is non-null.
+ */
+fn bool unnecessary_not_null_diagnostic_enabled() {
+	return g_config.unnecessary_not_null_diagnostic;
 }
 
 /**

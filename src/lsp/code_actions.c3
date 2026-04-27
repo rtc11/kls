@@ -76,6 +76,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: remove unnecessary `!!`
+		if (message.starts_with("Unnecessary '!!'")
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_remove_not_null_assertion(uri, doc, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -3235,4 +3244,46 @@ fn Object* try_change_var_to_val(String uri, Document* doc, ParseResult* ast, Ob
 fn bool is_ident_char(char c) {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 		|| (c >= '0' && c <= '9') || c == '_';
+}
+
+// ── Quick fix: remove unnecessary `!!` ───────────────────────────
+
+/**
+ * For an "Unnecessary '!!'" diagnostic, build a quick-fix that deletes
+ * the `!!` operator. The diagnostic range was set to cover exactly the
+ * 2-char `!!`, so the fix is a simple range replacement with empty text.
+ */
+fn Object* try_remove_not_null_assertion(String uri, Document* doc, Object* diag) {
+	if (doc == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	Object* end = range.get("end") ?? null;
+	if (start == null || end == null) return null;
+
+	// Reuse the diagnostic range as the edit range
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", range);
+	edit.set("newText", "");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Remove '!!'");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
 }
