@@ -21,6 +21,7 @@ struct ServerConfig {
 	bool hover_docs_from_source;   // extract Javadoc/KDoc from src.zip / -sources.jar
 	bool smart_cast_diagnostic;    // emit "smart cast to T is impossible" warnings
 	bool sealed_exhaustive_diagnostic;  // emit "non-exhaustive when on sealed type" warnings
+	bool enum_exhaustive_diagnostic;    // emit "non-exhaustive when on enum class" warnings
 }
 
 // Module-level global with defaults
@@ -28,6 +29,7 @@ ServerConfig g_config = {
 	.hover_docs_from_source = true,
 	.smart_cast_diagnostic = true,
 	.sealed_exhaustive_diagnostic = true,
+	.enum_exhaustive_diagnostic = true,
 };
 
 /**
@@ -60,6 +62,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.sealed_exhaustive_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("enumExhaustiveDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.enum_exhaustive_diagnostic = val.b;
+			log::debug("[kls] config: enumExhaustiveDiagnostic = %s",
+				g_config.enum_exhaustive_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -86,6 +96,15 @@ fn bool smart_cast_diagnostic_enabled() {
  */
 fn bool sealed_exhaustive_diagnostic_enabled() {
 	return g_config.sealed_exhaustive_diagnostic;
+}
+
+/**
+ * Whether to emit "non-exhaustive when on enum class" warnings when
+ * a `when` over an enum-typed subject lacks an `else` arm and does
+ * not list every entry.
+ */
+fn bool enum_exhaustive_diagnostic_enabled() {
+	return g_config.enum_exhaustive_diagnostic;
 }
 
 /**

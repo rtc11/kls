@@ -142,6 +142,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			add_smart_cast_impossible_diagnostics(diagnostics, ast, type_info);
 			if (workspace != null) {
 				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
+				add_enum_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
 			}
 		}
 		add_unreachable_code_diagnostics(diagnostics, ast);
@@ -2189,6 +2190,135 @@ fn void add_sealed_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
 		Object* diag = make_diagnostic(
 			node.start_line, node.start_col,
 			node.start_line, node.start_col + 4,  // span "when" keyword
+			2, msg.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+/**
+ * Emit "non-exhaustive when on enum class" warnings (Kotlin spec §17.3).
+ *
+ * Rules:
+ *   - Subject type must have MOD_ENUM in workspace.class_mod_flags.
+ *   - Else arm makes the when exhaustive (no warning).
+ *   - Arm conditions matching `EnumName.ENTRY` (DOT_EXPR with receiver
+ *     name == enum class name and DOT_EXPR.name == entry name) cover that
+ *     entry. Bare `ENTRY` arms (after enum import) also covered when the
+ *     condition is a NAME_EXPR matching an entry name.
+ *   - Reports the missing entry names.
+ *
+ * Gated by config::enum_exhaustive_diagnostic_enabled().
+ */
+fn void add_enum_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
+		TypeInfo* type_info, WorkspaceIndex* workspace) {
+	if (!config::enum_exhaustive_diagnostic_enabled()) return;
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Locate the subject (first non-ENTRY child)
+		uint subj_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == WHEN_ENTRY) break;
+			subj_idx = c;
+			break;
+		}
+		if (subj_idx == ast::NO_PARENT) continue;
+
+		// Resolve subject type
+		if (!type_info.has_type[subj_idx]) continue;
+		TypeRef subj_type = type_info.node_types[subj_idx];
+		if (subj_type.name.len == 0) continue;
+
+		// Check enum flag
+		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		if (flags & ast::MOD_ENUM == 0) continue;
+
+		// Enumerate enum entries via member_cache
+		String[64] entries;
+		usz entry_count = 0;
+		if (try members = workspace.lookup_members(subj_type.name)) {
+			for (usz k = 0; k < members.len() && entry_count < 64; k++) {
+				MemberDecl* m = members.get_ref(k);
+				if (m.node_kind != ENUM_ENTRY) continue;
+				bool seen = false;
+				for (usz x = 0; x < entry_count; x++) {
+					if (entries[x] == m.name) { seen = true; break; }
+				}
+				if (!seen) entries[entry_count++] = m.name;
+			}
+		}
+		if (entry_count == 0) continue;
+
+		// Walk arms: collect covered entries; bail on else
+		bool has_else = false;
+		bool[64] covered;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			AstNode* entry = &ast.nodes[c];
+			if (entry.extra_text == "else") { has_else = true; break; }
+
+			// Walk entry children (skip last = body)
+			uint last_child = ast::NO_PARENT;
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				last_child = k;
+			}
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				if (k == last_child) continue;
+				AstNode* cond = &ast.nodes[k];
+				String entry_name = "";
+				if (cond.kind == DOT_EXPR) {
+					// Look for NAME_EXPR receiver child matching subj_type.name
+					uint recv_idx = ast::NO_PARENT;
+					for (uint r = cond.children_start; r < ast.node_count; r++) {
+						if (ast.nodes[r].parent != k) continue;
+						recv_idx = r;
+						break;
+					}
+					if (recv_idx != ast::NO_PARENT
+						&& ast.nodes[recv_idx].kind == NAME_EXPR
+						&& ast.nodes[recv_idx].name == subj_type.name) {
+						entry_name = cond.name;
+					}
+				} else if (cond.kind == NAME_EXPR) {
+					// Bare entry name (e.g. after `import Color.*`)
+					entry_name = cond.name;
+				}
+				if (entry_name.len == 0) continue;
+				for (usz x = 0; x < entry_count; x++) {
+					if (entries[x] == entry_name) { covered[x] = true; break; }
+				}
+			}
+		}
+		if (has_else) continue;
+
+		// Compute missing
+		String[64] missing;
+		usz missing_count = 0;
+		for (usz x = 0; x < entry_count; x++) {
+			if (!covered[x]) {
+				missing[missing_count++] = entries[x];
+			}
+		}
+		if (missing_count == 0) continue;
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("'when' on enum class '%s' is non-exhaustive: missing ", subj_type.name);
+		for (usz x = 0; x < missing_count; x++) {
+			if (x > 0) msg.append(", ");
+			msg.appendf("'%s'", missing[x]);
+		}
+
+		Object* diag = make_diagnostic(
+			node.start_line, node.start_col,
+			node.start_line, node.start_col + 4,
 			2, msg.str_view());
 		diagnostics.push(diag);
 	}
