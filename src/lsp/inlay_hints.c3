@@ -57,6 +57,9 @@ fn Object*? handle_inlay_hints(DocumentStore* store, WorkspaceIndex* workspace, 
 	// Collect return type hints from FUN_DECL nodes without explicit return type
 	collect_return_type_hints(hints, pr, ti, doc.content, start_line, end_line);
 
+	// Collect return type hints for multi-statement LAMBDA_EXPR bodies
+	collect_lambda_return_type_hints(hints, pr, ti, doc.content, start_line, end_line);
+
 	// Collect implicit `it` hints for lambdas without explicit params
 	collect_lambda_it_hints(hints, pr, doc.content, start_line, end_line);
 
@@ -624,6 +627,79 @@ fn void collect_return_type_hints(Object* hints, ParseResult* pr, TypeInfo* ti, 
 		hint.set("label", label.str_view());
 		hint.set("kind", HINT_KIND_TYPE);
 		hint.set("paddingLeft", true);
+
+		hints.push(hint);
+	}
+}
+
+/**
+ * Emit return type hints for LAMBDA_EXPR bodies with ≥ 2 statements.
+ * Single-expression lambdas have an obvious type and are skipped.
+ * Hint placed just before the closing `}` of the lambda.
+ *
+ * Skipped:
+ *  - body with 0 or 1 statement
+ *  - last statement is not an expression (Unit-returning)
+ *  - inferred type is Unit / Nothing / unknown
+ */
+fn void collect_lambda_return_type_hints(Object* hints, ParseResult* pr, TypeInfo* ti, String content, uint start_line, uint end_line) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* node = &pr.nodes[i];
+		if (node.kind != LAMBDA_EXPR) continue;
+
+		// Range filter
+		if (node.start_line > end_line || node.end_line < start_line) continue;
+
+		// Collect body statements (direct children that aren't PARAM)
+		uint last_stmt_idx = uint.max;
+		uint stmt_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* c = &pr.nodes[j];
+			if (c.parent != i) continue;
+			if (c.kind == PARAM) continue;
+			stmt_count++;
+			last_stmt_idx = j;
+		}
+		// Skip 0 or 1 statement
+		if (stmt_count < 2) continue;
+		if (last_stmt_idx == uint.max) continue;
+
+		AstNode* last = &pr.nodes[last_stmt_idx];
+		if (!ast::is_expression(last.kind)) continue;
+
+		String return_type = "";
+		if (try rt = infer_expr_type_string(pr, ti, last_stmt_idx, last, content)) {
+			return_type = rt;
+		} else {
+			continue;
+		}
+
+		// Skip uninteresting types
+		if (return_type.len == 0) continue;
+		if (return_type == "Unit" || return_type == "Nothing") continue;
+
+		// Position: just before the closing `}` of the lambda.
+		// LAMBDA_EXPR.end_col points one past `}`. Place hint at end_col - 1.
+		uint hint_line = node.end_line;
+		uint hint_col = node.end_col;
+		if (hint_col > 0) hint_col--;
+
+		// Range filter
+		if (hint_line < start_line || hint_line > end_line) continue;
+
+		DString label;
+		label.tinit();
+		label.appendf(": %s", return_type);
+
+		Object* hint = object::new_obj(tmem);
+		Object* position = object::new_obj(tmem);
+		position.set("line", (int)hint_line);
+		position.set("character", (int)hint_col);
+		hint.set("position", position);
+		hint.set("label", label.str_view());
+		hint.set("kind", HINT_KIND_TYPE);
+		hint.set("paddingLeft", false);
+		hint.set("paddingRight", true);
 
 		hints.push(hint);
 	}
