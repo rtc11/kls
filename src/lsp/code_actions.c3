@@ -196,6 +196,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (add_ret != null) {
 			actions.push(add_ret);
 		}
+		Object* expr_to_block = try_convert_expression_body_to_block(uri, doc, ast, ti_aet, params);
+		if (expr_to_block != null) {
+			actions.push(expr_to_block);
+		}
 	}
 
 	// ── Cursor-context: add import for identifier under cursor ───
@@ -2958,6 +2962,157 @@ fn Object* try_add_return_type(String uri, Document* doc, ParseResult* ast,
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Add return type");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ── Refactor: convert expression body to block body ──────────────
+
+/**
+ * Cursor on `fun foo(...): T = expr` → offer "Convert to block body"
+ * → rewrites to `fun foo(...): T { return expr }`. Inverse of
+ * `try_convert_fun_to_expression_body`.
+ *
+ * If function returns Unit (declared or inferred), omits `return`
+ * and uses `{ expr }`.
+ *
+ * Skips: functions with block body (has BLOCK child), no expression
+ * body found, anonymous funs.
+ */
+fn Object* try_convert_expression_body_to_block(String uri, Document* doc, ParseResult* ast,
+		TypeInfo* ti, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest FUN_DECL containing cursor
+	uint fun_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if ((uint)cursor_offset < n.start_offset) continue;
+		if ((uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			fun_idx = i;
+		}
+	}
+	if (fun_idx == uint.max) return null;
+
+	AstNode* fun_node = &ast.nodes[fun_idx];
+
+	// Skip anonymous funs
+	if (fun_node.name.len == 0) return null;
+
+	// Detect: must have an expression child (NOT a BLOCK) representing the body.
+	// If a BLOCK child exists, it's already a block body — no action.
+	uint expr_idx = uint.max;
+	for (uint j = 1; j < ast.node_count; j++) {
+		AstNode* child = &ast.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind == BLOCK) return null; // already block body
+		if (child.kind == TYPE_REF || child.kind == TYPE_PARAM || child.kind == PARAM) continue;
+		if (ast::is_expression(child.kind)) {
+			expr_idx = j;
+		}
+	}
+	if (expr_idx == uint.max) return null;
+
+	AstNode* expr_node = &ast.nodes[expr_idx];
+
+	// Determine return type — to decide whether to emit `return`.
+	bool returns_unit = false;
+	if (fun_node.type_text.len > 0) {
+		if (fun_node.type_text == "Unit") returns_unit = true;
+	} else {
+		// No declared type — infer from expr
+		if (try rt = inlay_hints::infer_fun_return_type(ast, ti, fun_idx, doc.content)) {
+			if (rt == "Unit") returns_unit = true;
+		}
+	}
+
+	// Extract expression text
+	usz expr_start = (usz)expr_node.start_offset;
+	usz expr_end = (usz)expr_node.end_offset;
+	if (expr_start >= expr_end || expr_end > doc.content.len) return null;
+	String expr_text = doc.content[expr_start..expr_end - 1];
+	if (expr_text.len == 0) return null;
+
+	// Find `=` token preceding the expression by scanning backwards
+	// from expr_start through doc.content. Skip whitespace.
+	if (expr_start == 0) return null;
+	usz scan = expr_start;
+	while (scan > 0) {
+		scan--;
+		char c = doc.content[scan];
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+		if (c == '=') break;
+		return null; // unexpected token before expr
+	}
+	if (doc.content[scan] != '=') return null;
+
+	// Compute line/col of `=` for replace range start
+	uint eq_line;
+	uint eq_col;
+	{
+		uint l = 0;
+		uint c = 0;
+		for (usz i = 0; i < scan; i++) {
+			if (doc.content[i] == '\n') {
+				l++;
+				c = 0;
+			} else {
+				c++;
+			}
+		}
+		eq_line = l;
+		eq_col = c;
+	}
+
+	// Build replacement text
+	DString new_text;
+	new_text.tinit();
+	if (returns_unit) {
+		new_text.appendf("{ %s }", expr_text);
+	} else {
+		new_text.appendf("{ return %s }", expr_text);
+	}
+
+	Object* replace_start_pos = object::new_obj(tmem);
+	replace_start_pos.set("line", (int)eq_line);
+	replace_start_pos.set("character", (int)eq_col);
+	Object* replace_end_pos = object::new_obj(tmem);
+	replace_end_pos.set("line", (int)expr_node.end_line);
+	replace_end_pos.set("character", (int)expr_node.end_col);
+	Object* replace_range = object::new_obj(tmem);
+	replace_range.set("start", replace_start_pos);
+	replace_range.set("end", replace_end_pos);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", replace_range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert to block body");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
