@@ -3082,23 +3082,22 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 	TypeRef base = resolve_dot_expr_member_type(pr, info, idx, node, receiver_type);
 	if (base.kind == UNKNOWN) return base;
 
-	// Flow-sensitive smart cast (member-property): if the receiver is a
-	// bare NAME_EXPR (or THIS_EXPR) and a flow fact narrows `recv.member`,
-	// apply it — but only when both receiver and member are stable.
+	// Flow-sensitive smart cast (member-property): if `recv.member` (or a
+	// multi-level chain like `a.b.c`) is narrowed by a flow fact and both
+	// receiver chain and final member are stable, apply it. The fact key
+	// uses the dotted form: ("a", "b.c") for a.b.c.
 	if (recv_idx != ast::NO_PARENT) {
-		AstNode* rn = &pr.nodes[recv_idx];
-		bool recv_simple = rn.kind == NAME_EXPR || rn.kind == THIS_EXPR;
-		if (recv_simple) {
-			String recv_name = rn.kind == THIS_EXPR ? "this" : rn.name;
-			if (recv_name.len > 0) {
-				flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, recv_name, node.name);
-				if (fact != null && member_access_is_stable(pr, info, recv_idx, recv_name, receiver_type, node.name)) {
-					if (fact.narrowed.kind != UNKNOWN) {
-						return fact.narrowed;
-					}
-					if (fact.not_null && base.nullable) {
-						base.nullable = false;
-					}
+		String key_recv;
+		String key_member;
+		bool got_chain = flow::dotted_name_of_expr(pr, idx, &key_recv, &key_member);
+		if (got_chain && key_recv.len > 0 && key_member.len > 0) {
+			flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, key_recv, key_member);
+			if (fact != null && member_access_is_stable(pr, info, recv_idx, key_recv, receiver_type, node.name)) {
+				if (fact.narrowed.kind != UNKNOWN) {
+					return fact.narrowed;
+				}
+				if (fact.not_null && base.nullable) {
+					base.nullable = false;
 				}
 			}
 		}

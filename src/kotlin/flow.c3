@@ -102,9 +102,21 @@ fn void FlowState.add_fact(FlowState* self, uint decl_idx, String name, TypeRef 
 
 fn void FlowState.kill_name(FlowState* self, String name, String member_name = "") {
 	for (uint i = 0; i < self.count; i++) {
-		if (self.facts[i].occupied
-			&& self.facts[i].name == name
-			&& self.facts[i].member_name == member_name) {
+		if (!self.facts[i].occupied) continue;
+		if (self.facts[i].name != name) continue;
+		String fm = self.facts[i].member_name;
+		if (fm == member_name) {
+			self.facts[i].occupied = false;
+			continue;
+		}
+		// Multi-level: assigning `a.b = ...` kills `a.b.c`, `a.b.x.y`, etc.
+		// Match when the killed member is a strict prefix of the fact's
+		// member followed by '.'. Empty member_name means kill bare only;
+		// kill_receiver handles the "kill everything for this name" case.
+		if (member_name.len > 0
+			&& fm.len > member_name.len
+			&& fm[:member_name.len] == member_name
+			&& fm[member_name.len] == '.') {
 			self.facts[i].occupied = false;
 		}
 	}
@@ -301,13 +313,21 @@ fn bool dotted_name_of_expr(ParseResult* pr, uint expr_idx, String* out_recv, St
 	}
 	if (n.kind == DOT_EXPR) {
 		if (n.name.len == 0) return false;
-		// Receiver is the first child; must itself be a bare name.
+		// Receiver is the first child. Recurse to support multi-level
+		// chains: a.b.c -> recv="a", member="b.c". Single-level case
+		// (recv = bare NAME_EXPR or THIS_EXPR) is the recursion base.
 		uint recv = first_child(pr, expr_idx);
 		if (recv == ast::NO_PARENT) return false;
-		String recv_name = name_of_expr(pr, recv);
-		if (recv_name.len == 0) return false;
-		*out_recv = recv_name;
-		*out_member = n.name;
+		String inner_recv;
+		String inner_member;
+		if (!dotted_name_of_expr(pr, recv, &inner_recv, &inner_member)) return false;
+		if (inner_recv.len == 0) return false;
+		*out_recv = inner_recv;
+		if (inner_member.len == 0) {
+			*out_member = n.name;
+		} else {
+			*out_member = string::tformat("%s.%s", inner_member, n.name);
+		}
 		return true;
 	}
 	return false;
