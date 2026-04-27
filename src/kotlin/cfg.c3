@@ -536,8 +536,18 @@ fn uint lower_try(Cfg* cfg, ParseResult* pr, uint try_idx, uint pred, LoopStack*
 // ── Terminator lowering ────────────────────────────────────────────
 
 fn uint lower_return(Cfg* cfg, ParseResult* pr, uint ret_idx, uint pred) {
+	// Lower a control-flow value child (when/if/try) first so its COND
+	// nodes exist for smart-cast narrowing inside the arms.
+	uint cf_child = find_control_flow_value(pr, ret_idx);
+	uint after = pred;
+	if (cf_child != ast::NO_PARENT) {
+		LoopStack empty_loops;
+		empty_loops.depth = 0;
+		uint cf_after = lower_stmt(cfg, pr, cf_child, pred, &empty_loops);
+		if (cf_after != NO_CFG) after = cf_after;
+	}
 	uint n = cfg.add_node(RETURN, ret_idx);
-	if (pred != NO_CFG) cfg.add_edge(pred, n);
+	if (after != NO_CFG) cfg.add_edge(after, n);
 	cfg.add_edge(n, cfg.exit);
 	return NO_CFG;
 }
