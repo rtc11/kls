@@ -4,9 +4,11 @@ import std::collections::object;
 import std::collections::list;
 import kls::document;
 import kls::lsp::diagnostics;
+import kls::lsp::inlay_hints;
 import kls::kotlin::ast;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
+import kls::kotlin::types;
 import kls::lsp::hover;
 import kls::workspace;
 
@@ -184,6 +186,11 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
+		}
+		TypeInfo* ti_aet = store.get_types(uri) ?? null;
+		Object* add_type = try_add_explicit_type(uri, doc, ast, ti_aet, params);
+		if (add_type != null) {
+			actions.push(add_type);
 		}
 	}
 
@@ -2073,6 +2080,114 @@ fn Object* build_import_action(String uri, ParseResult* ast, String import_path,
 		action.set("diagnostics", action_diags);
 	}
 
+	return action;
+}
+
+// ── Refactor: add explicit type to val/var ───────────────────────
+
+/**
+ * Cursor on `val x = expr` (no type annotation) → offer
+ * "Add explicit type" → rewrites to `val x: T = expr`.
+ *
+ * Skips: properties already typed, destructuring decls, properties
+ * whose type can't be inferred or resolves to UNKNOWN/Unit/Nothing.
+ *
+ * Reuses inlay_hints type inference (TypeInfo cache + heuristics).
+ */
+fn Object* try_add_explicit_type(String uri, Document* doc, ParseResult* ast,
+		TypeInfo* ti, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest PROPERTY_DECL containing cursor
+	uint prop_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if ((uint)cursor_offset < n.start_offset) continue;
+		if ((uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			prop_idx = i;
+		}
+	}
+	if (prop_idx == uint.max) return null;
+
+	AstNode* prop = &ast.nodes[prop_idx];
+
+	// Skip if already typed
+	if (prop.type_text.len > 0) return null;
+
+	// Skip destructuring / no-name
+	if (prop.name.len == 0 || prop.name == "(destructuring)") return null;
+
+	// Try TypeInfo cache first, then heuristic
+	String type_display = "";
+	bool found = false;
+	if (ti != null && ti.has_type[prop_idx]) {
+		TypeRef tr = ti.node_types[prop_idx];
+		if (tr.kind != UNKNOWN) {
+			if (tr.full_text.len > 0) {
+				type_display = tr.full_text;
+				found = true;
+			} else if (tr.name.len > 0) {
+				type_display = tr.name;
+				found = true;
+			}
+		}
+	}
+	if (!found) {
+		if (try inferred = inlay_hints::infer_type_from_initializer(ast, ti, prop_idx, doc.content)) {
+			type_display = inferred;
+			found = true;
+		}
+	}
+	if (!found) return null;
+
+	// Reject useless types
+	if (type_display.len == 0) return null;
+	if (type_display == "Unit" || type_display == "Nothing") return null;
+	if (type_display.contains("UNKNOWN") || type_display == "?") return null;
+
+	// Insert ": Type" right after the property name
+	DString new_text;
+	new_text.tinit();
+	new_text.appendf(": %s", type_display);
+
+	Object* insert_pos = object::new_obj(tmem);
+	insert_pos.set("line", (int)prop.name_line);
+	insert_pos.set("character", (int)(prop.name_col + prop.name_len));
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_pos);
+	insert_range.set("end", insert_pos);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", insert_range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Add explicit type");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
 	return action;
 }
 
