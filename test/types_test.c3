@@ -2900,6 +2900,133 @@ fun f() {
 	};
 }
 
+fn void member_elvis_return_narrows() @test {
+	// `b.x ?: return; b.x.length` — after elvis-return, `b.x` is non-null.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	b.x ?: return 0
+	val n = b.x.length
+	return n
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed to String), got '%s'", t);
+	};
+}
+
+fn void member_requireNotNull_narrows() @test {
+	// `requireNotNull(b.x); b.x.length` — after stdlib contract,
+	// `b.x` is non-null in the trailing scope.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	requireNotNull(b.x)
+	val n = b.x.length
+	return n
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed by requireNotNull), got '%s'", t);
+	};
+}
+
+fn void member_not_null_check_narrows_in_branch() @test {
+	// `if (b.x != null) b.x.length` — b.x is non-null in then branch.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	if (b.x != null) {
+		val n = b.x.length
+		return n
+	}
+	return 0
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed in if), got '%s'", t);
+	};
+}
+
+fn void member_bang_bang_narrows() @test {
+	// `b.x!!; b.x.length` — !! narrows b.x to non-null.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	b.x!!
+	val n = b.x.length
+	return n
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed by !!), got '%s'", t);
+	};
+}
+
+fn void this_member_elvis_narrows() @test {
+	// `this.x ?: return; this.x.length` — `this.x` non-null after.
+	@pool() {
+		String src = `class B {
+	val x: String? = null
+	fun f(): Int {
+		this.x ?: return 0
+		val n = this.x.length
+		return n
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (this.x narrowed by elvis-return), got '%s'", t);
+	};
+}
+
+fn void bare_member_elvis_narrows_in_class() @test {
+	// `x ?: return; x.length` inside class body where `x: String?` is member.
+	@pool() {
+		String src = `class B {
+	val x: String? = null
+	fun f(): Int {
+		x ?: return 0
+		val n = x.length
+		return n
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (bare member x narrowed via elvis), got '%s'", t);
+	};
+}
+
 
 fn void map_infers_return_type_from_lambda() @test {
 	@pool() {
