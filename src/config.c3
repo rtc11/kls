@@ -28,6 +28,7 @@ struct ServerConfig {
 	bool unnecessary_not_null_diagnostic; // emit warnings for `x!!` on non-null values
 	bool redundant_null_check_diagnostic; // emit warnings for `x == null` / `x != null` on non-null values
 	bool unreachable_catch_diagnostic;  // emit warnings for catch clauses shadowed by an earlier supertype catch
+	bool unnecessary_safe_call_diagnostic; // emit warnings for `x?.foo` where x is statically non-null
 }
 
 // Module-level global with defaults
@@ -42,6 +43,7 @@ ServerConfig g_config = {
 	.unnecessary_not_null_diagnostic = true,
 	.redundant_null_check_diagnostic = true,
 	.unreachable_catch_diagnostic = true,
+	.unnecessary_safe_call_diagnostic = true,
 };
 
 /**
@@ -130,6 +132,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unreachable_catch_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unnecessarySafeCallDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unnecessary_safe_call_diagnostic = val.b;
+			log::debug("[kls] config: unnecessarySafeCallDiagnostic = %s",
+				g_config.unnecessary_safe_call_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -214,6 +224,14 @@ fn bool redundant_null_check_diagnostic_enabled() {
  */
 fn bool unreachable_catch_diagnostic_enabled() {
 	return g_config.unreachable_catch_diagnostic;
+}
+
+/**
+ * Whether to emit "Unnecessary safe call on non-null receiver" warnings
+ * when `?.` is used on a receiver whose static type is non-nullable.
+ */
+fn bool unnecessary_safe_call_diagnostic_enabled() {
+	return g_config.unnecessary_safe_call_diagnostic;
 }
 
 /**

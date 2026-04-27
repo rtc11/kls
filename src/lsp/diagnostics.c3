@@ -164,6 +164,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::unreachable_catch_diagnostic_enabled()) {
 			add_unreachable_catch_diagnostics(diagnostics, ast);
 		}
+		if (type_info != null && config::unnecessary_safe_call_diagnostic_enabled()) {
+			add_unnecessary_safe_call_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -2973,5 +2976,72 @@ fn void add_unreachable_catch_diagnostics(Object* diagnostics, ParseResult* ast)
 				}
 			}
 		}
+	}
+}
+
+// ── Unnecessary safe call (?.) ────────────────────────────────
+//
+// Walk DOT_EXPR nodes with extra_text "?." and emit a Warning when
+// the receiver type is statically non-nullable. Phase 10 of resolve_types
+// folds smart-cast narrowing into NAME_EXPR/DOT_EXPR types, so flow facts
+// already show through ti.node_types[recv_idx].nullable.
+//
+// THIS_EXPR receivers are always non-null in Kotlin method bodies and
+// have no TypeInfo entry by default; treat them as non-null.
+fn void add_unnecessary_safe_call_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != DOT_EXPR) continue;
+		if (node.extra_text != "?.") continue;
+
+		// Receiver = first child (by parent index)
+		uint recv_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			recv_idx = c;
+			break;
+		}
+		if (recv_idx == ast::NO_PARENT) continue;
+
+		AstNode* recv = &ast.nodes[recv_idx];
+		bool is_non_null = false;
+
+		// THIS_EXPR / SUPER_EXPR / STRING_TEMPLATE_EXPR always non-null
+		if (recv.kind == THIS_EXPR || recv.kind == SUPER_EXPR ||
+			recv.kind == STRING_TEMPLATE_EXPR) {
+			is_non_null = true;
+		} else if (recv.kind == LITERAL_EXPR && recv.extra_text != "null") {
+			is_non_null = true;
+		} else if (type_info.has_type[recv_idx]) {
+			TypeRef tr = type_info.node_types[recv_idx];
+			if (!tr.nullable && tr.kind != UNKNOWN) {
+				is_non_null = true;
+			}
+		}
+
+		if (!is_non_null) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", "Unnecessary safe call on non-null receiver");
+
+		diagnostics.push(diag);
 	}
 }
