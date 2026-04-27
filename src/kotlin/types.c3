@@ -108,6 +108,7 @@ const TypeRef TYPE_SHORT   = { .kind = SIMPLE, .name = "Short" };
 const TypeRef TYPE_ANY     = { .kind = SIMPLE, .name = "Any" };
 
 const TypeRef TYPE_NOTHING_NULLABLE = { .kind = SIMPLE, .name = "Nothing", .nullable = true };
+const TypeRef TYPE_STRING_NULLABLE  = { .kind = SIMPLE, .name = "String",  .nullable = true };
 
 // ── Per-file type info cache ───────────────────────────────────────
 
@@ -3648,6 +3649,39 @@ fn TypeRef make_map_with_receiver_args(TypeRef receiver) {
 /**
  * Resolve the type of a member access on a known type.
  */
+/**
+ * Whether `name` denotes Throwable or one of the well-known stdlib
+ * exception subtypes (mirrors STDLIB_SUPERTYPES exception block).
+ * Used to expose Throwable instance API (message/cause/...) on bare
+ * `catch (e: T)` parameters without dep-index lookup (Kotlin spec
+ * §11.1.4 + §17.2).
+ */
+fn bool is_throwable_type(String name) {
+	if (name.len == 0) return false;
+	switch (name) {
+		case "Throwable":
+		case "Exception":
+		case "RuntimeException":
+		case "Error":
+		case "IllegalArgumentException":
+		case "IllegalStateException":
+		case "NullPointerException":
+		case "IndexOutOfBoundsException":
+		case "UnsupportedOperationException":
+		case "NoSuchElementException":
+		case "ConcurrentModificationException":
+		case "ArithmeticException":
+		case "ClassCastException":
+		case "NumberFormatException":
+		case "AssertionError":
+		case "OutOfMemoryError":
+		case "StackOverflowError":
+			return true;
+		default:
+			return false;
+	}
+}
+
 fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 	String type_name = receiver.name;
 
@@ -3852,6 +3886,25 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 		if (member_name == "toString") return TYPE_STRING;
 		if (member_name == "hashCode") return TYPE_INT;
 		if (member_name == "equals") return TYPE_BOOLEAN;
+	}
+
+	// Throwable + descendants (Kotlin spec §11.1.4 + §17.2). All
+	// share the Throwable instance API: message: String?, cause: Throwable?,
+	// stackTrace: Array<StackTraceElement>; printStackTrace(): Unit.
+	if (is_throwable_type(type_name)) {
+		if (member_name == "message") return TYPE_STRING_NULLABLE;
+		if (member_name == "cause") return { .kind = SIMPLE, .name = "Throwable", .nullable = true };
+		if (member_name == "localizedMessage") return TYPE_STRING_NULLABLE;
+		if (member_name == "stackTrace") {
+			return { .kind = GENERIC, .name = "Array", .type_arg_count = 1,
+			         .type_arg_names = { [0] = "StackTraceElement" } };
+		}
+		if (member_name == "printStackTrace") return TYPE_UNIT;
+		if (member_name == "addSuppressed" || member_name == "fillInStackTrace") return TYPE_UNIT;
+		if (member_name == "suppressed" || member_name == "suppressedExceptions") {
+			return { .kind = GENERIC, .name = "Array", .type_arg_count = 1,
+			         .type_arg_names = { [0] = "Throwable" } };
+		}
 	}
 
 	// Any members (available on all types)

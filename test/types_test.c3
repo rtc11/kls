@@ -2833,6 +2833,33 @@ fn void try_catch_mixed_types() @test {
 	};
 }
 
+fn void catch_param_typed_from_annotation() @test {
+	// `catch (e: IllegalStateException)` — `e.message` should resolve.
+	// Exception param's PARAM has type_text; name lookup inside catch body
+	// must produce TypeRef from that annotation.
+	@pool() {
+		String src = `fun f() {
+	try {
+		error("x")
+	} catch (e: IllegalStateException) {
+		val m = e.message
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint m_idx = find_decl(pr, "m");
+		String t = m_idx > 0 && ti.has_type[m_idx] ? types::format_type(&ti.node_types[m_idx]) : "<no>";
+		// Probe: also check `e` PARAM has a type
+		uint e_idx = find_node(pr, PARAM, "e");
+		String et = e_idx != 0 && ti.has_type[e_idx] ? types::format_type(&ti.node_types[e_idx]) : "<no>";
+		assert(e_idx != 0 && et == "IllegalStateException", "e: IllegalStateException, got '%s'", et);
+		assert(m_idx != 0 && t == "String?", "m: String? (e.message), got '%s'", t);
+	};
+}
+
 // ── Phase 2: Lambda body type inference ─────────────────────────────
 
 fn void map_infers_return_type_from_lambda() @test {
