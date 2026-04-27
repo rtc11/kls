@@ -34,6 +34,7 @@ struct ServerConfig {
 	bool empty_catch_diagnostic;        // emit hints for catch clauses with empty bodies
 	bool redundant_override_diagnostic; // emit warnings for `override fun foo() = super.foo()`
 	bool redundant_else_when_diagnostic; // emit warnings for `else` arm in already-exhaustive `when`
+	bool catch_swallows_diagnostic; // emit hints for non-empty catch blocks that ignore the exception
 }
 
 // Module-level global with defaults
@@ -54,6 +55,7 @@ ServerConfig g_config = {
 	.empty_catch_diagnostic = true,
 	.redundant_override_diagnostic = true,
 	.redundant_else_when_diagnostic = true,
+	.catch_swallows_diagnostic = true,
 };
 
 /**
@@ -190,6 +192,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_else_when_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("catchSwallowsDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.catch_swallows_diagnostic = val.b;
+			log::debug("[kls] config: catchSwallowsDiagnostic = %s",
+				g_config.catch_swallows_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -318,6 +328,10 @@ fn bool redundant_override_diagnostic_enabled() {
 
 fn bool redundant_else_when_diagnostic_enabled() {
 	return g_config.redundant_else_when_diagnostic;
+}
+
+fn bool catch_swallows_diagnostic_enabled() {
+	return g_config.catch_swallows_diagnostic;
 }
 
 /**

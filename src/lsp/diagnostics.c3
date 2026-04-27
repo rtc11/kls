@@ -177,6 +177,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::empty_catch_diagnostic_enabled()) {
 			add_empty_catch_diagnostics(diagnostics, ast);
 		}
+		add_swallowed_catch_diagnostics(diagnostics, ast);
 		if (config::redundant_override_diagnostic_enabled()) {
 			add_redundant_override_diagnostics(diagnostics, ast);
 		}
@@ -3603,6 +3604,111 @@ fn void add_redundant_else_when_diagnostics(Object* diagnostics, ParseResult* as
 
 		diag.set("severity", 2); // Warning
 		diag.set("source", "kls");
+		diag.set("message", msg.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Catch swallows exception ──────────────────────────────────────
+
+/**
+ * Walks each CATCH_CLAUSE; if its body contains statements but never
+ * references the exception parameter and never re-throws, emit a Hint
+ * with DiagnosticTag.Unnecessary on the parameter.
+ *
+ * Empty catch blocks are excluded — covered by add_empty_catch_diagnostics.
+ *
+ * Param names starting with '_' are skipped (idiomatic "deliberately
+ * ignored", per Kotlin convention).
+ *
+ * Subtree containment is checked by source-offset bounds (PARAM/BLOCK
+ * end_offsets are reliable).
+ *
+ * Gated by config::catch_swallows_diagnostic_enabled().
+ */
+fn void add_swallowed_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
+	if (!config::catch_swallows_diagnostic_enabled()) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != CATCH_CLAUSE) continue;
+
+		// Find PARAM child and BLOCK child.
+		uint param_idx = ast::NO_PARENT;
+		uint block_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == PARAM && param_idx == ast::NO_PARENT) {
+				param_idx = c;
+			}
+			if (ast.nodes[c].kind == BLOCK) {
+				block_idx = c;
+			}
+		}
+		if (param_idx == ast::NO_PARENT) continue;
+		if (block_idx == ast::NO_PARENT) continue;
+
+		AstNode* param = &ast.nodes[param_idx];
+		AstNode* block = &ast.nodes[block_idx];
+
+		// Skip empty body (handled by add_empty_catch_diagnostics).
+		uint stmt_count = 0;
+		for (uint c = block.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != block_idx) continue;
+			stmt_count++;
+		}
+		if (stmt_count == 0) continue;
+
+		// Skip empty / underscore-prefixed param names (intentional).
+		if (param.name.len == 0) continue;
+		if (param.name[0] == '_') continue;
+
+		// Walk all nodes; check those whose source range falls inside
+		// the BLOCK's range. Look for THROW_EXPR or NAME_EXPR matching
+		// the param name.
+		bool has_throw = false;
+		bool uses_param = false;
+		for (uint k = 0; k < ast.node_count; k++) {
+			AstNode* n = &ast.nodes[k];
+			if (n.start_offset < block.start_offset) continue;
+			if (n.end_offset > block.end_offset) continue;
+			if (n.kind == THROW_EXPR) {
+				has_throw = true;
+				if (uses_param) break;
+			} else if (n.kind == NAME_EXPR && n.name == param.name) {
+				uses_param = true;
+				if (has_throw) break;
+			}
+		}
+		if (uses_param) continue;
+		if (has_throw) continue;
+
+		// Build diagnostic: Hint, Unnecessary tag, range = PARAM
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)param.start_line);
+		start.set("character", (int)param.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)param.end_line);
+		end_pos.set("character", (int)param.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("Exception '%s' is never used (catch swallows the exception)",
+			param.name);
 		diag.set("message", msg.str_view());
 
 		Object* tags = object::new_obj(tmem);

@@ -1709,3 +1709,120 @@ fn void read_after_write_not_flagged() @test {
 		}
 	};
 }
+
+fn void catch_swallows_no_use_no_throw_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println("oops")
+    }
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Exception 'e' is never used")) flagged = true;
+		}
+		assert(flagged, "swallowed exception should be flagged");
+	};
+}
+
+fn void catch_rethrow_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println("oops")
+        throw e
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("Exception 'e' is never used"),
+				"rethrow should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_param_used_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println(e.message)
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("Exception 'e' is never used"),
+				"used param should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_underscore_param_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (_: Exception) {
+        println("ignored")
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("catch swallows"),
+				"underscore param should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_throws_wrapped_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        throw RuntimeException("wrapped")
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("Exception 'e' is never used"),
+				"throw (any) should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_empty_body_not_double_flagged() @test {
+	@pool() {
+		// empty catch is handled by add_empty_catch_diagnostics; we
+		// must NOT also emit the swallows diagnostic.
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("catch swallows"),
+				"empty catch should NOT trigger swallows: %s", msg);
+		}
+	};
+}
