@@ -2460,3 +2460,88 @@ fn void jdk_java_lang_no_unresolved_diagnostic() @test {
 		}
 	};
 }
+
+// ── Tests: extract variable (replace all occurrences) ─────────
+
+fn void extract_variable_all_occurrences_two_matches() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() {
+	val a = 1 + 2
+	val b = 1 + 2
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select first "1 + 2" on line 1 (col 9..14 — `\tval a = ` is 9 chars: tab+val a = )
+		// Tab=1, "val a = " = 8, total 9 → "1 + 2" at cols 9..14
+		Object* params = make_extract_params("file:///test.kt", 1, 9, 1, 14);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title.contains("replace") && title.contains("occurrences")) {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				// 1 insert + 2 replaces
+				assert(edits.get_len() == 3,
+					"expected 3 edits, got %d", (int)edits.get_len());
+				break;
+			}
+		}
+		assert(found, "expected 'Extract variable (replace N occurrences)' action");
+	};
+}
+
+fn void extract_variable_all_occurrences_skipped_for_single_match() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		// Only the single-occurrence "Extract variable" — no all-occurrences variant
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.contains("occurrences"),
+				"unexpected 'occurrences' action for single match: '%s'", title);
+		}
+	};
+}
+
+fn void extract_variable_all_occurrences_scoped_to_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() {
+	val a = 1 + 2
+}
+fun bar() {
+	val b = 1 + 2
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "1 + 2" in foo() (line 1)
+		Object* params = make_extract_params("file:///test.kt", 1, 9, 1, 14);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		// All-occurrences shouldn't fire because only 1 match in foo's scope
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.contains("occurrences"),
+				"all-occurrences should be scoped to enclosing fun; got '%s'", title);
+		}
+	};
+}

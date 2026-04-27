@@ -181,6 +181,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (extract != null) {
 			actions.push(extract);
 		}
+		Object* extract_all = try_extract_variable_all_occurrences(uri, doc, ast, params);
+		if (extract_all != null) {
+			actions.push(extract_all);
+		}
 		Object* extract_fn = try_extract_function(uri, doc, ast, params);
 		if (extract_fn != null) {
 			actions.push(extract_fn);
@@ -3407,4 +3411,168 @@ fn bool needs_parens_for_negation(NodeKind k) {
 		default:
 			return true;
 	}
+}
+
+// ── Refactor: extract variable (replace all occurrences) ──────
+//
+// Companion to try_extract_variable. When the selected expression has
+// 2+ identical occurrences (by exact source text) inside the enclosing
+// function/lambda/init scope, offers a separate action that replaces
+// ALL of them with the new variable.
+//
+// Returns null if:
+// - Selection doesn't match a single expression node
+// - That expression is a NAME_EXPR (already a reference)
+// - Only one occurrence exists in the enclosing scope
+fn Object* try_extract_variable_all_occurrences(String uri, Document* doc, ParseResult* ast, Object* params) {
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+
+	Object* start = range.get("start") ?? null;
+	Object* end_pos = range.get("end") ?? null;
+	if (start == null || end_pos == null) return null;
+
+	uint start_line = (uint)(start.get_int("line") ?? 0);
+	uint start_col = (uint)(start.get_int("character") ?? 0);
+	uint end_line = (uint)(end_pos.get_int("line") ?? 0);
+	uint end_col = (uint)(end_pos.get_int("character") ?? 0);
+
+	if (start_line == end_line && start_col == end_col) return null;
+
+	long sel_start = document::position_to_byte_offset(doc.content, start_line, start_col);
+	long sel_end = document::position_to_byte_offset(doc.content, end_line, end_col);
+	if (sel_start < 0 || sel_end < 0 || sel_end <= sel_start) return null;
+
+	// Find selected expression
+	uint best_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (!ast::is_expression(n.kind)) continue;
+		if (n.start_offset == (uint)sel_start && n.end_offset == (uint)sel_end) {
+			best_idx = i;
+		}
+	}
+	if (best_idx == uint.max) return null;
+
+	AstNode* expr = &ast.nodes[best_idx];
+	if (expr.kind == NAME_EXPR) return null;
+
+	String expr_text = doc.content[(usz)expr.start_offset..(usz)expr.end_offset - 1];
+
+	// Find enclosing scope: walk parents until FUN_DECL / LAMBDA_EXPR /
+	// INIT_BLOCK / CONSTRUCTOR_DECL / FILE / ANONYMOUS_FUN_EXPR
+	uint scope_idx = best_idx;
+	while (scope_idx != 0) {
+		AstNode* sn = &ast.nodes[scope_idx];
+		if (sn.kind == FUN_DECL || sn.kind == LAMBDA_EXPR || sn.kind == INIT_BLOCK
+			|| sn.kind == CONSTRUCTOR_DECL || sn.kind == ANONYMOUS_FUN_EXPR
+			|| sn.kind == FILE) {
+			break;
+		}
+		uint p = sn.parent;
+		if (p == ast::NO_PARENT) break;
+		scope_idx = p;
+	}
+	AstNode* scope = &ast.nodes[scope_idx];
+	uint scope_start = scope.start_offset;
+	uint scope_end = scope.end_offset;
+
+	// Collect all expression nodes inside scope whose source text matches
+	uint[64] match_indices;
+	uint match_count = 0;
+	for (uint i = 1; i < ast.node_count && match_count < 64; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (!ast::is_expression(n.kind)) continue;
+		if (n.start_offset < scope_start || n.end_offset > scope_end) continue;
+		uint len = n.end_offset - n.start_offset;
+		if (len != expr_text.len) continue;
+		String node_text = doc.content[(usz)n.start_offset..(usz)n.end_offset - 1];
+		if (node_text != expr_text) continue;
+		match_indices[match_count++] = i;
+	}
+
+	if (match_count < 2) return null;
+
+	// First match (smallest start_offset) — for statement-level insert
+	uint first_idx = match_indices[0];
+	for (uint k = 1; k < match_count; k++) {
+		if (ast.nodes[match_indices[k]].start_offset < ast.nodes[first_idx].start_offset) {
+			first_idx = match_indices[k];
+		}
+	}
+
+	// Walk to containing statement of first occurrence
+	uint stmt_idx = first_idx;
+	while (stmt_idx != 0 && ast.nodes[stmt_idx].parent != ast::NO_PARENT) {
+		uint parent_idx = ast.nodes[stmt_idx].parent;
+		AstNode* parent = &ast.nodes[parent_idx];
+		if (parent.kind == BLOCK || parent.kind == FILE) break;
+		stmt_idx = parent_idx;
+	}
+	AstNode* stmt = &ast.nodes[stmt_idx];
+
+	// Compute indent
+	String indent = "";
+	if (stmt.start_col > 0) {
+		usz line_start = (usz)stmt.start_offset;
+		while (line_start > 0 && doc.content[line_start - 1] != '\n') line_start--;
+		usz ws_end = line_start;
+		while (ws_end < doc.content.len && (doc.content[ws_end] == ' ' || doc.content[ws_end] == '\t')) ws_end++;
+		if (ws_end > line_start) indent = doc.content[line_start..ws_end - 1];
+	}
+
+	DString insert_text;
+	insert_text.tinit();
+	insert_text.appendf("val extractedVar = %s\n%s", expr_text, indent);
+
+	Object* edits = object::new_obj(tmem);
+
+	// Edit 1: insert
+	Object* insert_start_pos = object::new_obj(tmem);
+	insert_start_pos.set("line", (int)stmt.start_line);
+	insert_start_pos.set("character", (int)stmt.start_col);
+	Object* insert_end_pos = object::new_obj(tmem);
+	insert_end_pos.set("line", (int)stmt.start_line);
+	insert_end_pos.set("character", (int)stmt.start_col);
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", insert_start_pos);
+	insert_range.set("end", insert_end_pos);
+	Object* edit1 = object::new_obj(tmem);
+	edit1.set("range", insert_range);
+	edit1.set("newText", insert_text.str_view());
+	edits.push(edit1);
+
+	// Edits 2..N: replace each occurrence
+	for (uint k = 0; k < match_count; k++) {
+		AstNode* m = &ast.nodes[match_indices[k]];
+		Object* rs = object::new_obj(tmem);
+		rs.set("line", (int)m.start_line);
+		rs.set("character", (int)m.start_col);
+		Object* re = object::new_obj(tmem);
+		re.set("line", (int)m.end_line);
+		re.set("character", (int)m.end_col);
+		Object* rr = object::new_obj(tmem);
+		rr.set("start", rs);
+		rr.set("end", re);
+		Object* e = object::new_obj(tmem);
+		e.set("range", rr);
+		e.set("newText", "extractedVar");
+		edits.push(e);
+	}
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	DString title;
+	title.tinit();
+	title.appendf("Extract variable (replace %d occurrences)", (int)match_count);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", title.str_view());
+	action.set("kind", "refactor.extract.variable");
+	action.set("edit", workspace_edit);
+
+	return action;
 }
