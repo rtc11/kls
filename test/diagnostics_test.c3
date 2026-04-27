@@ -1600,3 +1600,112 @@ fn void no_false_diagnostic_for_call_in_lambda_with_nested_arrow_lambda() @test 
 			"multi-arg call in lambda with nested arrow lambda should not produce false diagnostic");
 	};
 }
+
+fn void write_only_var_flagged_as_unused() @test {
+	@pool() {
+		// `var x` written but never read — should be flagged
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var x = 0
+    x = 5
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("'x' is never used")) flagged = true;
+		}
+		assert(flagged, "write-only var should be flagged");
+	};
+}
+
+fn void destructuring_component_unused_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    val pair = Pair(1, 2)
+    val (a, b) = pair
+    println(a)
+}`
+		);
+		bool flagged_b = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("'b' is never used")) flagged_b = true;
+		}
+		assert(flagged_b, "destructuring component 'b' should be flagged");
+	};
+}
+
+fn void for_loop_unused_var_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    for (i in 1..10) {
+        println("hi")
+    }
+}`
+		);
+		bool flagged = false;
+		for (usz j = 0; j < result.get_len(); j++) {
+			String msg = result.get_at(j).get_string("message") ?? "";
+			if (msg.contains("'i' is never used")) flagged = true;
+		}
+		assert(flagged, "for-loop var 'i' should be flagged");
+	};
+}
+
+fn void catch_unused_param_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        println("try")
+    } catch (e: Exception) {
+        println("oops")
+    }
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("'e' is never used")) flagged = true;
+		}
+		assert(flagged, "catch param 'e' should be flagged");
+	};
+}
+
+fn void compound_assign_counts_as_read() @test {
+	@pool() {
+		// `+=` reads the current value, so x is "used" — no flag
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var x = 0
+    x += 5
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("'x' is never used"),
+				"compound-assigned var should NOT be flagged: %s", msg);
+		}
+	};
+}
+
+fn void read_after_write_not_flagged() @test {
+	@pool() {
+		// pure write `x = 5`, then read `println(x)` — used, no flag
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var x = 0
+    x = 5
+    println(x)
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("'x' is never used"),
+				"read-after-write var should NOT be flagged: %s", msg);
+		}
+	};
+}

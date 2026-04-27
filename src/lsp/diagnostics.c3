@@ -1847,6 +1847,12 @@ fn bool is_local_property(ParseResult* ast, uint node_idx) {
 /**
  * Check if a local variable name is used (referenced) anywhere after its
  * declaration within its containing scope. Scans NAME_EXPR nodes.
+ *
+ * A "use" is any NAME_EXPR with the matching name that is NOT the LHS of a
+ * plain `=` ASSIGNMENT_EXPR. Compound assignments (`+=`, `-=`, etc.) and
+ * pre/postfix `++`/`--` are reads (they read the current value), so they
+ * count as uses. Pure write `x = expr` does not count — a `var` that is
+ * assigned but never read is still unused.
  */
 fn bool is_local_name_used(ParseResult* ast, uint decl_idx) {
 	AstNode* decl = &ast.nodes[decl_idx];
@@ -1859,13 +1865,22 @@ fn bool is_local_name_used(ParseResult* ast, uint decl_idx) {
 		AstNode* n = &ast.nodes[i];
 		if (n.kind != NAME_EXPR) continue;
 		if (n.name != name) continue;
+		if (n.start_offset <= decl.start_offset) continue;
 
-		// Verify this NAME_EXPR is within the same scope as the declaration
-		// by checking it shares a common scope ancestor
-		// Simple approach: if start_offset > decl end_offset and same-ish scope, it's a use
-		// But for correctness, just check that ANY NAME_EXPR with same name exists
-		// after the declaration offset
-		if (n.start_offset > decl.start_offset) return true;
+		// Skip pure writes: parent is ASSIGNMENT_EXPR with `=` (not `+=`
+		// etc.) AND we are its LHS (first child).
+		uint p = n.parent;
+		if (p != ast::NO_PARENT && p < ast.node_count
+			&& ast.nodes[p].kind == ASSIGNMENT_EXPR
+			&& ast.nodes[p].extra_text == "=") {
+			uint first = ast::NO_PARENT;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == p) { first = j; break; }
+			}
+			if (first == i) continue; // pure-write LHS, not a read
+		}
+
+		return true;
 	}
 	return false;
 }
