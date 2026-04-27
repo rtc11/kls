@@ -245,19 +245,28 @@ fn uint lower_stmt(Cfg* cfg, ParseResult* pr, uint stmt_idx, uint pred, LoopStac
 fn uint find_control_flow_value(ParseResult* pr, uint stmt_idx) {
 	if (stmt_idx >= pr.node_count) return ast::NO_PARENT;
 	AstNode* node = &pr.nodes[stmt_idx];
-	if (node.kind != PROPERTY_DECL && node.kind != RETURN_EXPR && node.kind != THROW_EXPR) return ast::NO_PARENT;
+	if (node.kind != PROPERTY_DECL && node.kind != RETURN_EXPR && node.kind != THROW_EXPR && node.kind != ASSIGNMENT_EXPR) return ast::NO_PARENT;
+	// ASSIGNMENT_EXPR children = [lhs, rhs]; only the RHS holds the
+	// control-flow expression whose branches need narrowing. Skip the
+	// first non-annotation/type child (the LHS) and inspect the next.
+	bool is_assign = node.kind == ASSIGNMENT_EXPR;
+	bool skipped_lhs = false;
 	for (uint i = node.children_start; i < pr.node_count; i++) {
 		if (pr.nodes[i].parent != stmt_idx) continue;
 		if (pr.nodes[i].kind == ANNOTATION_ENTRY) continue;
 		if (pr.nodes[i].kind == TYPE_REF) continue;
+		if (is_assign && !skipped_lhs) {
+			skipped_lhs = true;
+			continue;
+		}
 		switch (pr.nodes[i].kind) {
 			case WHEN_EXPR:
 			case IF_EXPR:
 			case TRY_EXPR:
 				return i;
 			default:
-				// First non-annotation/type child that's not control-flow:
-				// nothing to descend into.
+				// First (post-LHS for assignments) non-annotation/type child
+				// that's not control-flow: nothing to descend into.
 				return ast::NO_PARENT;
 		}
 	}
