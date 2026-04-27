@@ -33,6 +33,7 @@ struct ServerConfig {
 	bool unnecessary_elvis_diagnostic;  // emit warnings for `x ?: y` where x is statically non-null
 	bool empty_catch_diagnostic;        // emit hints for catch clauses with empty bodies
 	bool redundant_override_diagnostic; // emit warnings for `override fun foo() = super.foo()`
+	bool redundant_else_when_diagnostic; // emit warnings for `else` arm in already-exhaustive `when`
 }
 
 // Module-level global with defaults
@@ -52,6 +53,7 @@ ServerConfig g_config = {
 	.unnecessary_elvis_diagnostic = true,
 	.empty_catch_diagnostic = true,
 	.redundant_override_diagnostic = true,
+	.redundant_else_when_diagnostic = true,
 };
 
 /**
@@ -180,6 +182,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_override_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantElseWhenDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_else_when_diagnostic = val.b;
+			log::debug("[kls] config: redundantElseWhenDiagnostic = %s",
+				g_config.redundant_else_when_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -304,6 +314,10 @@ fn bool empty_catch_diagnostic_enabled() {
  */
 fn bool redundant_override_diagnostic_enabled() {
 	return g_config.redundant_override_diagnostic;
+}
+
+fn bool redundant_else_when_diagnostic_enabled() {
+	return g_config.redundant_else_when_diagnostic;
 }
 
 /**

@@ -155,6 +155,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			if (workspace != null) {
 				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
 				add_enum_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
+				add_redundant_else_when_diagnostics(diagnostics, ast, type_info, workspace);
 			}
 		}
 		add_unreachable_code_diagnostics(diagnostics, ast);
@@ -3441,6 +3442,172 @@ fn void add_redundant_override_diagnostics(Object* diagnostics, ParseResult* ast
 		diag.set("tags", tags);
 
 		diag.set("message", "Override is redundant; only delegates to super");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant else after exhaustive when ─────────────────────────
+
+/**
+ * Emit Warning + Unnecessary tag for `when (subject) { ... else -> ... }`
+ * where the non-else arms already cover every variant of a sealed
+ * class or enum class subject. The else arm is dead code.
+ *
+ * Mirrors the structure of add_sealed_exhaustive_diagnostics +
+ * add_enum_exhaustive_diagnostics but inverts the condition:
+ * fires only when has_else && missing_count == 0.
+ *
+ * Gated by config::redundant_else_when_diagnostic_enabled().
+ */
+fn void add_redundant_else_when_diagnostics(Object* diagnostics, ParseResult* ast,
+		TypeInfo* type_info, WorkspaceIndex* workspace) {
+	if (!config::redundant_else_when_diagnostic_enabled()) return;
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Locate the subject (first non-ENTRY child)
+		uint subj_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == WHEN_ENTRY) break;
+			subj_idx = c;
+			break;
+		}
+		if (subj_idx == ast::NO_PARENT) continue;
+
+		// Resolve subject type
+		if (!type_info.has_type[subj_idx]) continue;
+		TypeRef subj_type = type_info.node_types[subj_idx];
+		if (subj_type.name.len == 0) continue;
+
+		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		bool is_sealed = (flags & ast::MOD_SEALED) != 0;
+		bool is_enum = (flags & ast::MOD_ENUM) != 0;
+		if (!is_sealed && !is_enum) continue;
+
+		// Enumerate variants
+		String[64] variants;
+		usz variant_count = 0;
+		if (is_sealed) {
+			if (try sub_indices = workspace.super_index.get(subj_type.name)) {
+				for (usz k = 0; k < sub_indices.len() && variant_count < 64; k++) {
+					WorkspaceSymbol* sym = workspace.get_symbol(sub_indices.get(k));
+					if (sym.name.len == 0) continue;
+					bool seen = false;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == sym.name) { seen = true; break; }
+					}
+					if (!seen) variants[variant_count++] = sym.name;
+				}
+			}
+		} else {
+			// enum
+			if (try members = workspace.lookup_members(subj_type.name)) {
+				for (usz k = 0; k < members.len() && variant_count < 64; k++) {
+					MemberDecl* m = members.get_ref(k);
+					if (m.node_kind != ENUM_ENTRY) continue;
+					bool seen = false;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == m.name) { seen = true; break; }
+					}
+					if (!seen) variants[variant_count++] = m.name;
+				}
+			}
+		}
+		if (variant_count == 0) continue;
+
+		// Walk arms: locate else arm (record its index for range), and
+		// collect covered variants from non-else arms.
+		uint else_arm_idx = ast::NO_PARENT;
+		bool[64] covered;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			AstNode* entry = &ast.nodes[c];
+			if (entry.extra_text == "else") {
+				else_arm_idx = c;
+				continue;
+			}
+
+			uint last_child = ast::NO_PARENT;
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				last_child = k;
+			}
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				if (k == last_child) continue;
+				AstNode* cond = &ast.nodes[k];
+				if (is_sealed) {
+					if (cond.kind != TYPE_CHECK_EXPR || cond.extra_text != "is") continue;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == cond.type_text) { covered[x] = true; break; }
+					}
+				} else {
+					// enum
+					String entry_name = "";
+					if (cond.kind == DOT_EXPR) {
+						uint recv_idx = ast::NO_PARENT;
+						for (uint r = cond.children_start; r < ast.node_count; r++) {
+							if (ast.nodes[r].parent != k) continue;
+							recv_idx = r;
+							break;
+						}
+						if (recv_idx != ast::NO_PARENT
+							&& ast.nodes[recv_idx].kind == NAME_EXPR
+							&& ast.nodes[recv_idx].name == subj_type.name) {
+							entry_name = cond.name;
+						}
+					} else if (cond.kind == NAME_EXPR) {
+						entry_name = cond.name;
+					}
+					if (entry_name.len == 0) continue;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == entry_name) { covered[x] = true; break; }
+					}
+				}
+			}
+		}
+		if (else_arm_idx == ast::NO_PARENT) continue; // no else arm
+
+		// Compute missing — must be 0 for else to be redundant
+		usz missing_count = 0;
+		for (usz x = 0; x < variant_count; x++) {
+			if (!covered[x]) missing_count++;
+		}
+		if (missing_count > 0) continue;
+
+		// Build diagnostic on the `else` keyword span
+		AstNode* else_arm = &ast.nodes[else_arm_idx];
+		DString msg;
+		msg.tinit();
+		msg.appendf("'else' is redundant — 'when' is already exhaustive over '%s'",
+			subj_type.name);
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)else_arm.start_line);
+		start.set("character", (int)else_arm.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)else_arm.start_line);
+		end_pos.set("character", (int)(else_arm.start_col + 4)); // "else"
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+		diag.set("message", msg.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
 
 		diagnostics.push(diag);
 	}
