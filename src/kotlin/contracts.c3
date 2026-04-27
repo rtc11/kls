@@ -143,6 +143,20 @@ const StdlibContractRow[*] STDLIB_CONTRACTS = {
 		.pred = PRED_NOT_NULL,
 		.target = { .kind = TARGET_RECEIVER, .param_index = 0 },
 	} },
+	// Scope functions: callsInPlace(block, EXACTLY_ONCE).
+	// `let`/`also`/`apply`/`takeIf`/`takeUnless`/`run` (extension) take the
+	// lambda as positional arg 0 (extension receiver isn't a value arg).
+	// `run` (top-level) takes the lambda as arg 0.
+	// `with(receiver, block)` takes the lambda as arg 1.
+	// cip_param_index here uses the call-site value-argument position so
+	// flow.c3 can resolve the lambda from CALL_EXPR children directly.
+	{ "let",        "", { .kind = CALLS_IN_PLACE, .cip_param_index = 0, .ik = EXACTLY_ONCE } },
+	{ "also",       "", { .kind = CALLS_IN_PLACE, .cip_param_index = 0, .ik = EXACTLY_ONCE } },
+	{ "apply",      "", { .kind = CALLS_IN_PLACE, .cip_param_index = 0, .ik = EXACTLY_ONCE } },
+	{ "run",        "", { .kind = CALLS_IN_PLACE, .cip_param_index = 0, .ik = EXACTLY_ONCE } },
+	{ "with",       "", { .kind = CALLS_IN_PLACE, .cip_param_index = 1, .ik = EXACTLY_ONCE } },
+	{ "takeIf",     "", { .kind = CALLS_IN_PLACE, .cip_param_index = 0, .ik = EXACTLY_ONCE } },
+	{ "takeUnless", "", { .kind = CALLS_IN_PLACE, .cip_param_index = 0, .ik = EXACTLY_ONCE } },
 };
 
 faultdef NOT_FOUND;

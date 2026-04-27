@@ -764,10 +764,77 @@ fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
 	// Recurse into children — facts accumulate left-to-right.
 	if (n.child_count == 0) return;
 	for (uint i = n.children_start; i < pr.node_count; i++) {
-		if (pr.nodes[i].parent == idx) {
-			scan_node(pr, i, state);
+		if (pr.nodes[i].parent != idx) continue;
+		// Gating: lambda / anonymous-function bodies are sub-CFGs whose
+		// control flow is not part of the enclosing function. Naively
+		// recursing would leak narrowing facts (e.g. `requireNotNull(x)`
+		// inside a `forEach { ... }`) into the caller even when the
+		// lambda may not run. Only descend when the enclosing call has
+		// a `callsInPlace` contract with EXACTLY_ONCE / AT_LEAST_ONCE
+		// for this lambda's argument position.
+		NodeKind ck = pr.nodes[i].kind;
+		if (ck == LAMBDA_EXPR || ck == ANONYMOUS_FUN_EXPR) {
+			if (!lambda_runs_at_least_once(pr, i)) continue;
+		}
+		scan_node(pr, i, state);
+	}
+}
+
+/**
+ * True if a lambda / anonymous fn at `lambda_idx` is guaranteed to run
+ * at least once based on its enclosing CALL_EXPR's contracts. Consults
+ * stdlib + in-file user-defined contracts.
+ */
+fn bool lambda_runs_at_least_once(ParseResult* pr, uint lambda_idx) {
+	uint call_idx = ast::find_call_for_lambda(pr, lambda_idx);
+	if (call_idx == ast::NO_PARENT) return false;
+	String callee = pr.nodes[call_idx].name;
+	if (callee.len == 0) return false;
+
+	// Compute this lambda's value-argument position. Count VALUE_ARGUMENT
+	// children of the call up to (and including) the one wrapping our
+	// lambda, OR if the lambda is a direct CALL_EXPR child it's the next
+	// position after the parenthesized args.
+	uint arg_pos = lambda_arg_position(pr, call_idx, lambda_idx);
+
+	contracts::ContractEffect[16] buf;
+	usz n = collect_contracts_for_callee(pr, callee, buf[..]);
+	for (usz i = 0; i < n; i++) {
+		if (buf[i].kind != contracts::ContractEffectKind.CALLS_IN_PLACE) continue;
+		if (buf[i].cip_param_index != arg_pos) continue;
+		switch (buf[i].ik) {
+			case contracts::InvocationKind.EXACTLY_ONCE:
+			case contracts::InvocationKind.AT_LEAST_ONCE:
+				return true;
+			default:
+				return false;
 		}
 	}
+	return false;
+}
+
+/**
+ * Position of `lambda_idx` among the call's value-arguments. Counts
+ * VALUE_ARGUMENT children (which wrap both parenthesized args and
+ * trailing lambdas, per the parser) and matches by descent. Returns
+ * uint.max if not found.
+ */
+fn uint lambda_arg_position(ParseResult* pr, uint call_idx, uint lambda_idx) {
+	if (call_idx >= pr.node_count) return uint.max;
+	AstNode* call = &pr.nodes[call_idx];
+	uint pos = 0;
+	for (uint i = call.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != call_idx) continue;
+		if (pr.nodes[i].kind != VALUE_ARGUMENT) continue;
+		// Match if this VALUE_ARGUMENT's child is our lambda, or if our
+		// lambda's parent IS this VALUE_ARGUMENT.
+		if (pr.nodes[lambda_idx].parent == i) return pos;
+		pos++;
+	}
+	// Lambda is direct child of CALL_EXPR (no VALUE_ARGUMENT wrapper):
+	// it occupies the position after all VALUE_ARGUMENT-wrapped args.
+	if (pr.nodes[lambda_idx].parent == call_idx) return pos;
+	return uint.max;
 }
 
 /**
