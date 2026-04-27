@@ -27,6 +27,7 @@ struct ServerConfig {
 	bool var_can_be_val_diagnostic;     // emit hints for local `var` never reassigned
 	bool unnecessary_not_null_diagnostic; // emit warnings for `x!!` on non-null values
 	bool redundant_null_check_diagnostic; // emit warnings for `x == null` / `x != null` on non-null values
+	bool unreachable_catch_diagnostic;  // emit warnings for catch clauses shadowed by an earlier supertype catch
 }
 
 // Module-level global with defaults
@@ -40,6 +41,7 @@ ServerConfig g_config = {
 	.var_can_be_val_diagnostic = true,
 	.unnecessary_not_null_diagnostic = true,
 	.redundant_null_check_diagnostic = true,
+	.unreachable_catch_diagnostic = true,
 };
 
 /**
@@ -120,6 +122,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_null_check_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unreachableCatchDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unreachable_catch_diagnostic = val.b;
+			log::debug("[kls] config: unreachableCatchDiagnostic = %s",
+				g_config.unreachable_catch_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -196,6 +206,14 @@ fn bool unnecessary_not_null_diagnostic_enabled() {
  */
 fn bool redundant_null_check_diagnostic_enabled() {
 	return g_config.redundant_null_check_diagnostic;
+}
+
+/**
+ * Whether to emit "Catch clause is unreachable" warnings when a later
+ * catch clause's exception type is a subtype of an earlier one.
+ */
+fn bool unreachable_catch_diagnostic_enabled() {
+	return g_config.unreachable_catch_diagnostic;
 }
 
 /**

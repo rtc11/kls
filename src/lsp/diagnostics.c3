@@ -161,6 +161,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null) {
 			add_unreachable_cfg_diagnostics(diagnostics, ast, type_info);
 		}
+		if (config::unreachable_catch_diagnostic_enabled()) {
+			add_unreachable_catch_diagnostics(diagnostics, ast);
+		}
 	}
 
 	return diagnostics;
@@ -2886,4 +2889,89 @@ fn void add_redundant_null_check_diagnostics(Object* diagnostics, ParseResult* a
 
 fn bool is_null_literal(AstNode* n) {
 	return n.kind == LITERAL_EXPR && n.extra_text == "null";
+}
+
+// ── Unreachable catch ─────────────────────────────────────────
+//
+// For each TRY_EXPR, walk its CATCH_CLAUSE children in source order. If a later
+// catch's exception type is a subtype of any earlier catch's type, the later
+// clause is unreachable (Kotlin spec §8.4.4).
+//
+// Cross-file class hierarchy is handled by types::is_assignable_to via the
+// workspace symbol index (when set). Stdlib exception hierarchy is hardcoded
+// in STDLIB_SUPERTYPES.
+fn void add_unreachable_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* try_node = &ast.nodes[i];
+		if (try_node.kind != TRY_EXPR) continue;
+
+		// Collect catch clauses in source order
+		uint[16] catch_indices;
+		String[16] catch_types;
+		uint catch_count = 0;
+
+		for (uint c = try_node.children_start; c < ast.node_count && catch_count < 16; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != CATCH_CLAUSE) continue;
+
+			// Catch param is first child of CATCH_CLAUSE (PARAM with type_text)
+			String type_text = "";
+			for (uint p = ast.nodes[c].children_start; p < ast.node_count; p++) {
+				if (ast.nodes[p].parent != c) continue;
+				if (ast.nodes[p].kind == PARAM) {
+					type_text = ast.nodes[p].type_text;
+				}
+				break; // first child only
+			}
+			if (type_text.len == 0) continue;
+
+			catch_indices[catch_count] = c;
+			catch_types[catch_count] = type_text;
+			catch_count++;
+		}
+
+		// For each catch[k], check if any earlier catch[j] catches a supertype
+		for (uint k = 1; k < catch_count; k++) {
+			TypeRef k_type = types::parse_type_text(catch_types[k]);
+			if (k_type.kind == UNKNOWN) continue;
+
+			for (uint j = 0; j < k; j++) {
+				TypeRef j_type = types::parse_type_text(catch_types[j]);
+				if (j_type.kind == UNKNOWN) continue;
+
+				if (types::is_assignable_to(k_type, j_type)) {
+					AstNode* k_node = &ast.nodes[catch_indices[k]];
+					AstNode* j_node = &ast.nodes[catch_indices[j]];
+
+					Object* diag = object::new_obj(tmem);
+					Object* range = object::new_obj(tmem);
+					Object* start = object::new_obj(tmem);
+					start.set("line", (int)k_node.start_line);
+					start.set("character", (int)k_node.start_col);
+					Object* end_pos = object::new_obj(tmem);
+					end_pos.set("line", (int)k_node.end_line);
+					end_pos.set("character", (int)k_node.end_col);
+					range.set("start", start);
+					range.set("end", end_pos);
+
+					diag.set("range", range);
+					diag.set("severity", 2);
+					diag.set("source", "kls");
+
+					Object* tags = object::new_obj(tmem);
+					tags.push(object::new_int(1, tmem));
+					diag.set("tags", tags);
+
+					DString message;
+					message.tinit();
+					message.appendf("Catch clause is unreachable (already caught by '%s' on line %d)",
+						catch_types[j], (int)j_node.start_line + 1);
+					diag.set("message", message.str_view());
+
+					diagnostics.push(diag);
+					break; // only one diagnostic per unreachable catch
+				}
+			}
+		}
+	}
 }
