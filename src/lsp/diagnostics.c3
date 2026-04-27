@@ -128,6 +128,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	if (lexer_error_count == 0 && ast != null) {
 		add_unused_local_diagnostics(diagnostics, content, ast);
 		add_unused_parameter_diagnostics(diagnostics, content, ast);
+		if (config::var_can_be_val_diagnostic_enabled()) {
+			add_var_can_be_val_diagnostics(diagnostics, content, ast);
+		}
 	}
 
 	// ── Val reassignment (Error) ─────────────────────────────────
@@ -1895,6 +1898,107 @@ fn void add_unused_local_diagnostics(Object* diagnostics, String content, ParseR
 
 			diagnostics.push(diag);
 		}
+	}
+}
+
+// ── Var-can-be-val diagnostics ────────────────────────────────────
+
+/**
+ * Check if a local var is reassigned anywhere after its declaration.
+ * Reassignment forms:
+ *   - ASSIGNMENT_EXPR with LHS NAME_EXPR matching name (covers `=`, `+=`, etc.)
+ *   - PREFIX_EXPR with `++` or `--` operand a NAME_EXPR matching name
+ *   - POSTFIX_EXPR with `++` or `--` operand a NAME_EXPR matching name
+ *
+ * Member assignments (`obj.x = ...`) where LHS is DOT_EXPR are not
+ * counted as reassignments of a local var named the same.
+ */
+fn bool is_var_reassigned(ParseResult* ast, uint decl_idx) {
+	AstNode* decl = &ast.nodes[decl_idx];
+	String name = decl.name;
+	if (name.len == 0) return false;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.start_offset <= decl.start_offset) continue;
+
+		// Find LHS via first child of the operator node
+		uint lhs_idx = uint.max;
+		switch (n.kind) {
+			case ASSIGNMENT_EXPR:
+			case PREFIX_EXPR:
+			case POSTFIX_EXPR:
+				// First child is the target/operand
+				for (uint j = 1; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == i) {
+						lhs_idx = j;
+						break;
+					}
+				}
+				break;
+			default:
+				continue;
+		}
+
+		// For PREFIX/POSTFIX: only `++`/`--` mutate
+		if (n.kind == PREFIX_EXPR || n.kind == POSTFIX_EXPR) {
+			if (n.extra_text != "++" && n.extra_text != "--") continue;
+		}
+
+		if (lhs_idx == uint.max) continue;
+		AstNode* lhs = &ast.nodes[lhs_idx];
+		if (lhs.kind != NAME_EXPR) continue; // skip member assignment etc.
+		if (lhs.name != name) continue;
+
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Scan local `var` declarations in function bodies that are never
+ * reassigned and emit Hint diagnostics suggesting they be `val`.
+ *
+ * Skips: top-level/member properties (only locals are safe to flip
+ * without API impact), unused properties (already covered by the
+ * unused-local hint), destructuring decls, names starting with '_'.
+ */
+fn void add_var_can_be_val_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (!is_local_property(ast, i)) continue;
+		if ((n.mod_flags & ast::MOD_VAR) == 0) continue;
+		if (n.name.len == 0) continue;
+		if (n.name == "(destructuring)") continue;
+		if (n.name[0] == '_') continue;
+
+		// Skip if also unused — let unused-local diagnostic carry it
+		if (!is_local_name_used(ast, i)) continue;
+
+		if (is_var_reassigned(ast, i)) continue;
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Variable '%s' can be 'val'", n.name);
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
 	}
 }
 

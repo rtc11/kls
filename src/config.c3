@@ -24,6 +24,7 @@ struct ServerConfig {
 	bool enum_exhaustive_diagnostic;    // emit "non-exhaustive when on enum class" warnings
 	bool useless_cast_diagnostic;       // emit "useless cast" warnings for `x as T` when typeOf(x) == T
 	bool unused_parameter_diagnostic;   // emit hints for function PARAMs never referenced in body
+	bool var_can_be_val_diagnostic;     // emit hints for local `var` never reassigned
 }
 
 // Module-level global with defaults
@@ -34,6 +35,7 @@ ServerConfig g_config = {
 	.enum_exhaustive_diagnostic = true,
 	.useless_cast_diagnostic = true,
 	.unused_parameter_diagnostic = true,
+	.var_can_be_val_diagnostic = true,
 };
 
 /**
@@ -90,6 +92,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unused_parameter_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("varCanBeValDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.var_can_be_val_diagnostic = val.b;
+			log::debug("[kls] config: varCanBeValDiagnostic = %s",
+				g_config.var_can_be_val_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -141,6 +151,14 @@ fn bool useless_cast_diagnostic_enabled() {
  */
 fn bool unused_parameter_diagnostic_enabled() {
 	return g_config.unused_parameter_diagnostic;
+}
+
+/**
+ * Whether to emit "Variable 'x' can be 'val'" hints for local `var`
+ * declarations that are never reassigned.
+ */
+fn bool var_can_be_val_diagnostic_enabled() {
+	return g_config.var_can_be_val_diagnostic;
 }
 
 /**

@@ -67,6 +67,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: change `var` to `val` for never-reassigned local
+		if (message.starts_with("Variable '") && message.contains("can be 'val'")
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_change_var_to_val(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -3116,4 +3125,114 @@ fn Object* try_convert_expression_body_to_block(String uri, Document* doc, Parse
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
+}
+
+// ── Quick fix: change `var` to `val` ─────────────────────────────
+
+/**
+ * For a "Variable 'x' can be 'val'" diagnostic, build a quick-fix
+ * that replaces the `var` keyword in the corresponding PROPERTY_DECL
+ * with `val`.
+ *
+ * Locates the property by line/character of the diagnostic range start
+ * (which we set to the property's start position in
+ * `add_var_can_be_val_diagnostics`). Scans the property's source slice
+ * for the literal `var ` token to locate the keyword precisely
+ * (handles property declarations preceded by modifiers/annotations).
+ */
+fn Object* try_change_var_to_val(String uri, Document* doc, ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	int line;
+	int col;
+	if (try sl = start.get_int("line")) { line = sl; } else { return null; }
+	if (try sc = start.get_int("character")) { col = sc; } else { return null; }
+
+	// Find PROPERTY_DECL whose name_line/start matches
+	uint prop_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if ((int)n.start_line == line && (int)n.start_col == col) {
+			prop_idx = i;
+			break;
+		}
+	}
+	if (prop_idx == uint.max) return null;
+
+	AstNode* prop = &ast.nodes[prop_idx];
+
+	// Locate the `var` keyword inside the property's source slice.
+	usz scan = (usz)prop.start_offset;
+	usz end = (usz)prop.end_offset;
+	if (end > doc.content.len) end = doc.content.len;
+
+	usz var_off = usz.max;
+	while (scan + 3 <= end) {
+		// Word-boundary check: prev char is not ident-like and next char is whitespace
+		bool prev_ok = (scan == 0)
+			|| !is_ident_char(doc.content[scan - 1]);
+		bool match = doc.content[scan] == 'v' && doc.content[scan + 1] == 'a'
+			&& doc.content[scan + 2] == 'r';
+		bool next_ok = (scan + 3 < end)
+			&& !is_ident_char(doc.content[scan + 3]);
+		if (prev_ok && match && next_ok) {
+			var_off = scan;
+			break;
+		}
+		scan++;
+	}
+	if (var_off == usz.max) return null;
+
+	// Compute line/col of `var`
+	uint kw_line = 0;
+	uint kw_col = 0;
+	for (usz i = 0; i < var_off; i++) {
+		if (doc.content[i] == '\n') { kw_line++; kw_col = 0; }
+		else { kw_col++; }
+	}
+
+	Object* replace_start = object::new_obj(tmem);
+	replace_start.set("line", (int)kw_line);
+	replace_start.set("character", (int)kw_col);
+	Object* replace_end = object::new_obj(tmem);
+	replace_end.set("line", (int)kw_line);
+	replace_end.set("character", (int)(kw_col + 3));
+	Object* replace_range = object::new_obj(tmem);
+	replace_range.set("start", replace_start);
+	replace_range.set("end", replace_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", replace_range);
+	edit.set("newText", "val");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Change 'var' to 'val'");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+fn bool is_ident_char(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		|| (c >= '0' && c <= '9') || c == '_';
 }
