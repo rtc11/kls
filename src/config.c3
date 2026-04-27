@@ -26,6 +26,7 @@ struct ServerConfig {
 	bool unused_parameter_diagnostic;   // emit hints for function PARAMs never referenced in body
 	bool var_can_be_val_diagnostic;     // emit hints for local `var` never reassigned
 	bool unnecessary_not_null_diagnostic; // emit warnings for `x!!` on non-null values
+	bool redundant_null_check_diagnostic; // emit warnings for `x == null` / `x != null` on non-null values
 }
 
 // Module-level global with defaults
@@ -38,6 +39,7 @@ ServerConfig g_config = {
 	.unused_parameter_diagnostic = true,
 	.var_can_be_val_diagnostic = true,
 	.unnecessary_not_null_diagnostic = true,
+	.redundant_null_check_diagnostic = true,
 };
 
 /**
@@ -110,6 +112,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unnecessary_not_null_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantNullCheckDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_null_check_diagnostic = val.b;
+			log::debug("[kls] config: redundantNullCheckDiagnostic = %s",
+				g_config.redundant_null_check_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -178,6 +188,14 @@ fn bool var_can_be_val_diagnostic_enabled() {
  */
 fn bool unnecessary_not_null_diagnostic_enabled() {
 	return g_config.unnecessary_not_null_diagnostic;
+}
+
+/**
+ * Whether to emit "Condition is always true/false" warnings for
+ * `x == null` / `x != null` where the static type of `x` is non-nullable.
+ */
+fn bool redundant_null_check_diagnostic_enabled() {
+	return g_config.redundant_null_check_diagnostic;
 }
 
 /**

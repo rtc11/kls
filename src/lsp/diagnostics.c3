@@ -149,6 +149,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			if (config::unnecessary_not_null_diagnostic_enabled()) {
 				add_unnecessary_not_null_diagnostics(diagnostics, ast, type_info);
 			}
+			if (config::redundant_null_check_diagnostic_enabled()) {
+				add_redundant_null_check_diagnostics(diagnostics, ast, type_info);
+			}
 			if (workspace != null) {
 				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
 				add_enum_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
@@ -2775,4 +2778,112 @@ fn void add_unnecessary_not_null_diagnostics(Object* diagnostics, ParseResult* a
 
 		diagnostics.push(diag);
 	}
+}
+
+// ── Redundant null check diagnostics ─────────────────────────────
+
+/**
+ * Walk every BINARY_EXPR with `==` or `!=`. If one operand is the
+ * literal `null` and the other is known non-null (by static type or
+ * syntactic shape), emit a Warning that the condition is always
+ * true/false.
+ *
+ *  `non_null != null` → always true
+ *  `non_null == null` → always false
+ *
+ * Conservative: skip when the non-null operand has UNKNOWN type and
+ * is not one of the always-non-null shapes.
+ */
+fn void add_redundant_null_check_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		if (node.extra_text != "==" && node.extra_text != "!=") continue;
+
+		// Find the two operands (first two children)
+		uint lhs_idx = uint.max;
+		uint rhs_idx = uint.max;
+		for (uint j = 1; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent != i) continue;
+			if (lhs_idx == uint.max) {
+				lhs_idx = j;
+			} else if (rhs_idx == uint.max) {
+				rhs_idx = j;
+				break;
+			}
+		}
+		if (lhs_idx == uint.max || rhs_idx == uint.max) continue;
+
+		// Identify which side is `null` literal and which is the value
+		uint null_idx = uint.max;
+		uint val_idx = uint.max;
+		if (is_null_literal(&ast.nodes[lhs_idx])) {
+			null_idx = lhs_idx;
+			val_idx = rhs_idx;
+		} else if (is_null_literal(&ast.nodes[rhs_idx])) {
+			null_idx = rhs_idx;
+			val_idx = lhs_idx;
+		}
+		if (null_idx == uint.max) continue;
+
+		// Skip null == null (the other side is also null literal)
+		if (is_null_literal(&ast.nodes[val_idx])) continue;
+
+		AstNode* val_node = &ast.nodes[val_idx];
+
+		// Determine non-null-ness of the value side
+		bool val_non_null = false;
+		switch (val_node.kind) {
+			case THIS_EXPR:
+			case SUPER_EXPR:
+			case STRING_TEMPLATE_EXPR:
+				val_non_null = true;
+				break;
+			case LITERAL_EXPR:
+				// A literal that isn't `null` itself is non-null
+				val_non_null = true;
+				break;
+			default:
+				break;
+		}
+		if (!val_non_null && type_info.has_type[val_idx]) {
+			types::TypeRef tr = type_info.node_types[val_idx];
+			if (tr.kind != types::TypeKind.UNKNOWN && !tr.nullable) {
+				val_non_null = true;
+			}
+		}
+		if (!val_non_null) continue;
+
+		// Build diagnostic
+		bool always_true = node.extra_text == "!=";
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Condition is always %s (operand is non-null)",
+			always_true ? "true" : "false");
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+fn bool is_null_literal(AstNode* n) {
+	return n.kind == LITERAL_EXPR && n.extra_text == "null";
 }
