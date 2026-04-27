@@ -112,6 +112,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: remove redundant else arm in exhaustive when
+		if (message.starts_with("'else' is redundant") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_remove_redundant_else_arm(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -4235,5 +4244,108 @@ fn Object* try_split_declaration_assignment(String uri, Document* doc,
 	action.set("title", "Split declaration and assignment");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ── Quickfix: remove redundant else arm ──────────────────────────
+
+/**
+ * For a "'else' is redundant" diagnostic emitted by
+ * add_redundant_else_when_diagnostics, locate the WHEN_ENTRY whose
+ * `extra_text == "else"` and start position matches the diagnostic
+ * range start, then return a quickfix that deletes the entire arm
+ * (including the line it occupies and one trailing newline).
+ */
+fn Object* try_remove_redundant_else_arm(String uri, Document* doc,
+		ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate WHEN_ENTRY with extra_text == "else" matching diag start.
+	uint else_idx = uint.max;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_ENTRY) continue;
+		if (n.extra_text != "else") continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			else_idx = i;
+			break;
+		}
+	}
+	if (else_idx == uint.max) return null;
+
+	AstNode* else_arm = &ast.nodes[else_idx];
+	String content = doc.content;
+
+	// Compute removal range:
+	// Start: beginning of the line containing the else arm.
+	// End: end of the arm + one trailing newline if present.
+	uint del_start = else_arm.start_offset;
+	while (del_start > 0 && content[del_start - 1] != '\n') {
+		del_start--;
+	}
+	uint del_end = else_arm.end_offset;
+	if (del_end < content.len && content[del_end] == '\n') {
+		del_end++;
+	}
+	if (del_start >= del_end) return null;
+
+	// Convert offsets back to LSP positions.
+	uint start_line2 = 0;
+	for (uint k = 0; k < del_start; k++) {
+		if (content[k] == '\n') start_line2++;
+	}
+	uint start_col2 = 0;
+	uint end_line2 = start_line2;
+	uint end_col2 = 0;
+	for (uint k = del_start; k < del_end; k++) {
+		if (content[k] == '\n') {
+			end_line2++;
+			end_col2 = 0;
+		} else {
+			end_col2++;
+		}
+	}
+
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)start_line2);
+	edit_start.set("character", (int)start_col2);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", (int)end_line2);
+	edit_end.set("character", (int)end_col2);
+	Object* edit_range = object::new_obj(tmem);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", "");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Remove redundant else");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
 	return action;
 }
