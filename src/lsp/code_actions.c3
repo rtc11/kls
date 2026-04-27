@@ -1,6 +1,7 @@
 module kls::lsp::code_actions;
 
 import std::collections::object;
+import std::collections::list;
 import kls::document;
 import kls::lsp::diagnostics;
 import kls::kotlin::ast;
@@ -83,6 +84,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		// Quick fix: add missing import for unresolved reference
 		if (message.starts_with("Unresolved reference: '") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			add_import_actions_for_diagnostic(actions, uri, doc, ast, workspace, diag, message);
+		}
+
+		// Quick fix: add missing branches to non-exhaustive sealed when
+		if (message.starts_with("'when' on sealed class ") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* sealed_action = try_add_missing_sealed_branches(uri, doc, ast, diag, message);
+			if (sealed_action != null) {
+				actions.push(sealed_action);
+			}
 		}
 	}
 
@@ -1799,4 +1809,157 @@ fn Object*? handle_code_action_resolve(DocumentStore* store, WorkspaceIndex* wor
 	}
 
 	return action;
+}
+
+// ── Quick fix: add missing branches to non-exhaustive sealed when ─
+
+/**
+ * Build "Add missing branches" code action for a non-exhaustive sealed
+ * `when` diagnostic emitted by add_sealed_exhaustive_diagnostics.
+ *
+ * Diagnostic message format:
+ *   "'when' on sealed class 'X' is non-exhaustive: missing 'A', 'B', ..."
+ *
+ * Approach: parse missing names from message, find the WHEN_EXPR node
+ * whose start position matches the diagnostic range start, infer indent
+ * from the first WHEN_ENTRY's start column, insert one `is Name -> TODO()`
+ * arm per missing subtype just before the closing `}`.
+ */
+fn Object* try_add_missing_sealed_branches(String uri, Document* doc, ParseResult* ast,
+		Object* diag, String message) {
+	if (doc == null || ast == null) return null;
+
+	// Parse range start (line/col) — used to locate the WHEN_EXPR node
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate WHEN_EXPR with matching start position
+	uint when_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_EXPR) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			when_idx = i;
+			break;
+		}
+	}
+	if (when_idx == (uint)-1) return null;
+	AstNode* when_node = &ast.nodes[when_idx];
+
+	// Parse missing names from message after "missing "
+	usz missing_pos = 0;
+	bool have_missing = false;
+	for (usz i = 0; i + 8 <= message.len; i++) {
+		if (message[i:8] == "missing ") {
+			missing_pos = i + 8;
+			have_missing = true;
+			break;
+		}
+	}
+	if (!have_missing) return null;
+
+	String[] names = parse_quoted_names(message[missing_pos..]);
+	if (names.len == 0) return null;
+
+	// Determine indent from first WHEN_ENTRY child
+	uint entry_col = when_node.start_col + 1; // fallback: when_col+1
+	for (uint j = when_node.children_start; j < ast.node_count; j++) {
+		AstNode* child = &ast.nodes[j];
+		if (child.parent != when_idx) continue;
+		if (child.kind == WHEN_ENTRY) {
+			entry_col = child.start_col;
+			break;
+		}
+	}
+
+	String indent = build_indent_for_column(doc.content, entry_col);
+
+	// Build newText: one `is X -> TODO()\n<indent>` per missing
+	DString text;
+	text.tinit();
+	for (usz i = 0; i < names.len; i++) {
+		text.appendf("is %s -> TODO()\n%s", names[i], indent);
+	}
+
+	// Insertion point: just before the closing `}` of the when block.
+	// when_node.end_line/end_col point past the closing brace.
+	// We insert at (end_line, end_col - 1) which is the position of `}`.
+	int insert_line = (int)when_node.end_line;
+	int insert_col = (int)when_node.end_col - 1;
+	if (insert_col < 0) insert_col = 0;
+
+	Object* pos = object::new_obj(tmem);
+	pos.set("line", (int128)insert_line);
+	pos.set("character", (int128)insert_col);
+
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", pos);
+	insert_range.set("end", pos);
+
+	Object* edit_obj = object::new_obj(tmem);
+	edit_obj.set("range", insert_range);
+	edit_obj.set("newText", text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit_obj);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Add missing branches");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+/**
+ * Parse single-quoted names from a comma-separated list.
+ * Input: "'A', 'B', 'C'"  Output: ["A", "B", "C"] (tmem-allocated).
+ */
+fn String[] parse_quoted_names(String s) {
+	List{String} names;
+	names.tinit();
+	usz i = 0;
+	while (i < s.len) {
+		// Skip to next single quote
+		while (i < s.len && s[i] != '\'') i++;
+		if (i >= s.len) break;
+		i++; // past opening quote
+		usz start = i;
+		while (i < s.len && s[i] != '\'') i++;
+		if (i > start) {
+			names.push(s[start:i - start].tcopy());
+		}
+		if (i < s.len) i++; // past closing quote
+	}
+	return names.array_view();
+}
+
+/**
+ * Produce a whitespace string that visually fills `target_col` columns
+ * (1-indexed). Tabs are taken as 4 columns. Falls back to plain spaces.
+ */
+fn String build_indent_for_column(String content, uint target_col) {
+	if (target_col <= 1) return "";
+	// Use spaces — robust default; tabs are rendered inconsistently by clients
+	DString s;
+	s.tinit();
+	for (uint i = 1; i < target_col; i++) s.append_char(' ');
+	return s.str_view();
 }
