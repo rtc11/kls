@@ -32,6 +32,7 @@ struct ServerConfig {
 	bool redundant_if_bool_diagnostic;  // emit warnings for `if (cond) true else false` and `if (cond) false else true`
 	bool unnecessary_elvis_diagnostic;  // emit warnings for `x ?: y` where x is statically non-null
 	bool empty_catch_diagnostic;        // emit hints for catch clauses with empty bodies
+	bool redundant_override_diagnostic; // emit warnings for `override fun foo() = super.foo()`
 }
 
 // Module-level global with defaults
@@ -50,6 +51,7 @@ ServerConfig g_config = {
 	.redundant_if_bool_diagnostic = true,
 	.unnecessary_elvis_diagnostic = true,
 	.empty_catch_diagnostic = true,
+	.redundant_override_diagnostic = true,
 };
 
 /**
@@ -170,6 +172,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.empty_catch_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantOverrideDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_override_diagnostic = val.b;
+			log::debug("[kls] config: redundantOverrideDiagnostic = %s",
+				g_config.redundant_override_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -286,6 +296,14 @@ fn bool unnecessary_elvis_diagnostic_enabled() {
  */
 fn bool empty_catch_diagnostic_enabled() {
 	return g_config.empty_catch_diagnostic;
+}
+
+/**
+ * Whether to emit "Override is redundant" warnings for
+ * `override fun foo(args) = super.foo(args)` and equivalent block forms.
+ */
+fn bool redundant_override_diagnostic_enabled() {
+	return g_config.redundant_override_diagnostic;
 }
 
 /**

@@ -176,6 +176,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::empty_catch_diagnostic_enabled()) {
 			add_empty_catch_diagnostics(diagnostics, ast);
 		}
+		if (config::redundant_override_diagnostic_enabled()) {
+			add_redundant_override_diagnostics(diagnostics, ast);
+		}
 	}
 
 	return diagnostics;
@@ -3265,6 +3268,164 @@ fn void add_empty_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
 		diag.set("severity", 4); // Hint
 		diag.set("source", "kls");
 		diag.set("message", "Empty catch block; consider logging or rethrowing");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant override ─────────────────────────────────────────
+//
+// Detect FUN_DECL with MOD_OVERRIDE where the body just delegates to
+// super with identical signature: `override fun foo(x) = super.foo(x)`
+// or block-body equivalent with single statement.
+
+/**
+ * Try to extract the call_expr index from a fun-body candidate.
+ * Body forms accepted:
+ *   - CALL_EXPR (expression body)
+ *   - BLOCK with exactly 1 statement child that is CALL_EXPR or
+ *     RETURN_EXPR wrapping CALL_EXPR
+ *   - RETURN_EXPR wrapping CALL_EXPR
+ * Returns ast::NO_PARENT if not a single-call body.
+ */
+fn uint extract_single_call(ParseResult* ast, uint body_idx) {
+	if (body_idx >= ast.node_count) return ast::NO_PARENT;
+	AstNode* body = &ast.nodes[body_idx];
+
+	if (body.kind == CALL_EXPR) return body_idx;
+
+	if (body.kind == RETURN_EXPR) {
+		// Return value = first child
+		for (uint c = body.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != body_idx) continue;
+			if (ast.nodes[c].kind == CALL_EXPR) return c;
+			return ast::NO_PARENT;
+		}
+		return ast::NO_PARENT;
+	}
+
+	if (body.kind == BLOCK) {
+		uint single = ast::NO_PARENT;
+		uint stmt_count = 0;
+		for (uint c = body.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != body_idx) continue;
+			single = c;
+			stmt_count++;
+			if (stmt_count > 1) return ast::NO_PARENT;
+		}
+		if (stmt_count != 1) return ast::NO_PARENT;
+		return extract_single_call(ast, single);
+	}
+
+	return ast::NO_PARENT;
+}
+
+fn void add_redundant_override_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != FUN_DECL) continue;
+		if ((node.mod_flags & ast::MOD_OVERRIDE) == 0) continue;
+		if (node.name.len == 0) continue;
+
+		// Collect direct PARAM children + locate body (last non-PARAM,
+		// non-TYPE_PARAM, non-ANNOTATION child whose kind is BLOCK/CALL_EXPR/
+		// RETURN_EXPR/etc).
+		uint[16] param_indices;
+		uint param_count = 0;
+		uint body_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			NodeKind ck = ast.nodes[c].kind;
+			if (ck == PARAM) {
+				if (param_count < 16) {
+					param_indices[param_count++] = c;
+				} else {
+					// Too many params for stack buffer — bail
+					body_idx = ast::NO_PARENT;
+					break;
+				}
+				continue;
+			}
+			if (ck == TYPE_PARAM) continue;
+			// Body candidate: BLOCK or expression-body
+			body_idx = c;
+		}
+		if (body_idx == ast::NO_PARENT) continue;
+
+		uint call_idx = extract_single_call(ast, body_idx);
+		if (call_idx == ast::NO_PARENT) continue;
+
+		AstNode* call = &ast.nodes[call_idx];
+
+		// Callee must be DOT_EXPR with name == fun name and receiver SUPER_EXPR
+		if (call.name != node.name) continue;
+		uint callee_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != call_idx) continue;
+			if (ast.nodes[c].kind == DOT_EXPR) {
+				callee_idx = c;
+				break;
+			}
+		}
+		if (callee_idx == ast::NO_PARENT) continue;
+		AstNode* callee = &ast.nodes[callee_idx];
+		if (callee.name != node.name) continue;
+
+		// Receiver must be SUPER_EXPR
+		uint recv_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != callee_idx) continue;
+			recv_idx = c;
+			break;
+		}
+		if (recv_idx == ast::NO_PARENT) continue;
+		if (ast.nodes[recv_idx].kind != SUPER_EXPR) continue;
+
+		// Args: same count, positional, NAME_EXPR matching PARAM names in order
+		uint arg_count = ast::count_call_args(ast, call_idx);
+		if (arg_count != param_count) continue;
+
+		bool args_match = true;
+		uint pi = 0;
+		for (uint c = call.children_start; c < ast.node_count && args_match; c++) {
+			if (ast.nodes[c].parent != call_idx) continue;
+			if (ast.nodes[c].kind != VALUE_ARGUMENT) continue;
+			AstNode* va = &ast.nodes[c];
+			// Reject named or spread args
+			if (va.name.len != 0) { args_match = false; break; }
+			if (va.extra_text == "*") { args_match = false; break; }
+			uint expr_idx = ast::get_arg_expr_idx(ast, c);
+			if (expr_idx == uint.max) { args_match = false; break; }
+			AstNode* expr = &ast.nodes[expr_idx];
+			if (expr.kind != NAME_EXPR) { args_match = false; break; }
+			if (pi >= param_count) { args_match = false; break; }
+			AstNode* param = &ast.nodes[param_indices[pi]];
+			if (expr.name != param.name) { args_match = false; break; }
+			pi++;
+		}
+		if (!args_match || pi != param_count) continue;
+
+		// Emit diagnostic covering full FUN_DECL
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", "Override is redundant; only delegates to super");
 
 		diagnostics.push(diag);
 	}

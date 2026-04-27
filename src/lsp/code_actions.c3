@@ -103,6 +103,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: remove redundant override
+		if (message.starts_with("Override is redundant") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_remove_redundant_override(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -3817,6 +3826,82 @@ fn Object* try_remove_redundant_elvis(String uri, Document* doc, ParseResult* as
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Remove redundant '?:'");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Quickfix: remove redundant override ────────────────────────
+//
+// For "Override is redundant" diagnostic, replace the entire FUN_DECL
+// (plus trailing newline if present) with empty text.
+fn Object* try_remove_redundant_override(String uri, Document* doc, ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate FUN_DECL matching diag start
+	uint fun_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			fun_idx = i;
+			break;
+		}
+	}
+	if (fun_idx == (uint)-1) return null;
+
+	AstNode* fun_node = &ast.nodes[fun_idx];
+
+	// Compute removal range: from start_line:start_col through end_line:end_col,
+	// extended to consume one trailing newline if next char is \n.
+	int end_line = (int)fun_node.end_line;
+	int end_col = (int)fun_node.end_col;
+
+	// Try to consume trailing newline
+	if (fun_node.end_offset < doc.content.len && doc.content[fun_node.end_offset] == '\n') {
+		end_line++;
+		end_col = 0;
+	}
+
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)fun_node.start_line);
+	edit_start.set("character", (int)fun_node.start_col);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", end_line);
+	edit_end.set("character", end_col);
+	Object* edit_range = object::new_obj(tmem);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", "");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Remove redundant override");
 	action.set("kind", "quickfix");
 	action.set("isPreferred", true);
 	action.set("edit", workspace_edit);
