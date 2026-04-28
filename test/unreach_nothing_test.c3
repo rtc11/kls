@@ -92,11 +92,10 @@ fn void after_val_eq_error() @test {
 }
 `;
 		Object* diags = build_diags(content);
-		// PROPERTY_DECL itself isn't typed Nothing — the initializer is.
-		// Current pass keys on the statement-level child kind; PROPERTY_DECL
-		// won't be flagged as terminator. Document intentional gap.
-		assert(!has(diags, "Unreachable code"),
-			"PROPERTY_DECL initialised by Nothing not yet flagged");
+		// PROPERTY_DECL initializer is Nothing → unconditionally evaluated
+		// when the val is reached → next stmt is unreachable.
+		assert(has(diags, "Unreachable code"),
+			"PROPERTY_DECL initialised by Nothing flags next stmt");
 	};
 }
 

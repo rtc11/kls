@@ -985,6 +985,60 @@ fn void check_workspace_arg_mismatch(Object* diagnostics, ParseResult* ast, Type
 // ── Unreachable code diagnostic ───────────────────────────────────
 
 /**
+ * Returns true if `node_idx`'s subtree contains a Nothing-typed expression
+ * that is unconditionally evaluated whenever `node_idx` is evaluated.
+ *
+ * Skips conditional-eval boundaries:
+ *  - LAMBDA_EXPR / ANONYMOUS_FUN_EXPR bodies (deferred / called zero+ times)
+ *  - IF_EXPR / WHEN_EXPR / TRY_EXPR branch bodies (only one branch runs)
+ *  - BINARY_EXPR with `||`, `&&`, `?:` (RHS may be skipped)
+ *
+ * Used by the AST-sibling pass to detect that e.g. `val x = TODO()` or
+ * `println(error("x"))` diverges, so the next sibling is unreachable.
+ */
+fn bool subtree_unconditionally_diverges(ParseResult* ast, TypeInfo* ti, uint node_idx) {
+	if (ti == null) return false;
+	if (node_idx >= ast.node_count) return false;
+	if (ti.has_type[node_idx] && ti.node_types[node_idx].kind == types::TypeKind.NOTHING) {
+		return true;
+	}
+	AstNode* n = &ast.nodes[node_idx];
+	// Boundaries: don't descend into deferred / branched children.
+	switch (n.kind) {
+		case LAMBDA_EXPR:
+		case ANONYMOUS_FUN_EXPR:
+		case IF_EXPR:
+		case WHEN_EXPR:
+		case WHEN_ENTRY:
+		case TRY_EXPR:
+		case CATCH_CLAUSE:
+			return false;
+		default:
+			break;
+	}
+	// Short-circuit operators: only LHS is unconditionally evaluated.
+	if (n.kind == BINARY_EXPR) {
+		String op = n.extra_text;
+		if (op == "&&" || op == "||" || op == "?:") {
+			// Find first child (LHS) and recurse only into it.
+			for (uint c = 0; c < ast.node_count; c++) {
+				if (ast.nodes[c].parent != node_idx) continue;
+				return subtree_unconditionally_diverges(ast, ti, c);
+			}
+			return false;
+		}
+	}
+	// Generic descent: any child diverging => stmt diverges.
+	// Children may have lower indices (DOT_EXPR receiver, BINARY_EXPR LHS,
+	// CALL_EXPR callee, etc.) — scan from 0.
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != node_idx) continue;
+		if (subtree_unconditionally_diverges(ast, ti, c)) return true;
+	}
+	return false;
+}
+
+/**
  * Flag statements after return/throw/break/continue (or any expression of
  * type Nothing) in the same block.
  */
@@ -1029,7 +1083,14 @@ fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast, 
 				// Any expression of type Nothing diverges (e.g. error("..."), TODO()).
 				if (type_info.node_types[child_idx].kind == types::TypeKind.NOTHING) {
 					found_terminator = true;
+				} else if (subtree_unconditionally_diverges(ast, type_info, child_idx)) {
+					// Stmt itself isn't typed Nothing, but contains an
+					// unconditionally-evaluated Nothing sub-expression
+					// (val init, assignment RHS, call argument, ...).
+					found_terminator = true;
 				}
+			} else if (subtree_unconditionally_diverges(ast, type_info, child_idx)) {
+				found_terminator = true;
 			}
 		}
 	}
