@@ -115,6 +115,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	// Only when lexically clean, AST available, and workspace is known.
 	if (lexer_error_count == 0 && ast != null && workspace != null) {
 		add_unresolved_reference_diagnostics(diagnostics, content, ast, workspace);
+		if (config::missing_override_diagnostic_enabled()) {
+			add_missing_override_diagnostics(diagnostics, ast, workspace);
+		}
 	}
 
 	// ── Deprecated usage (DiagnosticTag.Deprecated) ──────────────
@@ -4932,6 +4935,117 @@ fn void add_redundant_when_else_only_diagnostics(Object* diagnostics, ParseResul
 		diag.set("severity", 4); // Hint
 		diag.set("source", "kls");
 		diag.set("message", "Redundant 'when' — only an 'else' branch; the body is the value");
+		diagnostics.push(diag);
+	}
+}
+
+// ── Missing override diagnostic ────────────────────────────────────
+//
+// Emit a Warning when a function declared inside CLASS_DECL/INTERFACE_DECL/
+// OBJECT_DECL has no `override` modifier but matches a member function in
+// a direct supertype by name + parameter arity.
+//
+// Limitations (documented for future improvement):
+//   - Direct supertypes only (no transitive walk via Mid : Base)
+//   - Match by name + arity only (no parameter-type equality)
+//   - Skips supertype member if final / private / static
+//   - Skips top-level functions and constructor bodies
+//   - Skips funs without a name
+//   - Skips operator/infix overloads (could be unrelated)
+
+fn void add_missing_override_diagnostics(Object* diagnostics, ParseResult* ast,
+		WorkspaceIndex* workspace) {
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* fn_node = &ast.nodes[i];
+		if (fn_node.kind != FUN_DECL) continue;
+		if (fn_node.name.len == 0) continue;
+		if ((fn_node.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		// Skip operators — they can be defined freshly without overriding
+		if ((fn_node.mod_flags & ast::MOD_OPERATOR) != 0) continue;
+
+		// Find enclosing class/interface/object via parent walk
+		uint enclosing_idx = ast::NO_PARENT;
+		uint cursor = fn_node.parent;
+		while (cursor != ast::NO_PARENT) {
+			NodeKind ck = ast.nodes[cursor].kind;
+			if (ck == CLASS_DECL || ck == INTERFACE_DECL || ck == OBJECT_DECL) {
+				enclosing_idx = cursor;
+				break;
+			}
+			// Stop at file root or nested function (other fun's local fn doesn't override)
+			if (ck == FILE) break;
+			if (ck == FUN_DECL) break;
+			cursor = ast.nodes[cursor].parent;
+		}
+		if (enclosing_idx == ast::NO_PARENT) continue;
+
+		AstNode* class_node = &ast.nodes[enclosing_idx];
+		if (class_node.name.len == 0) continue;
+
+		// Count own params
+		uint own_param_count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == PARAM) own_param_count++;
+		}
+
+		// Look up enclosing class symbol → direct supertypes
+		String[symbols::MAX_SUPERTYPES] super_names;
+		usz super_count = 0;
+		if (try indices = workspace.lookup_by_name(class_node.name)) {
+			for (usz j = 0; j < indices.len() && super_count == 0; j++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(j));
+				if (sym.name != class_node.name) continue;
+				for (usz k = 0; k < sym.supertype_count; k++) {
+					if (super_count >= symbols::MAX_SUPERTYPES) break;
+					super_names[super_count++] = sym.supertypes[k];
+				}
+			}
+		}
+		if (super_count == 0) continue;
+
+		// For each supertype, check member cache
+		bool matched = false;
+		for (usz s = 0; s < super_count && !matched; s++) {
+			String super_name = super_names[s];
+			if (super_name.len == 0) continue;
+			List{MemberDecl}* members = workspace.lookup_members(super_name) ?? null;
+			if (members == null) continue;
+			for (usz m = 0; m < members.len(); m++) {
+				MemberDecl* md = &(*members)[m];
+				if (md.node_kind != FUN_DECL) continue;
+				if (md.name != fn_node.name) continue;
+				if (md.param_count != (usz)own_param_count) continue;
+				// Skip non-overridable supertype members
+				if ((md.mod_flags & ast::MOD_PRIVATE) != 0) continue;
+				if ((md.mod_flags & ast::MOD_FINAL) != 0) continue;
+				matched = true;
+				break;
+			}
+		}
+		if (!matched) continue;
+
+		// Emit warning at the fun name location
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)fn_node.name_line);
+		start.set("character", (int)fn_node.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)fn_node.name_line);
+		end_pos.set("character", (int)(fn_node.name_col + fn_node.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+		DString message;
+		message.tinit();
+		message.appendf("Function '%s' overrides supertype member but lacks 'override'", fn_node.name);
+		diag.set("message", message.str_view());
 		diagnostics.push(diag);
 	}
 }

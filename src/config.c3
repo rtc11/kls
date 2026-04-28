@@ -45,6 +45,7 @@ struct ServerConfig {
 	bool foreach_loop_diagnostic;         // emit hints for `xs.forEach { ... }` (suggest `for` loop)
 	bool unrelated_equality_diagnostic;   // warn on `==` / `!=` between unrelated types
 	bool redundant_when_else_only_diagnostic; // hint when `when { else -> X }` collapses to `X`
+	bool missing_override_diagnostic; // warn when fun matches supertype member but lacks `override`
 }
 
 // Module-level global with defaults
@@ -76,6 +77,7 @@ ServerConfig g_config = {
 	.foreach_loop_diagnostic = true,
 	.unrelated_equality_diagnostic = true,
 	.redundant_when_else_only_diagnostic = true,
+	.missing_override_diagnostic = true,
 };
 
 /**
@@ -300,6 +302,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_when_else_only_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("missingOverrideDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.missing_override_diagnostic = val.b;
+			log::debug("[kls] config: missingOverrideDiagnostic = %s",
+				g_config.missing_override_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -486,4 +496,12 @@ fn void apply_settings(Object* params) {
 	Object* settings = params.get("settings") ?? params;
 	apply_init_options(settings);
 	log::debug("[kls] Configuration updated");
+}
+
+/**
+ * Whether to emit "Function 'foo' overrides member but lacks 'override'"
+ * warnings when a class function matches a supertype member by name + arity.
+ */
+fn bool missing_override_diagnostic_enabled() {
+	return g_config.missing_override_diagnostic;
 }
