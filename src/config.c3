@@ -43,6 +43,7 @@ struct ServerConfig {
 	bool unit_typed_decl_diagnostic; // emit warnings for `x: Unit` on params and val/var (Unit carries no info)
 	bool shortcircuit_nothing_diagnostic; // emit hints for `b && error(...)` / `b || error(...)` (rhs Nothing)
 	bool foreach_loop_diagnostic;         // emit hints for `xs.forEach { ... }` (suggest `for` loop)
+	bool unrelated_equality_diagnostic;   // warn on `==` / `!=` between unrelated types
 }
 
 // Module-level global with defaults
@@ -72,6 +73,7 @@ ServerConfig g_config = {
 	.unit_typed_decl_diagnostic = true,
 	.shortcircuit_nothing_diagnostic = true,
 	.foreach_loop_diagnostic = true,
+	.unrelated_equality_diagnostic = true,
 };
 
 /**
@@ -280,6 +282,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.foreach_loop_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unrelatedEqualityDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unrelated_equality_diagnostic = val.b;
+			log::debug("[kls] config: unrelatedEqualityDiagnostic = %s",
+				g_config.unrelated_equality_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -444,6 +454,10 @@ fn bool shortcircuit_nothing_diagnostic_enabled() {
 
 fn bool foreach_loop_diagnostic_enabled() {
 	return g_config.foreach_loop_diagnostic;
+}
+
+fn bool unrelated_equality_diagnostic_enabled() {
+	return g_config.unrelated_equality_diagnostic;
 }
 
 /**

@@ -170,6 +170,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::foreach_loop_diagnostic_enabled()) {
 			add_foreach_loop_diagnostics(diagnostics, ast);
 		}
+		if (config::unrelated_equality_diagnostic_enabled() && type_info != null) {
+			add_unrelated_equality_diagnostics(diagnostics, ast, type_info);
+		}
 		if (config::unreachable_catch_diagnostic_enabled()) {
 			add_unreachable_catch_diagnostics(diagnostics, ast);
 		}
@@ -4776,6 +4779,110 @@ fn void add_foreach_loop_diagnostics(Object* diagnostics, ParseResult* ast) {
 		diag.set("severity", 4); // Hint
 		diag.set("source", "kls");
 		diag.set("message", "'forEach' can be replaced with a 'for' loop");
+		diagnostics.push(diag);
+	}
+}
+
+// ─── '==' / '!=' between unrelated types (always false / always true) ─
+//
+// Walks every BINARY_EXPR with operator '==' / '!=' (structural equality
+// in Kotlin spec §11.5). When both operands have known types and neither
+// is assignable to the other, the comparison can never succeed — emit a
+// Warning. The dual operator '!=' would always succeed; we still emit so
+// the author can spot the type mismatch.
+//
+// Conservative — skip when:
+//   - either operand has UNKNOWN / NOTHING type (insufficient info)
+//   - either operand is the null literal (covered by other checks)
+//   - either operand's type is `Any` / `Any?` (universal supertype)
+//   - the only difference is nullability (`String?` vs `String` related)
+//
+// Numeric tower comparisons (Int vs Long, Float vs Double) are
+// considered related via STDLIB_SUPERTYPES (Number ancestry) and so are
+// not flagged — Kotlin allows them at runtime via boxing equality.
+fn bool type_is_unrelated_for_equality(types::TypeRef a, types::TypeRef b) {
+	// Permissive when either side is unknown / nothing / null literal.
+	if (a.kind == types::TypeKind.UNKNOWN || b.kind == types::TypeKind.UNKNOWN) return false;
+	if (a.kind == types::TypeKind.NOTHING || b.kind == types::TypeKind.NOTHING) return false;
+	if (a.name == "Nothing" || b.name == "Nothing") return false;
+	// `Any` / `Any?` is the universal supertype – never unrelated.
+	if (a.name == "Any" || b.name == "Any") return false;
+	// Type parameters are erased at runtime – be permissive.
+	if (types::is_type_parameter(a.name) || types::is_type_parameter(b.name)) return false;
+	// FUNCTION / GENERIC / UNIT shapes are out of scope for now – noisy.
+	if (a.kind != types::TypeKind.SIMPLE) return false;
+	if (b.kind != types::TypeKind.SIMPLE) return false;
+
+	// Strip nullability for the relatedness check – the comparison itself
+	// is always nullable-tolerant in Kotlin.
+	types::TypeRef a_strip = a; a_strip.nullable = false;
+	types::TypeRef b_strip = b; b_strip.nullable = false;
+
+	if (types::is_assignable_to(a_strip, b_strip)) return false;
+	if (types::is_assignable_to(b_strip, a_strip)) return false;
+	return true;
+}
+
+fn bool node_is_null_literal(ParseResult* ast, uint idx) {
+	if (idx >= ast.node_count) return false;
+	AstNode* n = &ast.nodes[idx];
+	return n.kind == LITERAL_EXPR && n.extra_text == "null";
+}
+
+fn void add_unrelated_equality_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		String op = n.extra_text;
+		if (op != "==" && op != "!=") continue;
+
+		// Find lhs / rhs (children may be lower-indexed).
+		uint lhs_idx = ast::NO_PARENT;
+		uint rhs_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+			if (lhs_idx == ast::NO_PARENT) {
+				lhs_idx = c;
+			} else if (rhs_idx == ast::NO_PARENT) {
+				rhs_idx = c;
+				break;
+			}
+		}
+		if (rhs_idx == ast::NO_PARENT) continue;
+
+		// Skip null comparisons – idiomatic, separate diagnostic territory.
+		if (node_is_null_literal(ast, lhs_idx)) continue;
+		if (node_is_null_literal(ast, rhs_idx)) continue;
+
+		if (!type_info.has_type[lhs_idx]) continue;
+		if (!type_info.has_type[rhs_idx]) continue;
+
+		types::TypeRef lt = type_info.node_types[lhs_idx];
+		types::TypeRef rt = type_info.node_types[rhs_idx];
+		if (!type_is_unrelated_for_equality(lt, rt)) continue;
+
+		String verdict = (op == "==") ? "false" : "true";
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("Comparison of unrelated types '%s' and '%s' always yields %s",
+			lt.name, rt.name, verdict);
+		diag.set("message", msg.str_view());
 		diagnostics.push(diag);
 	}
 }
