@@ -121,3 +121,67 @@ fn void nullable_param_no_narrowing_no_warning() @test {
 			"should not warn for unconditional !! on nullable param");
 	};
 }
+
+// ── Probe edge cases for gaps ───────────────────────────────────
+
+// !! on result of safe call where receiver is non-null — `x.foo!!` should narrow if foo returns non-null
+fn void chained_call_non_null_warns() @test {
+	@pool() {
+		String content =
+			`fun bar(): String = "hi"
+fun foo() {
+	val y = bar()!!
+	println(y)
+}
+`;
+		Object* diags = build_diags(content);
+		assert(has_diag_message_contains(diags, "Unnecessary"),
+			"expected warning for non-null fn result !!");
+	};
+}
+
+// !! after `as` cast to non-null type
+fn void as_cast_non_null_warns() @test {
+	@pool() {
+		String content =
+			`fun foo(x: Any) {
+	val y = (x as String)!!
+	println(y)
+}
+`;
+		Object* diags = build_diags(content);
+		assert(has_diag_message_contains(diags, "Unnecessary"),
+			"expected warning for `as String` followed by !!");
+	};
+}
+
+// !! on `is` check result inside narrowed branch
+fn void is_check_narrows_warns() @test {
+	@pool() {
+		String content =
+			`fun foo(x: Any?) {
+	if (x is String) {
+		println(x!!)
+	}
+}
+`;
+		Object* diags = build_diags(content);
+		assert(has_diag_message_contains(diags, "Unnecessary"),
+			"expected warning when smart-cast via `is` to non-null type");
+	};
+}
+
+// !! on requireNotNull result
+fn void require_not_null_warns() @test {
+	@pool() {
+		String content =
+			`fun foo(x: String?) {
+	requireNotNull(x)
+	println(x!!)
+}
+`;
+		Object* diags = build_diags(content);
+		assert(has_diag_message_contains(diags, "Unnecessary"),
+			"expected warning after requireNotNull narrows to non-null");
+	};
+}
