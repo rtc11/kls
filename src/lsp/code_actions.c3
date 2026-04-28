@@ -4722,6 +4722,18 @@ fn Object* try_simplify_redundant_when_bool(String uri, Document* doc, ParseResu
 	if (when_idx == (uint)-1) return null;
 	AstNode* when_node = &ast.nodes[when_idx];
 
+	String content = doc.content;
+	bool negated = message.contains("negated");
+
+	// Detect subject (first non-WHEN_ENTRY child).
+	uint subject_idx = (uint)-1;
+	for (uint c = when_node.children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != when_idx) continue;
+		if (ast.nodes[c].kind == WHEN_ENTRY) break;
+		subject_idx = c;
+		break;
+	}
+
 	uint regular_entry = (uint)-1;
 	for (uint c = when_node.children_start; c < ast.node_count; c++) {
 		if (ast.nodes[c].parent != when_idx) continue;
@@ -4732,6 +4744,53 @@ fn Object* try_simplify_redundant_when_bool(String uri, Document* doc, ParseResu
 	}
 	if (regular_entry == (uint)-1) return null;
 
+	// ── Subject form: build "subject == cond" / "subject != cond" / "subject is/!is T"
+	if (subject_idx != (uint)-1) {
+		AstNode* subj = &ast.nodes[subject_idx];
+		if (subj.start_offset >= content.len || subj.end_offset > content.len) return null;
+		if (subj.end_offset <= subj.start_offset) return null;
+		String subj_text = content[subj.start_offset:subj.end_offset - subj.start_offset];
+
+		// Cond = first child of regular entry
+		uint cond_idx = (uint)-1;
+		for (uint c = ast.nodes[regular_entry].children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != regular_entry) continue;
+			cond_idx = c;
+			break;
+		}
+		if (cond_idx == (uint)-1) return null;
+		AstNode* cond = &ast.nodes[cond_idx];
+		if (cond.start_offset >= content.len || cond.end_offset > content.len) return null;
+		if (cond.end_offset <= cond.start_offset) return null;
+		String cond_text = content[cond.start_offset:cond.end_offset - cond.start_offset];
+
+		DString out;
+		out.tinit();
+
+		if (cond.kind == TYPE_CHECK_EXPR) {
+			// cond_text already starts with "is " or "!is "
+			String op_text = cond.extra_text == "is" ? "is" : "!is";
+			// Skip the leading op + whitespace from cond_text to get the type
+			usz op_len = op_text.len;
+			usz tstart = op_len;
+			while (tstart < cond_text.len && (cond_text[tstart] == ' ' || cond_text[tstart] == '\t')) tstart++;
+			String type_text = tstart < cond_text.len ? cond_text[tstart..] : cond_text;
+			String emit_op = op_text;
+			if (negated) {
+				emit_op = (op_text == "is") ? "!is" : "is";
+			}
+			out.appendf("%s %s %s", subj_text, emit_op, type_text);
+		} else {
+			// Equality form
+			String op = negated ? "!=" : "==";
+			out.appendf("%s %s %s", subj_text, op, cond_text);
+		}
+
+		return build_when_qfix_action(uri, range, diag, out.str_view(), negated);
+	}
+
+	// ── Subject-less form: derive cond text from source range
+
 	// Body = last child (LITERAL_EXPR or BLOCK)
 	uint body_idx = (uint)-1;
 	for (uint c = ast.nodes[regular_entry].children_start; c < ast.node_count; c++) {
@@ -4740,7 +4799,6 @@ fn Object* try_simplify_redundant_when_bool(String uri, Document* doc, ParseResu
 	}
 	if (body_idx == (uint)-1) return null;
 
-	String content = doc.content;
 	AstNode* entry = &ast.nodes[regular_entry];
 	AstNode* body = &ast.nodes[body_idx];
 	if (entry.start_offset >= content.len) return null;
@@ -4765,7 +4823,6 @@ fn Object* try_simplify_redundant_when_bool(String uri, Document* doc, ParseResu
 	if (end == 0) return null;
 	String cond_text = raw[:end];
 
-	bool negated = message.contains("negated");
 	DString new_text;
 	new_text.tinit();
 	if (negated) {
@@ -4781,9 +4838,15 @@ fn Object* try_simplify_redundant_when_bool(String uri, Document* doc, ParseResu
 		new_text.append(cond_text);
 	}
 
+	return build_when_qfix_action(uri, range, diag, new_text.str_view(), negated);
+}
+
+// Build a workspace-edit action for the when quickfix. Shared by subject
+// and subject-less code paths.
+fn Object* build_when_qfix_action(String uri, Object* range, Object* diag, String new_text, bool negated) {
 	Object* edit = object::new_obj(tmem);
 	edit.set("range", range);
-	edit.set("newText", new_text.str_view());
+	edit.set("newText", new_text);
 
 	Object* edits = object::new_obj(tmem);
 	edits.push(edit);

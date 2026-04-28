@@ -143,3 +143,71 @@ fn void qfix_block_form_emits_cond() @test {
 		assert(text == "x > 0", "expected 'x > 0' for block-wrapped, got '%s'", text);
 	};
 }
+
+// ── Subject form quickfixes ─────────────────────────────
+
+fn void qfix_subject_literal_eq() @test {
+	@pool() {
+		String text = run_simplify_when(
+			`fun foo(x: Int): Boolean {
+    return when (x) {
+        1 -> true
+        else -> false
+    }
+}`, "condition", "Replace with condition");
+		assert(text == "x == 1", "expected 'x == 1', got '%s'", text);
+	};
+}
+
+fn void qfix_subject_literal_ne() @test {
+	@pool() {
+		String text = run_simplify_when(
+			`fun foo(x: Int): Boolean {
+    return when (x) {
+        1 -> false
+        else -> true
+    }
+}`, "negated", "Replace with negated condition");
+		assert(text == "x != 1", "expected 'x != 1', got '%s'", text);
+	};
+}
+
+fn void qfix_subject_is_type() @test {
+	@pool() {
+		String text = run_simplify_when(
+			`fun foo(x: Any?): Boolean {
+    return when (x) {
+        is String -> true
+        else -> false
+    }
+}`, "condition", "Replace with condition");
+		assert(text == "x is String", "expected 'x is String', got '%s'", text);
+	};
+}
+
+fn void qfix_subject_is_type_negated() @test {
+	@pool() {
+		String text = run_simplify_when(
+			`fun foo(x: Any?): Boolean {
+    return when (x) {
+        is String -> false
+        else -> true
+    }
+}`, "negated", "Replace with negated condition");
+		assert(text == "x !is String", "expected 'x !is String', got '%s'", text);
+	};
+}
+
+fn void qfix_subject_dot_expr_eq() @test {
+	@pool() {
+		String text = run_simplify_when(
+			`enum class Color { RED, BLUE }
+fun foo(c: Color): Boolean {
+    return when (c) {
+        Color.RED -> true
+        else -> false
+    }
+}`, "condition", "Replace with condition");
+		assert(text == "c == Color.RED", "expected 'c == Color.RED', got '%s'", text);
+	};
+}

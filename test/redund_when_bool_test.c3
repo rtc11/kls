@@ -77,7 +77,7 @@ fn void subjectless_block_form_warns() @test {
 
 // ── Negative cases ────────────────────────────────────────
 
-fn void with_subject_no_warn() @test {
+fn void with_subject_literal_warns() @test {
 	@pool() {
 		String content =
 			`fun foo(x: Int): Boolean {
@@ -88,8 +88,53 @@ fn void with_subject_no_warn() @test {
 }
 `;
 		Object* diags = build_diags(content);
-		// Subject form deferred; should NOT flag
-		assert(!has(diags, "Redundant 'when'"), "subject form should not flag (deferred)");
+		assert(has(diags, "Redundant 'when'"), "subject form with single literal cond should flag");
+	};
+}
+
+fn void with_subject_is_type_warns() @test {
+	@pool() {
+		String content =
+			`fun foo(x: Any?): Boolean {
+	return when (x) {
+		is String -> true
+		else -> false
+	}
+}
+`;
+		Object* diags = build_diags(content);
+		assert(has(diags, "Redundant 'when'"), "subject form with `is Type` should flag");
+	};
+}
+
+fn void with_subject_dot_expr_warns() @test {
+	@pool() {
+		String content =
+			`enum class Color { RED, BLUE }
+fun foo(c: Color): Boolean {
+	return when (c) {
+		Color.RED -> true
+		else -> false
+	}
+}
+`;
+		Object* diags = build_diags(content);
+		assert(has(diags, "Redundant 'when'"), "subject form with DOT_EXPR cond should flag");
+	};
+}
+
+fn void with_subject_multi_cond_no_warn() @test {
+	@pool() {
+		String content =
+			`fun foo(x: Int): Boolean {
+	return when (x) {
+		1, 2, 3 -> true
+		else -> false
+	}
+}
+`;
+		Object* diags = build_diags(content);
+		assert(!has(diags, "Redundant 'when'"), "multi-cond subject form deferred (`x in setOf(...)` form not yet emitted)");
 	};
 }
 

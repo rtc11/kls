@@ -4022,14 +4022,13 @@ fn void add_redundant_when_bool_diagnostics(Object* diagnostics, ParseResult* as
 		AstNode* node = &ast.nodes[i];
 		if (node.kind != WHEN_EXPR) continue;
 
-		// Skip if has subject (first child is non-WHEN_ENTRY)
+		// Detect subject (first child is non-WHEN_ENTRY); allow both forms now.
 		bool has_subject = false;
 		for (uint c = node.children_start; c < ast.node_count; c++) {
 			if (ast.nodes[c].parent != i) continue;
 			has_subject = (ast.nodes[c].kind != WHEN_ENTRY);
 			break;
 		}
-		if (has_subject) continue;
 
 		// Collect WHEN_ENTRY children
 		uint[8] entries;
@@ -4052,6 +4051,26 @@ fn void add_redundant_when_bool_diagnostics(Object* diagnostics, ParseResult* as
 			}
 		}
 		if (regular_idx == ast::NO_PARENT || else_idx == ast::NO_PARENT) continue;
+
+		// For subject form: regular arm must have exactly 2 children [cond, body]
+		// (single condition only — multi-cond `1, 2, 3 -> ...` and `in` patterns deferred).
+		// For subject-less form: regular arm has 1 child (body only, cond consumed
+		// at token level via skip_when_condition fallback).
+		if (has_subject) {
+			uint child_count = 0;
+			uint first_child = ast::NO_PARENT;
+			for (uint c = ast.nodes[regular_idx].children_start; c < ast.node_count; c++) {
+				if (ast.nodes[c].parent != regular_idx) continue;
+				if (first_child == ast::NO_PARENT) first_child = c;
+				child_count++;
+			}
+			if (child_count != 2) continue;
+			// Cond must be one of the supported kinds.
+			NodeKind ck = ast.nodes[first_child].kind;
+			bool supported = ck == LITERAL_EXPR || ck == NAME_EXPR || ck == DOT_EXPR
+				|| (ck == TYPE_CHECK_EXPR && ast.nodes[first_child].extra_text == "is");
+			if (!supported) continue;
+		}
 
 		// Body of each = last child
 		uint regular_body = last_child_of(ast, regular_idx);
