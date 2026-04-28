@@ -936,9 +936,43 @@ fn void Parser.build_annotation_entry(Parser* self, uint decl_idx, AnnotationRan
 		self.result.nodes[idx].type_text = target;
 
 		// Argument list (if any) -- store raw source slice (including parens)
-		// in annotation_text. Full sub-AST parsing deferred to a later phase.
+		// in annotation_text (DUAL STORAGE: kept byte-identical for legacy
+		// readers). Also build VALUE_ARGUMENT sub-AST children below.
 		if (r.args_end > r.args_start && r.args_end <= self.source.len) {
 			self.result.nodes[idx].annotation_text = self.source[r.args_start:r.args_end - r.args_start];
+		}
+
+		// Sub-AST: parse '(' arg, arg, ... ')' into VALUE_ARGUMENT children of
+		// ANNOTATION_ENTRY. Sub-lexer is still active; positions emitted by
+		// parse_value_argument are slice-relative -- fix up to absolute below.
+		if (self.at(LPAREN)) {
+			uint va_children_start = self.result.node_count;
+			self.advance(); // consume '('
+			while (!self.at(RPAREN) && !self.at_eof()) {
+				self.parse_value_argument();
+				if (!self.eat(COMMA)) break;
+			}
+			self.eat(RPAREN);
+
+			// Adopt VALUE_ARGUMENTs (and any nested expression nodes they
+			// produced) into ANNOTATION_ENTRY. Only top-level VALUE_ARGUMENT
+			// nodes (parent == NO_PARENT) become direct children; nested
+			// expression nodes already have parents set by parse_value_argument.
+			uint va_count = 0;
+			for (uint i = va_children_start; i < self.result.node_count; i++) {
+				// Fix slice-relative offsets to absolute source offsets.
+				self.result.nodes[i].start_offset += r.start_offset;
+				self.result.nodes[i].end_offset += r.start_offset;
+				if (self.result.nodes[i].name_len > 0) {
+					self.result.nodes[i].name_offset += r.start_offset;
+				}
+				if (self.result.nodes[i].parent == ast::NO_PARENT) {
+					self.result.nodes[i].parent = idx;
+					va_count++;
+				}
+			}
+			self.result.nodes[idx].child_count = va_count;
+			self.result.nodes[idx].children_start = va_children_start;
 		}
 
 		// Restore outer parser state

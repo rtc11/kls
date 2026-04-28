@@ -5223,3 +5223,95 @@ fn void supertype_without_by_has_no_delegate_child() @test {
 			"unexpected delegate child on plain supertype");
 	};
 }
+
+// ── T9: ANNOTATION_ENTRY argument sub-AST (DUAL STORAGE) ───────────
+//
+// annotation_text MUST remain populated and byte-identical (legacy readers
+// depend on it). We additionally expose VALUE_ARGUMENT children for
+// structured access to args.
+
+fn void annotation_args_positional_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Suppress(\"UNUSED\", \"DEPRECATION\") fun f() {}");
+		defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, fun, "Suppress")!!;
+		// Byte-identical legacy text:
+		assert(a.annotation_text == "(\"UNUSED\", \"DEPRECATION\")",
+			"expected legacy annotation_text byte-identical, got '%s'", a.annotation_text);
+		// New sub-AST: 2 VALUE_ARGUMENT children.
+		uint vargs = ast::count_children_of_kind(r, a, VALUE_ARGUMENT);
+		assert(vargs == 2, "expected 2 VALUE_ARGUMENT children, got %d", vargs);
+		AstNode* va0 = ast::get_child(r, a, 0)!!;
+		assert(va0.kind == VALUE_ARGUMENT, "child 0 should be VALUE_ARGUMENT");
+		assert(va0.name == "", "positional arg should have empty name, got '%s'", va0.name);
+		uint va0_idx = (uint)((usz)((char*)va0 - (char*)&r.nodes[0]) / AstNode.sizeof);
+		AstNode* expr0 = ast::get_arg_expr(r, va0_idx)!!;
+		assert(expr0.kind == STRING_TEMPLATE_EXPR || expr0.kind == LITERAL_EXPR,
+			"expected string expr (LITERAL or STRING_TEMPLATE), got %d", (int)expr0.kind);
+	};
+}
+
+fn void annotation_args_named_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("@A(name = \"x\", value = 42) class C");
+		defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* cls = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, cls, "A")!!;
+		// Legacy text byte-identical:
+		assert(a.annotation_text == "(name = \"x\", value = 42)",
+			"expected byte-identical annotation_text, got '%s'", a.annotation_text);
+		// Sub-AST: 2 named VALUE_ARGUMENTs.
+		uint vargs = ast::count_children_of_kind(r, a, VALUE_ARGUMENT);
+		assert(vargs == 2, "expected 2 VALUE_ARGUMENT children, got %d", vargs);
+		AstNode* va0 = ast::get_child(r, a, 0)!!;
+		AstNode* va1 = ast::get_child(r, a, 1)!!;
+		assert(va0.name == "name", "expected named arg 'name', got '%s'", va0.name);
+		assert(va1.name == "value", "expected named arg 'value', got '%s'", va1.name);
+	};
+}
+
+fn void annotation_args_array_literal_dual_storage() @test {
+	@pool() {
+		// Bare collection literal at expression position is unusual; we only
+		// require that annotation_text is preserved byte-identical and that
+		// at least one VALUE_ARGUMENT was opened for the arg list.
+		ParseResult* r = do_parse("@A([1, 2, 3]) class C");
+		defer free_result(r);
+		AstNode* cls = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, cls, "A")!!;
+		assert(a.annotation_text == "([1, 2, 3])",
+			"expected byte-identical annotation_text, got '%s'", a.annotation_text);
+		uint vargs = ast::count_children_of_kind(r, a, VALUE_ARGUMENT);
+		assert(vargs >= 1, "expected at least 1 VALUE_ARGUMENT child, got %d", vargs);
+	};
+}
+
+fn void annotation_args_empty_parens_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("@A() class C"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* cls = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, cls, "A")!!;
+		// Legacy: empty-parens still produces "()" slice.
+		assert(a.annotation_text == "()",
+			"expected legacy annotation_text '()', got '%s'", a.annotation_text);
+		uint vargs = ast::count_children_of_kind(r, a, VALUE_ARGUMENT);
+		assert(vargs == 0, "expected 0 VALUE_ARGUMENT children, got %d", vargs);
+	};
+}
+
+fn void annotation_no_parens_unchanged() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Foo class C"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* cls = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, cls, "Foo")!!;
+		assert(a.annotation_text == "",
+			"expected empty annotation_text for no-parens annotation, got '%s'", a.annotation_text);
+		uint vargs = ast::count_children_of_kind(r, a, VALUE_ARGUMENT);
+		assert(vargs == 0, "expected 0 VALUE_ARGUMENT children, got %d", vargs);
+	};
+}
