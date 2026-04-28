@@ -274,7 +274,8 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (extract_all != null) {
 			actions.push(extract_all);
 		}
-		Object* extract_fn = try_extract_function(uri, doc, ast, params);
+		TypeInfo* ti_extract = store.get_types(uri) ?? null;
+		Object* extract_fn = try_extract_function(uri, doc, ast, ti_extract, params);
 		if (extract_fn != null) {
 			actions.push(extract_fn);
 		}
@@ -1303,7 +1304,7 @@ fn Object* try_extract_variable(String uri, Document* doc, ParseResult* ast, Obj
  *
  * Returns null if the selection doesn't match either mode.
  */
-fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Object* params) {
+fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, TypeInfo* ti, Object* params) {
 	Object* range = params.get("range") ?? null;
 	if (range == null) return null;
 
@@ -1346,15 +1347,137 @@ fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Obj
 		// ── Mode A: expression extraction ──
 		AstNode* expr = &ast.nodes[expr_idx];
 
-		// Skip NAME_EXPR — just a variable reference
+		// Skip NAME_EXPR / LITERAL_EXPR / THIS_EXPR / SUPER_EXPR — too trivial.
 		if (expr.kind == NAME_EXPR) return null;
+		if (expr.kind == LITERAL_EXPR) return null;
+		if (expr.kind == THIS_EXPR) return null;
+		if (expr.kind == SUPER_EXPR) return null;
+
+		// Correctness guards — refuse extractions that would change semantics.
+		if (range_has_comment(doc.content, expr.start_offset, expr.end_offset)) return null;
+		if (subtree_contains_kind(ast, expr_idx, RETURN_EXPR)) return null;
+		if (subtree_contains_kind(ast, expr_idx, THROW_EXPR)) return null;
+		if (subtree_contains_kind(ast, expr_idx, BREAK_EXPR)) return null;
+		if (subtree_contains_kind(ast, expr_idx, CONTINUE_EXPR)) return null;
+		if (subtree_contains_kind(ast, expr_idx, ASSIGNMENT_EXPR)) return null;
+		if (subtree_contains_kind(ast, expr_idx, THIS_EXPR)) return null;
+		if (subtree_contains_kind(ast, expr_idx, SUPER_EXPR)) return null;
 
 		String expr_text = doc.content[(usz)expr.start_offset..(usz)expr.end_offset - 1];
 
-		// Build function: "private fun extracted() = <expr>"
+		// Capture analysis — find local names referenced from outside the selection.
+		String[32] mode_a_cap_names;
+		String[32] mode_a_cap_types;
+		usz mode_a_cap_count = 0;
+		uint sel_lo_a = expr.start_offset;
+		uint sel_hi_a = expr.end_offset;
+		for (uint i = 0; i < ast.node_count; i++) {
+			AstNode* nn = &ast.nodes[i];
+			if (nn.kind != NAME_EXPR) continue;
+			if (nn.start_offset < sel_lo_a || nn.end_offset > sel_hi_a) continue;
+			// Skip names that are the right-hand member of a DOT_EXPR (a.b → b is not a binding ref).
+			uint pidx = nn.parent;
+			if (pidx != ast::NO_PARENT && ast.nodes[pidx].kind == DOT_EXPR) {
+				uint first_child = ast::NO_PARENT;
+				for (uint c = 0; c < ast.node_count; c++) {
+					if (ast.nodes[c].parent != pidx) continue;
+					first_child = c;
+					break;
+				}
+				if (first_child != i) continue;
+			}
+			if (nn.name.len == 0) continue;
+			// Find the name's binding inside the enclosing function.
+			uint decl_idx = ast::NO_PARENT;
+			AstNode* enc_fun_node = &ast.nodes[enc_fun_idx];
+			for (uint d = 0; d < ast.node_count; d++) {
+				AstNode* dn = &ast.nodes[d];
+				if (dn.start_offset < enc_fun_node.start_offset || dn.end_offset > enc_fun_node.end_offset) continue;
+				if (dn.kind != PARAM && dn.kind != PROPERTY_DECL) continue;
+				if (dn.name != nn.name) continue;
+				if (dn.kind == PROPERTY_DECL && dn.start_offset >= nn.start_offset) continue;
+				decl_idx = d;
+				break;
+			}
+			if (decl_idx == ast::NO_PARENT) continue;            // member / top-level / unresolved
+			AstNode* dn = &ast.nodes[decl_idx];
+			if (dn.start_offset >= sel_lo_a && dn.end_offset <= sel_hi_a) continue; // inside selection
+			// De-dup.
+			bool seen = false;
+			for (usz q = 0; q < mode_a_cap_count; q++) {
+				if (mode_a_cap_names[q] == nn.name) { seen = true; break; }
+			}
+			if (seen) continue;
+			if (mode_a_cap_count >= 32) return null;
+			// Type from TypeInfo (use site preferred, decl fallback, source fallback).
+			String cap_type = "";
+			if (ti != null && ti.has_type[i]) {
+				TypeRef use_tr = ti.node_types[i];
+				if (use_tr.kind != UNKNOWN) {
+					String base = types::format_type(&use_tr);
+					if (base.len > 0) {
+						if (use_tr.nullable && (base.len == 0 || base[base.len - 1] != '?')) {
+							cap_type = string::tformat("%s?", base);
+						} else {
+							cap_type = base;
+						}
+					}
+				}
+			}
+			if (cap_type.len == 0 && ti != null && ti.has_type[decl_idx]) {
+				TypeRef decl_tr = ti.node_types[decl_idx];
+				if (decl_tr.kind != UNKNOWN) {
+					String base = types::format_type(&decl_tr);
+					if (base.len > 0) {
+						if (decl_tr.nullable && (base.len == 0 || base[base.len - 1] != '?')) {
+							cap_type = string::tformat("%s?", base);
+						} else {
+							cap_type = base;
+						}
+					}
+				}
+			}
+			if (cap_type.len == 0) cap_type = dn.type_text.len > 0 ? dn.type_text : "Any";
+			mode_a_cap_names[mode_a_cap_count] = nn.name;
+			mode_a_cap_types[mode_a_cap_count] = cap_type;
+			mode_a_cap_count++;
+		}
+
+		// Return type from TypeInfo, fall back to no annotation.
+		String ret_annot = "";
+		if (ti != null && ti.has_type[expr_idx]) {
+			TypeRef ret_tr = ti.node_types[expr_idx];
+			if (ret_tr.kind != UNKNOWN && ret_tr.kind != UNIT && ret_tr.kind != NOTHING) {
+				String rb = types::format_type(&ret_tr);
+				if (rb.len > 0) {
+					if (ret_tr.nullable && (rb.len == 0 || rb[rb.len - 1] != '?')) {
+						ret_annot = string::tformat(": %s", string::tformat("%s?", rb));
+					} else {
+						ret_annot = string::tformat(": %s", rb);
+					}
+				}
+			}
+		}
+
+		// Build function: "private fun extracted(p: T, ...): R = <expr>"
 		DString fun_text;
 		fun_text.tinit();
-		fun_text.appendf("\n\n%sprivate fun extracted() = %s", fun_indent, expr_text);
+		fun_text.appendf("\n\n%sprivate fun extracted(", fun_indent);
+		for (usz q = 0; q < mode_a_cap_count; q++) {
+			if (q > 0) fun_text.append(", ");
+			fun_text.appendf("%s: %s", mode_a_cap_names[q], mode_a_cap_types[q]);
+		}
+		fun_text.appendf(")%s = %s", ret_annot, expr_text);
+
+		// Build the call site: "extracted(p, ...)"
+		DString call_text_a;
+		call_text_a.tinit();
+		call_text_a.append("extracted(");
+		for (usz q = 0; q < mode_a_cap_count; q++) {
+			if (q > 0) call_text_a.append(", ");
+			call_text_a.append(mode_a_cap_names[q]);
+		}
+		call_text_a.append(")");
 
 		// Insert after enclosing function
 		Object* insert_start_pos = object::new_obj(tmem);
@@ -1384,7 +1507,7 @@ fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Obj
 
 		Object* edit2 = object::new_obj(tmem);
 		edit2.set("range", replace_range);
-		edit2.set("newText", "extracted()");
+		edit2.set("newText", call_text_a.str_view());
 
 		Object* edits = object::new_obj(tmem);
 		edits.push(edit2);  // replace first (earlier in doc)
@@ -1433,6 +1556,27 @@ fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Obj
 	// Get the range covering all selected statements
 	AstNode* first_stmt = &ast.nodes[sel_stmts[0]];
 	AstNode* last_stmt = &ast.nodes[sel_stmts[sel_stmt_count - 1]];
+
+	// Correctness guards — refuse extractions that would change semantics.
+	uint mb_lo = first_stmt.start_offset;
+	uint mb_hi = last_stmt.end_offset;
+	if (range_has_comment(doc.content, mb_lo, mb_hi)) return null;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.start_offset < mb_lo || n.end_offset > mb_hi) continue;
+		switch (n.kind) {
+			case RETURN_EXPR:
+			case THROW_EXPR:
+			case BREAK_EXPR:
+			case CONTINUE_EXPR:
+			case ASSIGNMENT_EXPR:
+			case THIS_EXPR:
+			case SUPER_EXPR:
+				return null;
+			default:
+				continue;
+		}
+	}
 
 	// Get selected code text
 	String selected_text = doc.content[(usz)first_stmt.start_offset..(usz)last_stmt.end_offset - 1];
@@ -2657,7 +2801,8 @@ fn Object*? handle_code_action_resolve(DocumentStore* store, WorkspaceIndex* wor
 	if (action_type == "extract_variable") {
 		resolved = try_extract_variable(uri, doc, ast, params);
 	} else if (action_type == "extract_function") {
-		resolved = try_extract_function(uri, doc, ast, params);
+		TypeInfo* ti_resolve = store.get_types(uri) ?? null;
+		resolved = try_extract_function(uri, doc, ast, ti_resolve, params);
 	} else if (action_type == "convert_expression_body") {
 		resolved = try_convert_fun_to_expression_body(uri, doc, ast, params);
 	} else if (action_type == "generate_toString" || action_type == "generate_equals" || action_type == "generate_hashCode") {
@@ -5940,6 +6085,23 @@ fn bool subtree_uses_name(ParseResult* ast, uint root, String name) {
 	return false;
 }
 
+// Source-offset bounded scan: true if any descendant of `root` (or root
+// itself) has the given NodeKind. Mirrors `diagnostics::subtree_has_kind`
+// but kept local to avoid cross-module dependency on diagnostics.
+fn bool subtree_contains_kind(ParseResult* ast, uint root, NodeKind kind) {
+	if (root >= ast.node_count) return false;
+	uint root_lo = ast.nodes[root].start_offset;
+	uint root_hi = ast.nodes[root].end_offset;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != kind) continue;
+		if (n.start_offset < root_lo) continue;
+		if (n.end_offset > root_hi) continue;
+		return true;
+	}
+	return false;
+}
+
 fn Object* try_collapse_let_to_safe_call(String uri, Document* doc, ParseResult* ast, Object* params) {
 	if (doc == null || ast == null) return null;
 	Object* range = params.get("range") ?? null;
@@ -6761,3 +6923,4 @@ fn Object* try_collapse_let_identity(String uri, Document* doc, ParseResult* ast
 	action.set("edit", workspace_edit);
 	return action;
 }
+

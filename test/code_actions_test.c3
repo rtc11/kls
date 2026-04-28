@@ -1784,8 +1784,8 @@ fn void extract_function_from_expression() @test {
 
 				// Edit 2: insert function definition
 				String insert_text = get_edit_new_text(edits, 1);
-				assert(insert_text.contains("private fun extracted() = 1 + 2"),
-					"expected function definition, got '%s'", insert_text);
+				assert(insert_text.contains("private fun extracted(): Int = 1 + 2"),
+					"expected function definition with Int return type, got '%s'", insert_text);
 				break;
 			}
 		}
@@ -2892,5 +2892,115 @@ fn void split_decl_preserves_indent() @test {
 		String new_text = find_action_by_title(result, "Split declaration and assignment");
 		assert(new_text == "\n    x = \"hi\"",
 			"expected '\\n    x = \"hi\"', got '%s'", new_text);
+	};
+}
+
+// ── Feature 44: improved extract function ───────────────────────
+
+// Mode A: expression with parameter captures + typed return
+fn void extract_expression_with_capture_and_return_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		//                          0         1         2         3
+		//                          0123456789012345678901234567890
+		String content = `fun calc(a: Int, b: Int) { val r = a + b }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "a + b" (col 35 to col 40)
+		Object* params = make_extract_params("file:///test.kt", 0, 35, 0, 40);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract function") {
+				found = true;
+				Object* edits = get_edits_for_uri(get_action_edit(result, (usz)i), "file:///test.kt");
+
+				String call_text = get_edit_new_text(edits, 0);
+				assert(call_text == "extracted(a, b)",
+					"expected 'extracted(a, b)', got '%s'", call_text);
+
+				String insert_text = get_edit_new_text(edits, 1);
+				assert(insert_text.contains("a: Int") && insert_text.contains("b: Int"),
+					"expected typed params, got '%s'", insert_text);
+				assert(insert_text.contains(": Int = a + b"),
+					"expected typed return, got '%s'", insert_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract function'");
+	};
+}
+
+// Mode A: refuse selection containing return
+fn void no_extract_when_selection_has_return() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f(): Int {\n    val x = run { return 1 }\n    return x\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "run { return 1 }" on line 1
+		// Line 1: "    val x = run { return 1 }"
+		//          0         1         2
+		//          0123456789012345678901234567
+		Object* params = make_extract_params("file:///test.kt", 1, 16, 1, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should refuse extract when selection contains return");
+		}
+	};
+}
+
+// Mode A: refuse bare literal
+fn void no_extract_for_bare_literal() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "42" (col 21 to col 23)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 23);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should refuse extract for bare literal");
+		}
+	};
+}
+
+// Mode B: refuse selection containing assignment to outer var
+fn void no_extract_statements_with_assignment() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f() {\n    var x = 1\n    x = x + 1\n    println(x)\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select line 2: "    x = x + 1"
+		Object* params = make_extract_params("file:///test.kt", 2, 0, 2, 13);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should refuse extract when selection contains assignment");
+		}
 	};
 }
