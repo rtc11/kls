@@ -191,6 +191,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null && config::redundant_type_check_diagnostic_enabled()) {
 			add_redundant_type_check_diagnostics(diagnostics, ast, type_info);
 		}
+		if (type_info != null && config::redundant_explicit_type_diagnostic_enabled()) {
+			add_redundant_explicit_type_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -4297,6 +4300,78 @@ fn void add_unused_private_decl_diagnostics(Object* diagnostics, String content,
 		tags.push(object::new_int(1, tmem)); // Unnecessary
 		diag.set("tags", tags);
 
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant explicit type on val/var ───────────────────────────
+
+// Find the initializer child of a PROPERTY_DECL: not a FUN_DECL accessor,
+// not a PARAM (destructuring component), not a TYPE_REF, not a delegate
+// root. The initializer is the lone non-FUN_DECL/non-PARAM child.
+fn uint find_property_initializer(ParseResult* ast, uint prop_idx) {
+	uint init_idx = uint.max;
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != prop_idx) continue;
+		NodeKind k = n.kind;
+		if (k == FUN_DECL || k == PARAM) continue;
+		if (n.extra_text == "delegate") continue; // by-delegated property
+		init_idx = c;
+		// Don't break — last expression child wins (custom getter/setter
+		// already filtered out above).
+	}
+	return init_idx;
+}
+
+// Two TypeRefs are equivalent for "redundant explicit type" purposes if:
+// - same kind
+// - same name
+// - same nullability
+// - same generic-arg signature (count + per-arg name + per-arg nullability)
+// We do NOT consider FUNCTION types (lambda inference is rarely redundant
+// in practice and parsing function-type text is brittle).
+fn bool typerefs_equivalent_for_redundancy(types::TypeRef* a, types::TypeRef* b) {
+	if (a.kind != b.kind) return false;
+	if (a.kind == types::TypeKind.UNKNOWN) return false;
+	if (a.kind == types::TypeKind.FUNCTION) return false;
+	if (a.name != b.name) return false;
+	if (a.nullable != b.nullable) return false;
+	if (a.type_arg_count != b.type_arg_count) return false;
+	for (usz i = 0; i < a.type_arg_count; i++) {
+		if (a.type_arg_names[i] != b.type_arg_names[i]) return false;
+		if (a.type_arg_nullable[i] != b.type_arg_nullable[i]) return false;
+	}
+	return true;
+}
+
+fn void add_redundant_explicit_type_diagnostics(Object* diagnostics, ParseResult* ast,
+	types::TypeInfo* type_info) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if (n.type_text.len == 0) continue; // no explicit type
+		if ((n.mod_flags & ast::MOD_LATEINIT) != 0) continue; // lateinit needs explicit type
+		if (property_is_delegated(ast, i)) continue;
+
+		uint init_idx = find_property_initializer(ast, i);
+		if (init_idx == uint.max) continue;
+		if (!type_info.has_type[init_idx]) continue;
+
+		types::TypeRef declared = types::parse_type_text(n.type_text);
+		types::TypeRef init_t = type_info.node_types[init_idx];
+
+		if (!typerefs_equivalent_for_redundancy(&declared, &init_t)) continue;
+
+		// Locate the type annotation in source: it follows the colon after the
+		// property name. We only have the name's location and the full type
+		// text. Place the diagnostic on the declaration name line as a Hint.
+		Object* diag = make_diagnostic(n.name_line, n.name_col,
+			n.name_line, n.name_col + n.name_len, 4, // Hint
+			"Explicitly given type is redundant");
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
 		diagnostics.push(diag);
 	}
 }

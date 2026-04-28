@@ -38,6 +38,7 @@ struct ServerConfig {
 	bool redundant_bool_comparison_diagnostic; // emit warnings for `b == true` / `b != false` etc.
 	bool redundant_type_check_diagnostic; // emit warnings for `x is T` / `x !is T` where typeof(x) <: T
 	bool unused_private_diagnostic; // emit warnings for unused private top-level fns/properties/classes
+	bool redundant_explicit_type_diagnostic; // emit hints for `val x: Int = 1` where init type matches declared type
 }
 
 // Module-level global with defaults
@@ -62,6 +63,7 @@ ServerConfig g_config = {
 	.redundant_bool_comparison_diagnostic = true,
 	.redundant_type_check_diagnostic = true,
 	.unused_private_diagnostic = true,
+	.redundant_explicit_type_diagnostic = true,
 };
 
 /**
@@ -230,6 +232,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unused_private_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantExplicitTypeDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_explicit_type_diagnostic = val.b;
+			log::debug("[kls] config: redundantExplicitTypeDiagnostic = %s",
+				g_config.redundant_explicit_type_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -374,6 +384,10 @@ fn bool redundant_type_check_diagnostic_enabled() {
 
 fn bool unused_private_diagnostic_enabled() {
 	return g_config.unused_private_diagnostic;
+}
+
+fn bool redundant_explicit_type_diagnostic_enabled() {
+	return g_config.redundant_explicit_type_diagnostic;
 }
 
 /**
