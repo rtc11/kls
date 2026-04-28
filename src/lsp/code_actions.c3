@@ -303,6 +303,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (if_to_when != null) {
 			actions.push(if_to_when);
 		}
+		Object* cmp_chain = try_simplify_compareto_chain(uri, doc, ast, params);
+		if (cmp_chain != null) {
+			actions.push(cmp_chain);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -5365,5 +5369,324 @@ fn Object* try_prefix_unused_param_underscore(String uri, Object* diag) {
 	action_diags.push(diag);
 	action.set("diagnostics", action_diags);
 
+	return action;
+}
+
+// ── Refactor: simplify Comparable's compareTo chain ─────────────
+//
+// Detects the manual idiom:
+//
+//   override fun compareTo(other: T): Int {
+//       val cmp1 = a.compareTo(other.a)
+//       if (cmp1 != 0) return cmp1
+//       val cmp2 = b.compareTo(other.b)
+//       if (cmp2 != 0) return cmp2
+//       return c.compareTo(other.c)
+//   }
+//
+// and rewrites it to:
+//
+//   override fun compareTo(other: T): Int =
+//       compareValuesBy(this, other, { it.a }, { it.b }, { it.c })
+//
+// Tight scope:
+//   - exactly one BLOCK with N>=2 stmts (can be 1 chain step + return)
+//   - all 'cmp' bindings: PROPERTY_DECL + IF_EXPR pair
+//   - each 'a.compareTo(other.a)' uses NAME_EXPR receiver matching
+//     'this' and arg 'other.<same name>' (using fn's param name as
+//     'other')
+//   - last stmt is RETURN_EXPR returning either the trailing cmp name
+//     or a final field.compareTo(other.field) call
+//
+// Bails on anything funky: type args, custom getters, qualified
+// receivers, named-arg syntax, not-equals zero variants other than
+// '!= 0', etc.
+
+fn String extract_field_from_compare_call(ParseResult* ast, uint call_idx, String other_name) {
+	if (call_idx >= ast.node_count) return "";
+	AstNode* call = &ast.nodes[call_idx];
+	if (call.kind != CALL_EXPR) return "";
+	// callee should be DOT_EXPR named "compareTo" with NAME_EXPR receiver
+	uint callee = ast::NO_PARENT;
+	uint arg = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != call_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == DOT_EXPR && callee == ast::NO_PARENT) {
+			callee = c;
+		} else if (ch.kind == VALUE_ARGUMENT && arg == ast::NO_PARENT) {
+			arg = c;
+		}
+	}
+	if (callee == ast::NO_PARENT || arg == ast::NO_PARENT) return "";
+	AstNode* cn = &ast.nodes[callee];
+	if (cn.name != "compareTo") return "";
+	// Receiver of callee = NAME_EXPR (the 'a' field). Get its name.
+	String recv_name = "";
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != callee) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind != NAME_EXPR) return "";
+		recv_name = ch.name;
+		break;
+	}
+	if (recv_name.len == 0) return "";
+	if (ast.nodes[arg].name.len > 0) return ""; // named arg => bail
+	// VALUE_ARGUMENT child = DOT_EXPR named recv_name with receiver NAME_EXPR(other_name)
+	uint arg_expr = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != arg) continue;
+		arg_expr = c; break;
+	}
+	if (arg_expr == ast::NO_PARENT) return "";
+	AstNode* ae = &ast.nodes[arg_expr];
+	if (ae.kind != DOT_EXPR) return "";
+	if (ae.name != recv_name) return "";
+	uint ae_recv = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != arg_expr) continue;
+		ae_recv = c; break;
+	}
+	if (ae_recv == ast::NO_PARENT) return "";
+	if (ast.nodes[ae_recv].kind != NAME_EXPR) return "";
+	if (ast.nodes[ae_recv].name != other_name) return "";
+	return recv_name;
+}
+
+fn Object* try_simplify_compareto_chain(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest FUN_DECL containing cursor
+	uint fun_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			fun_idx = i;
+		}
+	}
+	if (fun_idx == uint.max) return null;
+
+	AstNode* fun_node = &ast.nodes[fun_idx];
+	if (fun_node.name != "compareTo") return null;
+
+	// Locate exactly one PARAM (besides ANNOTATION_ENTRY/TYPE_PARAM) and
+	// one BLOCK child.
+	uint param_idx = uint.max;
+	uint block_idx = uint.max;
+	uint param_count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != fun_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == PARAM) {
+			param_count++;
+			param_idx = c;
+		} else if (ch.kind == BLOCK) {
+			block_idx = c;
+		}
+	}
+	if (param_count != 1) return null;
+	if (block_idx == uint.max) return null;
+	String other_name = ast.nodes[param_idx].name;
+	if (other_name.len == 0) return null;
+
+	// Collect block statements in order.
+	uint[64] stmts;
+	uint stmt_count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != block_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == ANNOTATION_ENTRY) continue;
+		if (stmt_count >= 64) return null;
+		stmts[stmt_count++] = c;
+	}
+	if (stmt_count < 2) return null;
+
+	// Walk pairs: (PROPERTY_DECL cmpN := field.compareTo(other.field), IF_EXPR)
+	// Final stmt must be a RETURN_EXPR.
+	String[32] fields;
+	uint field_count = 0;
+	uint i = 0;
+	while (i + 2 <= stmt_count - 1) {
+		uint pd_idx = stmts[i];
+		uint if_idx = stmts[i + 1];
+		AstNode* pd = &ast.nodes[pd_idx];
+		AstNode* iff = &ast.nodes[if_idx];
+		if (pd.kind != PROPERTY_DECL) return null;
+		if (iff.kind != IF_EXPR) return null;
+		String cmp_name = pd.name;
+		if (cmp_name.len == 0) return null;
+		// PROPERTY_DECL must have one CALL_EXPR initializer.
+		uint init_call = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != pd_idx) continue;
+			AstNode* ch = &ast.nodes[c];
+			if (ch.kind == ANNOTATION_ENTRY) continue;
+			if (ch.kind == TYPE_REF) continue;
+			if (ch.kind == FUN_DECL) return null; // custom accessor
+			if (init_call == ast::NO_PARENT) {
+				init_call = c;
+			} else {
+				return null;
+			}
+		}
+		if (init_call == ast::NO_PARENT) return null;
+		String fld = extract_field_from_compare_call(ast, init_call, other_name);
+		if (fld.len == 0) return null;
+		// IF_EXPR: cond = BINARY_EXPR(NAME_EXPR(cmp_name) "!=" LITERAL_EXPR("0"))
+		// then = RETURN_EXPR(NAME_EXPR(cmp_name)), no else
+		uint cond_idx = ast::NO_PARENT;
+		uint then_idx = ast::NO_PARENT;
+		uint else_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != if_idx) continue;
+			if (cond_idx == ast::NO_PARENT) { cond_idx = c; }
+			else if (then_idx == ast::NO_PARENT) { then_idx = c; }
+			else if (else_idx == ast::NO_PARENT) { else_idx = c; }
+		}
+		if (else_idx != ast::NO_PARENT) return null;
+		if (cond_idx == ast::NO_PARENT || then_idx == ast::NO_PARENT) return null;
+		AstNode* cond = &ast.nodes[cond_idx];
+		if (cond.kind != BINARY_EXPR || cond.extra_text != "!=") return null;
+		// Cond children: NAME_EXPR cmp_name, LITERAL_EXPR "0"
+		uint cond_lhs = ast::NO_PARENT;
+		uint cond_rhs = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != cond_idx) continue;
+			if (cond_lhs == ast::NO_PARENT) { cond_lhs = c; }
+			else if (cond_rhs == ast::NO_PARENT) { cond_rhs = c; }
+		}
+		if (cond_lhs == ast::NO_PARENT || cond_rhs == ast::NO_PARENT) return null;
+		if (ast.nodes[cond_lhs].kind != NAME_EXPR || ast.nodes[cond_lhs].name != cmp_name) return null;
+		if (ast.nodes[cond_rhs].kind != LITERAL_EXPR || ast.nodes[cond_rhs].extra_text != "0") return null;
+		// then = RETURN_EXPR returning NAME_EXPR(cmp_name)
+		AstNode* then_n = &ast.nodes[then_idx];
+		uint return_node = then_idx;
+		if (then_n.kind == BLOCK) {
+			uint inner = ast::NO_PARENT;
+			uint inner_count = 0;
+			for (uint c = 0; c < ast.node_count; c++) {
+				if (ast.nodes[c].parent != then_idx) continue;
+				inner = c;
+				inner_count++;
+			}
+			if (inner_count != 1) return null;
+			return_node = inner;
+		}
+		if (ast.nodes[return_node].kind != RETURN_EXPR) return null;
+		uint ret_val = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != return_node) continue;
+			ret_val = c; break;
+		}
+		if (ret_val == ast::NO_PARENT) return null;
+		if (ast.nodes[ret_val].kind != NAME_EXPR || ast.nodes[ret_val].name != cmp_name) return null;
+
+		if (field_count >= 32) return null;
+		fields[field_count++] = fld;
+		i += 2;
+	}
+
+	// Final stmt: RETURN_EXPR returning either NAME_EXPR(last cmp) or a
+	// raw field.compareTo(other.field) call.
+	if (i != stmt_count - 1) return null;
+	uint last_stmt = stmts[stmt_count - 1];
+	if (ast.nodes[last_stmt].kind != RETURN_EXPR) return null;
+	uint ret_expr = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != last_stmt) continue;
+		ret_expr = c; break;
+	}
+	if (ret_expr == ast::NO_PARENT) return null;
+	AstNode* re = &ast.nodes[ret_expr];
+	if (re.kind == CALL_EXPR) {
+		String fld = extract_field_from_compare_call(ast, ret_expr, other_name);
+		if (fld.len == 0) return null;
+		if (field_count >= 32) return null;
+		fields[field_count++] = fld;
+	} else {
+		// Bail: must be a CALL_EXPR for the trailing comparison.
+		return null;
+	}
+
+	if (field_count < 2) return null;
+
+	// Build the replacement source text and edit range covering the
+	// BLOCK (we replace ' { ... }' with ' = compareValuesBy(...)').
+	AstNode* block = &ast.nodes[block_idx];
+	// Find the '{' offset = block.start_offset (first char of body in
+	// most parser shapes).
+	DString out;
+	out.tinit();
+	out.append("= compareValuesBy(this, ");
+	out.append(other_name);
+	for (uint k = 0; k < field_count; k++) {
+		out.append(", { it.");
+		out.append(fields[k]);
+		out.append(" }");
+	}
+	out.append(")");
+
+	// Replacement spans from one char before '{' (to swap the brace for '=')
+	// through the closing '}'. Walk content backwards from block.start_offset
+	// to find any whitespace just before the brace.
+	uint replace_start = block.start_offset;
+	while (replace_start > 0) {
+		char ch = doc.content[replace_start - 1];
+		if (ch == ' ' || ch == '\t') {
+			replace_start--;
+		} else {
+			break;
+		}
+	}
+	uint replace_end = block.end_offset;
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, replace_start, &start_line, &start_col);
+	offset_to_line_col(doc.content, replace_end, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	DString final_text;
+	final_text.tinit();
+	final_text.append(" ");
+	final_text.append(out.str_view());
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", final_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Replace with 'compareValuesBy'");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
 	return action;
 }
