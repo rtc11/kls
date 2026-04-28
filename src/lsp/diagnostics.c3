@@ -2389,16 +2389,15 @@ fn void emit_smart_cast_impossible_named(Object* diagnostics, AstNode* node, Str
  * the index instead of the type. Returns NO_PARENT when not found.
  */
 /**
- * Emit "useless cast" warning for `x as T` when typeOf(x) already exactly
- * conforms to T (same name + same null-safety). Skips:
+ * Emit "useless cast" warning for `x as T` when typeOf(x) is statically
+ * assignable to T (per Kotlin spec §11.3, the cast is a no-op). Skips:
  *  - safe cast `as? T` (always returns nullable, never useless even when types match)
  *  - source type unknown
  *  - target type empty
  *  - source nullable + target non-null (cast performs runtime null check)
- *  - source non-null + target nullable (informational only — Kotlin compiler
- *    doesn't flag this)
  *
- * Conservative: equal types only, no subtyping.
+ * Subtype-aware: `Int as Number` is flagged because Int <: Number.
+ * Nullable-widening: `Int as Int?` is flagged because non-null is assignable to nullable.
  */
 fn void add_useless_cast_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
 	if (!config::useless_cast_diagnostic_enabled()) return;
@@ -2429,10 +2428,16 @@ fn void add_useless_cast_diagnostics(Object* diagnostics, ParseResult* ast, type
 		if (src.kind == types::TypeKind.UNKNOWN) continue;
 		if (src.name.len == 0) continue;
 
-		// Name-equal check
-		if (src.name != target_name) continue;
-		// Null-safety check: useless only if both match exactly
-		if (src.nullable != target_nullable) continue;
+		// Source nullable + target non-null: cast performs null check, NOT useless.
+		if (src.nullable && !target_nullable) continue;
+
+		// Build a TypeRef for the target (name + nullability) and check assignability
+		// from source to target. is_assignable_to handles stdlib supertypes
+		// (Int <: Number <: Any, etc.) plus nullable-widening (T → T?).
+		types::TypeRef target = types::parse_type_text(target_text);
+		if (target.kind == types::TypeKind.UNKNOWN) continue;
+
+		if (!types::is_assignable_to(src, target)) continue;
 
 		Object* diag = object::new_obj(tmem);
 		Object* range = object::new_obj(tmem);
@@ -2449,13 +2454,18 @@ fn void add_useless_cast_diagnostics(Object* diagnostics, ParseResult* ast, type
 		diag.set("severity", 2); // Warning
 		diag.set("source", "kls");
 
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
 		DString message;
 		message.tinit();
+		String src_display = src.nullable
+			? string::tformat("%s?", src.name)
+			: src.name;
 		message.appendf("Useless cast: '%s' is already of type '%s'",
-			src.name, target_text);
+			src_display, target_text);
 		diag.set("message", message.str_view());
-		// Use specific tag so future tests / clients can filter; KLS uses "useless"
-		// as the canonical keyword in the message.
 
 		diagnostics.push(diag);
 	}

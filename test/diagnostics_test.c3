@@ -1961,3 +1961,115 @@ fn void redund_bool_cmp_no_literal_skipped() @test {
 			"a == b (no literal) should NOT trigger redundant-bool-cmp");
 	};
 }
+
+fn void useless_cast_subtype_int_to_number() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    val y = x as Number
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast") && msg.contains("Number")) flagged = true;
+		}
+		assert(flagged, "x: Int as Number should be flagged (Int <: Number)");
+	};
+}
+
+fn void useless_cast_nonnull_to_nullable_target() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    val y = x as Int?
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast") && msg.contains("Int?")) flagged = true;
+		}
+		assert(flagged, "x: Int as Int? should be flagged (non-null assignable to nullable)");
+	};
+}
+
+fn void useless_cast_nullable_to_nonnull_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Int?) {
+    val y = x as Int
+}`
+		);
+		int useless_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast")) useless_count++;
+		}
+		assert(useless_count == 0,
+			"x: Int? as Int should NOT be flagged (cast performs null check)");
+	};
+}
+
+fn void useless_cast_unrelated_types_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: String = "a"
+    val y = x as Int
+}`
+		);
+		int useless_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast")) useless_count++;
+		}
+		assert(useless_count == 0,
+			"x: String as Int should NOT be flagged (different types)");
+	};
+}
+
+fn void useless_cast_supertype_to_subtype_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Any) {
+    val y = x as Int
+}`
+		);
+		int useless_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast")) useless_count++;
+		}
+		assert(useless_count == 0,
+			"x: Any as Int should NOT be flagged (downcast is meaningful)");
+	};
+}
+
+fn void useless_cast_carries_unnecessary_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    val y = x as Int
+}`
+		);
+		bool found_with_tag = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* d = result.get_at(i);
+			String msg = d.get_string("message") ?? "";
+			if (!msg.contains("Useless cast")) continue;
+			Object* tags = d.get("tags") ?? null;
+			if (tags == null) continue;
+			for (usz t = 0; t < tags.get_len(); t++) {
+				int tag_val = tags.get_int_at(t) ?? 0;
+				if (tag_val == 1) { found_with_tag = true; break; }
+			}
+			if (found_with_tag) break;
+		}
+		assert(found_with_tag,
+			"Useless cast diagnostic should include Unnecessary tag (1) for editor strikethrough");
+	};
+}
