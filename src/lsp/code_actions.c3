@@ -315,6 +315,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (let_to_sc != null) {
 			actions.push(let_to_sc);
 		}
+		Object* lateinit_lazy = try_lateinit_to_lazy(uri, doc, ast, params);
+		if (lateinit_lazy != null) {
+			actions.push(lateinit_lazy);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -6145,6 +6149,123 @@ fn Object* try_collapse_let_to_safe_call(String uri, Document* doc, ParseResult*
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Replace 'let' with safe call");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ─── Refactor: `lateinit var foo: T` → `val foo: T by lazy { TODO(...) }` ─
+//
+// Cursor-based refactor.rewrite. Replaces the entire PROPERTY_DECL span
+// with a `val ... by lazy { TODO(...) }` template. The rewrite is
+// intentionally a STARTING POINT — the author must fill in the TODO
+// with the real initialization expression, since semantics differ:
+//
+//   lateinit var: caller assigns at some later point; reads before
+//                  assignment throw UninitializedPropertyAccessException.
+//   val by lazy:   first read evaluates the lambda; subsequent reads
+//                  return the cached value.
+//
+// We surface this as a refactor (not an automatic quickfix) so the
+// author confirms the timing change is intentional. The TODO is
+// preserved verbatim with the property name as the message.
+//
+// Constraints:
+//   - PROPERTY_DECL has both MOD_LATEINIT and MOD_VAR set.
+//   - Has an explicit type (no `lateinit var foo` without `: T` – which
+//     is also rejected by the Kotlin compiler, so this is just defence).
+//   - Lives inside a class/interface/object/companion body (not local).
+//     Local properties cannot be `lateinit` per spec.
+//
+// Comments inside the PROPERTY_DECL span suppress the action to avoid
+// silently dropping author intent.
+fn bool decl_is_class_member(ParseResult* ast, uint idx) {
+	uint cur = ast.nodes[idx].parent;
+	while (cur != ast::NO_PARENT) {
+		NodeKind k = ast.nodes[cur].kind;
+		if (k == CLASS_DECL || k == INTERFACE_DECL || k == OBJECT_DECL || k == COMPANION_OBJECT_DECL) return true;
+		if (k == FUN_DECL || k == LAMBDA_EXPR || k == ANONYMOUS_FUN_EXPR) return false;
+		if (k == FILE) return false;
+		cur = ast.nodes[cur].parent;
+	}
+	return false;
+}
+
+fn Object* try_lateinit_to_lazy(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Smallest PROPERTY_DECL containing the cursor.
+	uint pd_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			pd_idx = i;
+		}
+	}
+	if (pd_idx == uint.max) return null;
+
+	AstNode* pd = &ast.nodes[pd_idx];
+	if ((pd.mod_flags & ast::MOD_LATEINIT) == 0) return null;
+	if ((pd.mod_flags & ast::MOD_VAR) == 0) return null;
+	if (pd.name.len == 0) return null;
+	if (pd.type_text.len == 0) return null;
+	if (!decl_is_class_member(ast, pd_idx)) return null;
+
+	// Comment guard.
+	if (range_has_comment(doc.content, pd.start_offset, pd.end_offset)) return null;
+
+	// Build replacement: `val NAME: TYPE by lazy { TODO("Initialize NAME") }`.
+	DString out;
+	out.tinit();
+	out.append("val ");
+	out.append(pd.name);
+	out.append(": ");
+	out.append(pd.type_text);
+	out.append(" by lazy { TODO(\"Initialize ");
+	out.append(pd.name);
+	out.append("\") }");
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, pd.start_offset, &start_line, &start_col);
+	offset_to_line_col(doc.content, pd.end_offset, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert 'lateinit var' to 'val by lazy { TODO }'");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
