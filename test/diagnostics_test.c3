@@ -1826,3 +1826,138 @@ fn void catch_empty_body_not_double_flagged() @test {
 		}
 	};
 }
+
+fn void redund_bool_cmp_eq_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b == true) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with expression")) flagged = true;
+		}
+		assert(flagged, "b == true should suggest 'replace with expression'");
+	};
+}
+
+fn void redund_bool_cmp_neq_false() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b != false) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with expression")) flagged = true;
+		}
+		assert(flagged, "b != false should suggest 'replace with expression'");
+	};
+}
+
+fn void redund_bool_cmp_eq_false() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b == false) println("n")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with negated expression")) flagged = true;
+		}
+		assert(flagged, "b == false should suggest 'replace with negated expression'");
+	};
+}
+
+fn void redund_bool_cmp_neq_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b != true) println("n")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with negated expression")) flagged = true;
+		}
+		assert(flagged, "b != true should suggest 'replace with negated expression'");
+	};
+}
+
+fn void redund_bool_cmp_literal_lhs() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (true == b) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) flagged = true;
+		}
+		assert(flagged, "true == b (literal on left) should also be flagged");
+	};
+}
+
+fn void redund_bool_cmp_both_literals_skipped() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    if (true == false) println("never")
+}`
+		);
+		int redund_cmp_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) redund_cmp_count++;
+		}
+		assert(redund_cmp_count == 0,
+			"true == false (both literal) should NOT trigger redundant-bool-cmp");
+	};
+}
+
+fn void redund_bool_cmp_non_bool_literal_skipped() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Int) {
+    if (x == 1) println("y")
+}`
+		);
+		int redund_cmp_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) redund_cmp_count++;
+		}
+		assert(redund_cmp_count == 0,
+			"x == 1 (int literal) should NOT trigger redundant-bool-cmp");
+	};
+}
+
+fn void redund_bool_cmp_no_literal_skipped() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(a: Boolean, b: Boolean) {
+    if (a == b) println("y")
+}`
+		);
+		int redund_cmp_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) redund_cmp_count++;
+		}
+		assert(redund_cmp_count == 0,
+			"a == b (no literal) should NOT trigger redundant-bool-cmp");
+	};
+}

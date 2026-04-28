@@ -181,6 +181,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::redundant_override_diagnostic_enabled()) {
 			add_redundant_override_diagnostics(diagnostics, ast);
 		}
+		if (config::redundant_bool_comparison_diagnostic_enabled()) {
+			add_redundant_bool_comparison_diagnostics(diagnostics, ast);
+		}
 	}
 
 	return diagnostics;
@@ -3714,6 +3717,72 @@ fn void add_swallowed_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
 		Object* tags = object::new_obj(tmem);
 		tags.push(object::new_int(1, tmem)); // Unnecessary
 		diag.set("tags", tags);
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant boolean literal comparison ─────────────────────────
+//
+// Detect BINARY_EXPR `x == true|false` / `x != true|false` (either side).
+// Per Kotlin spec §13.4.4, comparing a Boolean expression to a literal
+// is redundant: `b == true` ≡ `b`, `b != true` ≡ `!b`, `b == false` ≡ `!b`,
+// `b != false` ≡ `b`. Skip when both sides are literals (different smell).
+fn void add_redundant_bool_comparison_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		if (node.extra_text != "==" && node.extra_text != "!=") continue;
+
+		// Collect children (left + right). BINARY_EXPR may have lower-indexed left child.
+		uint[4] children;
+		uint child_count = 0;
+		for (uint c = 0; c < ast.node_count && child_count < 4; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			children[child_count++] = c;
+		}
+		if (child_count != 2) continue;
+
+		uint lhs = children[0];
+		uint rhs = children[1];
+		AstNode* l = &ast.nodes[lhs];
+		AstNode* r = &ast.nodes[rhs];
+
+		bool l_is_bool_lit = (l.kind == LITERAL_EXPR
+			&& (l.extra_text == "true" || l.extra_text == "false"));
+		bool r_is_bool_lit = (r.kind == LITERAL_EXPR
+			&& (r.extra_text == "true" || r.extra_text == "false"));
+
+		// Need exactly one literal side.
+		if (l_is_bool_lit == r_is_bool_lit) continue;
+
+		String lit = l_is_bool_lit ? l.extra_text : r.extra_text;
+		bool is_eq = (node.extra_text == "==");
+		// Result form: `b` if (== true) or (!= false); `!b` otherwise.
+		bool simplifies_to_negation = (is_eq && lit == "false") || (!is_eq && lit == "true");
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diag.set("message", simplifies_to_negation
+			? "Redundant comparison to boolean literal: replace with negated expression"
+			: "Redundant comparison to boolean literal: replace with expression");
 
 		diagnostics.push(diag);
 	}
