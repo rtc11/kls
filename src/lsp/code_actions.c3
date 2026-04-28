@@ -166,6 +166,11 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		if (message.starts_with("Only safe (?.) or non-null asserted") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			try_add_unsafe_null_recv_actions(actions, uri, doc, ast, diag);
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -5059,4 +5064,134 @@ fn bool offset_to_line_col(String content, usz offset, uint* line, uint* col) {
 	*line = l;
 	*col = c;
 	return true;
+}
+
+// ── Quickfix: insert ?. or !! for nullable receiver ──────────
+//
+// Pair quickfixes for the unsafe-nullable-receiver diagnostic. Locates the
+// DOT_EXPR whose receiver lives at the diagnostic's start position, then
+// emits two actions:
+//   - Replace `.` with `?.` (safe call)
+//   - Add `!!` after the receiver (non-null assertion)
+fn void try_add_unsafe_null_recv_actions(Object* actions, String uri, Document* doc, ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = (int)v; }
+	else { return; }
+	if (try v = start.get_int("character")) { diag_col = (int)v; }
+	else { return; }
+
+	long diag_offset = document::position_to_byte_offset(doc.content, diag_line, diag_col);
+	if (diag_offset < 0) return;
+
+	// Find the DOT_EXPR whose start_offset matches the diag_offset.
+	uint dot_idx = ast::NO_PARENT;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != DOT_EXPR) continue;
+		if (n.extra_text == "?.") continue;
+		if ((long)n.start_offset != diag_offset) continue;
+		dot_idx = i;
+		break;
+	}
+	if (dot_idx == ast::NO_PARENT) return;
+
+	// Receiver is the lower-indexed first child.
+	uint recv_idx = ast::NO_PARENT;
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent == dot_idx) { recv_idx = j; break; }
+	}
+	if (recv_idx == ast::NO_PARENT) return;
+
+	AstNode* recv = &ast.nodes[recv_idx];
+	usz recv_end = recv.end_offset;
+	if (recv_end >= doc.content.len) return;
+
+	// Find the dot character starting from recv_end (skip whitespace).
+	usz dot_off = recv_end;
+	while (dot_off < doc.content.len && doc.content[dot_off] != '.') dot_off++;
+	if (dot_off >= doc.content.len) return;
+
+	// Convert recv_end and dot_off back to line/col.
+	uint recv_line; uint recv_col;
+	if (!offset_to_line_col(doc.content, recv_end, &recv_line, &recv_col)) return;
+	uint dot_line; uint dot_col;
+	if (!offset_to_line_col(doc.content, dot_off, &dot_line, &dot_col)) return;
+
+	// Action 1: replace `.` with `?.` (insert `?` before the dot).
+	{
+		Object* edit_range = object::new_obj(tmem);
+		Object* es = object::new_obj(tmem);
+		es.set("line", (int)dot_line);
+		es.set("character", (int)dot_col);
+		Object* ee = object::new_obj(tmem);
+		ee.set("line", (int)dot_line);
+		ee.set("character", (int)dot_col);
+		edit_range.set("start", es);
+		edit_range.set("end", ee);
+
+		Object* edit = object::new_obj(tmem);
+		edit.set("range", edit_range);
+		edit.set("newText", "?");
+
+		Object* edits = object::new_obj(tmem);
+		edits.push(edit);
+		Object* changes = object::new_obj(tmem);
+		changes.set(uri, edits);
+		Object* workspace_edit = object::new_obj(tmem);
+		workspace_edit.set("changes", changes);
+
+		Object* action = object::new_obj(tmem);
+		action.set("title", "Replace '.' with safe call '?.'");
+		action.set("kind", "quickfix");
+		action.set("isPreferred", true);
+		action.set("edit", workspace_edit);
+
+		Object* action_diags = object::new_obj(tmem);
+		action_diags.push(diag);
+		action.set("diagnostics", action_diags);
+
+		actions.push(action);
+	}
+
+	// Action 2: insert `!!` after receiver.
+	{
+		Object* edit_range = object::new_obj(tmem);
+		Object* es = object::new_obj(tmem);
+		es.set("line", (int)recv_line);
+		es.set("character", (int)recv_col);
+		Object* ee = object::new_obj(tmem);
+		ee.set("line", (int)recv_line);
+		ee.set("character", (int)recv_col);
+		edit_range.set("start", es);
+		edit_range.set("end", ee);
+
+		Object* edit = object::new_obj(tmem);
+		edit.set("range", edit_range);
+		edit.set("newText", "!!");
+
+		Object* edits = object::new_obj(tmem);
+		edits.push(edit);
+		Object* changes = object::new_obj(tmem);
+		changes.set(uri, edits);
+		Object* workspace_edit = object::new_obj(tmem);
+		workspace_edit.set("changes", changes);
+
+		Object* action = object::new_obj(tmem);
+		action.set("title", "Assert non-null with '!!'");
+		action.set("kind", "quickfix");
+		action.set("edit", workspace_edit);
+
+		Object* action_diags = object::new_obj(tmem);
+		action_diags.push(diag);
+		action.set("diagnostics", action_diags);
+
+		actions.push(action);
+	}
 }
