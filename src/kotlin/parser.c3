@@ -1740,8 +1740,16 @@ fn void Parser.parse_super_types(Parser* self) {
 				self.skip_balanced_parens();
 			}
 			// Delegation: by expression
+			// Parse the delegate expression as a real sub-AST and attach
+			// it as a child of the TYPE_REF, tagged with extra_text="delegate"
+			// (mirrors property-delegation convention at parse_property_declaration).
 			if (self.eat(KW_BY)) {
-				self.skip_delegation_expression();
+				uint delegate_children_start = self.result.node_count;
+				uint delegate_root = self.parse_expression(PREC_NONE);
+				if (delegate_root < self.result.node_count) {
+					self.result.nodes[delegate_root].extra_text = "delegate";
+				}
+				self.adopt_children(ref_idx, delegate_children_start);
 			}
 
 			self.node_end(ref_idx);

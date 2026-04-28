@@ -5067,3 +5067,94 @@ fn void labeled_do_while_loop() @test {
 		assert(found, "expected DO_WHILE_STMT with extra_text='block'");
 	};
 }
+
+// ── Supertype `by` delegation sub-AST (T7) ─────────────────────────
+
+// Find the TYPE_REF child of a CLASS_DECL with the given name.
+fn AstNode*? find_supertype_ref(ParseResult* r, AstNode* cls, String name) {
+	for (uint i = 0; i < r.node_count; i++) {
+		if (r.nodes[i].parent != ast::NO_PARENT
+			&& &r.nodes[r.nodes[i].parent] == cls
+			&& r.nodes[i].kind == TYPE_REF
+			&& r.nodes[i].name == name) {
+			return &r.nodes[i];
+		}
+	}
+	return NOT_FOUND~;
+}
+
+// Returns true iff `parent_node` has any direct child with extra_text == "delegate".
+fn bool supertype_has_delegate_child(ParseResult* r, AstNode* parent_node) {
+	uint pi = (uint)(parent_node - &r.nodes[0]);
+	for (uint i = 0; i < r.node_count; i++) {
+		if (r.nodes[i].parent == pi && r.nodes[i].extra_text == "delegate") {
+			return true;
+		}
+	}
+	return false;
+}
+
+fn void supertype_by_delegation_attaches_expression() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"class Foo(items: List<String>) : List<String> by items"
+		); defer free_result(r);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+
+		AstNode* sup = find_supertype_ref(r, cls, "List")!!;
+		assert(supertype_has_delegate_child(r, sup),
+			"expected delegate expression child on supertype TYPE_REF");
+	};
+}
+
+fn void supertype_by_delegation_multiple_supertypes() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"class M(a: I1, b: I2) : I1 by a, I2 by b"
+		); defer free_result(r);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+
+		AstNode* sup1 = find_supertype_ref(r, cls, "I1")!!;
+		AstNode* sup2 = find_supertype_ref(r, cls, "I2")!!;
+		assert(supertype_has_delegate_child(r, sup1),
+			"expected delegate child on I1 supertype");
+		assert(supertype_has_delegate_child(r, sup2),
+			"expected delegate child on I2 supertype");
+	};
+}
+
+fn void supertype_by_delegation_lambda_expression() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"class Bar : Runnable by Runnable { println(\"x\") }"
+		); defer free_result(r);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+
+		AstNode* sup = find_supertype_ref(r, cls, "Runnable")!!;
+		assert(supertype_has_delegate_child(r, sup),
+			"expected delegate expression child for lambda delegate");
+	};
+}
+
+fn void supertype_without_by_has_no_delegate_child() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Foo : Bar()"); defer free_result(r);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		assert(cls.kind == CLASS_DECL, "expected CLASS_DECL");
+
+		AstNode* sup = find_supertype_ref(r, cls, "Bar")!!;
+		assert(!supertype_has_delegate_child(r, sup),
+			"unexpected delegate child on plain supertype");
+	};
+}
