@@ -1187,6 +1187,101 @@ fn void parse_fun_with_noinline_param() @test {
 	};
 }
 
+// ── Parameter default value (DUAL STORAGE: extra_text + sub-AST) ──
+
+// Helper: find first PARAM child of a function declaration.
+fn AstNode* first_param(ParseResult* r, AstNode* fun_node) {
+	for (uint i = 0; i < fun_node.child_count; i++) {
+		AstNode* c = child(r, fun_node, i);
+		if (c.kind == PARAM) return c;
+	}
+	return null;
+}
+
+fn void parse_param_default_literal() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(x: Int = 42) {}"); defer free_result(r);
+		assert(r.error_count == 0, "no errors expected, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* p = first_param(r, fun_node);
+		assert(p != null, "expected PARAM child");
+		assert(p.name == "x", "expected name 'x', got '%s'", p.name);
+		assert(p.extra_text == "42", "expected extra_text '42', got '%s'", p.extra_text);
+		assert(p.child_count == 1, "expected 1 child (default expr), got %d", (int)p.child_count);
+		AstNode* expr = child(r, p, 0);
+		assert(expr.kind == LITERAL_EXPR, "expected LITERAL_EXPR child, got kind %d", (int)expr.kind);
+	};
+}
+
+fn void parse_param_default_lambda() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(action: () -> Int = { 1 + 2 }) {}"); defer free_result(r);
+		assert(r.error_count == 0, "no errors expected, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* p = first_param(r, fun_node);
+		assert(p != null, "expected PARAM child");
+		assert(p.extra_text.len > 0, "extra_text must remain populated");
+		assert(p.child_count >= 1, "expected at least 1 child, got %d", (int)p.child_count);
+		AstNode* expr = child(r, p, 0);
+		assert(expr.kind == LAMBDA_EXPR, "expected LAMBDA_EXPR child, got kind %d", (int)expr.kind);
+	};
+}
+
+fn void parse_param_default_call_expr() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(list: List<Int> = listOf(1, 2, 3)) {}"); defer free_result(r);
+		assert(r.error_count == 0, "no errors expected, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* p = first_param(r, fun_node);
+		assert(p != null, "expected PARAM child");
+		assert(p.extra_text.len > 0, "extra_text must remain populated");
+		assert(p.child_count >= 1, "expected at least 1 child, got %d", (int)p.child_count);
+		AstNode* expr = child(r, p, 0);
+		assert(expr.kind == CALL_EXPR, "expected CALL_EXPR child, got kind %d", (int)expr.kind);
+		// Walk all nodes and count VALUE_ARGUMENTs whose parent is the CALL_EXPR.
+		uint call_idx = 0;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (&r.nodes[i] == expr) { call_idx = i; break; }
+		}
+		usz va_count = 0;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == VALUE_ARGUMENT && r.nodes[i].parent == call_idx) va_count++;
+		}
+		assert(va_count == 3, "expected 3 VALUE_ARGUMENTs under CALL_EXPR, got %d (child_count=%d)",
+			(int)va_count, (int)expr.child_count);
+	};
+}
+
+fn void parse_param_vararg_with_default() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(vararg xs: Int = intArrayOf()) {}"); defer free_result(r);
+		assert(r.error_count == 0, "no errors expected, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* p = first_param(r, fun_node);
+		assert(p != null, "expected PARAM child");
+		assert(p.extra_text.len > 0, "extra_text must remain populated for vararg+default");
+		assert(p.child_count >= 1, "expected at least 1 child for vararg+default, got %d",
+			(int)p.child_count);
+	};
+}
+
+fn void parse_param_no_default_no_child() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(x: Int) {}"); defer free_result(r);
+		assert(r.error_count == 0, "no errors expected, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* fun_node = child(r, f, 0);
+		AstNode* p = first_param(r, fun_node);
+		assert(p != null, "expected PARAM child");
+		assert(p.extra_text.len == 0, "expected empty extra_text without default, got '%s'", p.extra_text);
+		assert(p.child_count == 0, "expected 0 children without default, got %d", (int)p.child_count);
+	};
+}
+
 // ── Expression body with .get()/.set() ─────────────────────────────
 
 fn void parse_expression_body_dot_get_not_accessor() @test {

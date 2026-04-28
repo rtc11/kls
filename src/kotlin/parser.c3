@@ -1608,17 +1608,21 @@ fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
 	}
 
 	// Default value: = expression
-	// Capture the source slice in `extra_text` for hover/completion display.
-	// Sub-AST is not yet built (deferred); slice supports text-only display.
+	// DUAL STORAGE: Capture the raw source slice in `extra_text` for legacy
+	// readers (signature_help, inlay_hints, completion) AND build a real
+	// expression sub-AST as a child of PARAM. Both representations are kept
+	// in sync; extra_text is byte-identical to the prior behavior.
 	if (self.eat(ASSIGNMENT)) {
 		uint default_start = self.current.offset;
-		self.skip_param_default();
+		uint children_start = self.result.node_count;
+		self.parse_expression(PREC_NONE);
 		uint default_end = self.previous.offset + self.previous.len;
 		// Defensive: ensure end didn't roll back into nothing.
 		if (default_end > default_start && default_end <= self.source.len) {
 			self.result.nodes[idx].extra_text =
 				self.source[default_start:default_end - default_start];
 		}
+		self.adopt_children(idx, children_start);
 	}
 
 	self.node_end(idx);
