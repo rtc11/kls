@@ -171,6 +171,14 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			try_add_unsafe_null_recv_actions(actions, uri, doc, ast, diag);
 		}
 
+		if (message.starts_with("Parameter '") && message.contains("is never used")
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_rename_unused_param_underscore(uri, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -5270,4 +5278,39 @@ fn void try_add_unsafe_null_recv_actions(Object* actions, String uri, Document* 
 
 		actions.push(action);
 	}
+}
+
+// ── Quickfix: rename unused parameter to '_' ────────────────────
+//
+// Pairs with diagnostic "Parameter 'x' is never used" (Hint, severity 4).
+// Kotlin convention: prefixing or replacing an unused param name with '_'
+// signals intent. The diagnostic range already points at the param name
+// identifier — replacing that range with "_" is a safe text edit.
+fn Object* try_rename_unused_param_underscore(String uri, Object* diag) {
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", range);
+	edit.set("newText", "_");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Rename to '_'");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
 }
