@@ -40,6 +40,7 @@ struct ServerConfig {
 	bool unused_private_diagnostic; // emit warnings for unused private top-level fns/properties/classes
 	bool redundant_explicit_type_diagnostic; // emit hints for `val x: Int = 1` where init type matches declared type
 	bool unsafe_nullable_call_diagnostic; // emit warnings for `x.foo` / `x.bar` where x is nullable and not narrowed
+	bool unit_typed_decl_diagnostic; // emit warnings for `x: Unit` on params and val/var (Unit carries no info)
 }
 
 // Module-level global with defaults
@@ -66,6 +67,7 @@ ServerConfig g_config = {
 	.unused_private_diagnostic = true,
 	.redundant_explicit_type_diagnostic = true,
 	.unsafe_nullable_call_diagnostic = true,
+	.unit_typed_decl_diagnostic = true,
 };
 
 /**
@@ -250,6 +252,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unsafe_nullable_call_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unitTypedDeclDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unit_typed_decl_diagnostic = val.b;
+			log::debug("[kls] config: unitTypedDeclDiagnostic = %s",
+				g_config.unit_typed_decl_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -402,6 +412,10 @@ fn bool redundant_explicit_type_diagnostic_enabled() {
 
 fn bool unsafe_nullable_call_diagnostic_enabled() {
 	return g_config.unsafe_nullable_call_diagnostic;
+}
+
+fn bool unit_typed_decl_diagnostic_enabled() {
+	return g_config.unit_typed_decl_diagnostic;
 }
 
 /**

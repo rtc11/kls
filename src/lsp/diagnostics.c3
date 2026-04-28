@@ -134,6 +134,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::unused_private_diagnostic_enabled()) {
 			add_unused_private_decl_diagnostics(diagnostics, content, ast);
 		}
+		add_unit_typed_decl_diagnostics(diagnostics, ast);
 	}
 
 	// ── Val reassignment (Error) ─────────────────────────────────
@@ -4529,5 +4530,83 @@ fn void add_unsafe_nullable_call_diagnostics(Object* diagnostics, ParseResult* a
 		diag.set("message", message.str_view());
 
 		diagnostics.push(diag);
+	}
+}
+
+// ── Unit-typed parameter / property diagnostic ─────────────────
+//
+// Spec §8.2: kotlin.Unit is a singleton — its only value is `Unit`. A
+// parameter or local of type Unit therefore carries no information; it
+// is almost always either a leftover from a refactor (deleted return
+// type that was kept as a param) or an over-explicit annotation.
+//
+// Skipped:
+//   - Override / open / abstract members (signature dictated by parent)
+//   - Anonymous params (name length 0)
+//   - Underscore params (already opt-out marker)
+//   - Function return-type Unit (legitimate explicit-Unit pattern)
+
+fn bool type_text_is_unit(String t) {
+	if (t.len == 0) return false;
+	// Trim trailing '?' (Unit? is also pointless; treat the same).
+	usz end = t.len;
+	while (end > 0 && (t[end - 1] == '?' || t[end - 1] == ' ' || t[end - 1] == '\t')) end--;
+	usz start = 0;
+	while (start < end && (t[start] == ' ' || t[start] == '\t')) start++;
+	String trimmed = t[start:end - start];
+	return trimmed == "Unit" || trimmed == "kotlin.Unit";
+}
+
+fn void emit_unit_typed_decl_diag(Object* diagnostics, AstNode* n, String kind_label) {
+	Object* diag = object::new_obj(tmem);
+
+	Object* range = object::new_obj(tmem);
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)n.name_line);
+	start.set("character", (int)n.name_col);
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)n.name_line);
+	end_pos.set("character", (int)(n.name_col + n.name_len));
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	diag.set("range", range);
+	diag.set("severity", 2); // Warning
+	diag.set("source", "kls");
+
+	DString message;
+	message.tinit();
+	message.appendf("%s '%s' has type Unit (carries no information)", kind_label, n.name);
+	diag.set("message", message.str_view());
+
+	diagnostics.push(diag);
+}
+
+fn void add_unit_typed_decl_diagnostics(Object* diagnostics, ParseResult* ast) {
+	if (!config::unit_typed_decl_diagnostic_enabled()) return;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PARAM && n.kind != PROPERTY_DECL) continue;
+		if (n.name.len == 0) continue;
+		if (n.name[0] == '_') continue;
+		if (n.type_text.len == 0) continue;
+		if (!type_text_is_unit(n.type_text)) continue;
+		// Skip overrides — signature dictated by parent. For PARAM the
+		// MOD_OVERRIDE lives on the enclosing FUN_DECL, so walk one step.
+		uint owner = n.parent;
+		if (owner != ast::NO_PARENT && owner < ast.node_count) {
+			AstNode* o = &ast.nodes[owner];
+			if ((o.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		}
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		// Skip primary-ctor val/var (could be part of a public API contract,
+		// even if dubious — the whole property emerges as a separate
+		// PROPERTY_DECL node when scanned, so this PARAM-side skip avoids
+		// a duplicate warning).
+		if (n.kind == PARAM && (n.mod_flags & (ast::MOD_FINAL | ast::MOD_VAR)) != 0) continue;
+		// Skip destructuring wrapper — the inner components carry the type.
+		if (n.kind == PROPERTY_DECL && n.name == "(destructuring)") continue;
+		String label = n.kind == PARAM ? "Parameter" : "Property";
+		emit_unit_typed_decl_diag(diagnostics, n, label);
 	}
 }
