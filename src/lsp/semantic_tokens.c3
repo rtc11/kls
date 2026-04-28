@@ -598,6 +598,7 @@ fn int map_token_type(TokenKind kind) {
 		// Comments
 		case LINE_COMMENT:  return TT_COMMENT;
 		case BLOCK_COMMENT: return TT_COMMENT;
+		case DOC_COMMENT:   return TT_COMMENT;
 
 		// String-related
 		case STRING_OPEN:           return TT_STRING;

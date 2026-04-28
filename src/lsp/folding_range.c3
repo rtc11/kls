@@ -156,7 +156,7 @@ fn void add_comment_folding_ranges(Object* result, String content) {
 		Token tok = lex.next_all();
 		if (tok.kind == EOF) break;
 
-		if (tok.kind != BLOCK_COMMENT) continue;
+		if (tok.kind != BLOCK_COMMENT && tok.kind != DOC_COMMENT) continue;
 
 		// Only fold multi-line comments
 		uint end_line = tok.line;

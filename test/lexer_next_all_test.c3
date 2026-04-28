@@ -95,6 +95,36 @@ fn void line_comment_position() @test {
 
 // ── Block comment tokens ───────────────────────────────────────────
 
+fn void doc_comment_emitted() @test {
+	Token tok = first_all("/** kdoc */");
+	assert(tok.kind == DOC_COMMENT, "expected DOC_COMMENT, got %d", (int)tok.kind);
+	assert(tok.text == "/** kdoc */");
+}
+
+fn void doc_comment_nested() @test {
+	Token tok = first_all("/** outer /* inner */ end */");
+	assert(tok.kind == DOC_COMMENT, "expected DOC_COMMENT for nested, got %d", (int)tok.kind);
+	assert(tok.text == "/** outer /* inner */ end */");
+}
+
+fn void doc_comment_with_empty_inner_block() @test {
+	Token tok = first_all("/** outer /**/ end */");
+	assert(tok.kind == DOC_COMMENT, "expected DOC_COMMENT for inner-empty doc, got %d", (int)tok.kind);
+	assert(tok.text == "/** outer /**/ end */");
+}
+
+fn void empty_block_comment_not_doc() @test {
+	Token tok = first_all("/**/");
+	assert(tok.kind == BLOCK_COMMENT, "expected BLOCK_COMMENT for empty, got %d", (int)tok.kind);
+	assert(tok.text == "/**/");
+}
+
+fn void triple_star_block_comment_not_doc() @test {
+	Token tok = first_all("/*** triple */");
+	assert(tok.kind == BLOCK_COMMENT, "expected BLOCK_COMMENT for triple-star, got %d", (int)tok.kind);
+	assert(tok.text == "/*** triple */");
+}
+
 fn void block_comment_emitted() @test {
 	Token tok = first_all("/* comment */");
 	assert(tok.kind == BLOCK_COMMENT, "expected BLOCK_COMMENT, got %d", (int)tok.kind);

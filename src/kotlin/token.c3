@@ -8,6 +8,7 @@ enum TokenKind : int {
 	NEWLINE,
 	LINE_COMMENT,
 	BLOCK_COMMENT,
+	DOC_COMMENT,
 
 	// Literals
 	INTEGER_LITERAL,
@@ -136,6 +137,7 @@ enum TokenKind : int {
 	DOUBLE_ARROW,  // =>
 	RANGE,         // ..
 	RANGE_UNTIL,   // ..<
+	RESERVED,      // ...
 	COLONCOLON,    // ::
 	HASH,          // #
 	AT,            // @
