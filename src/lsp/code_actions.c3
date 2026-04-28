@@ -551,6 +551,31 @@ fn void classify_subject_cond(ParseResult* ast, String content, uint cond_idx, S
 	*label = "";
 	AstNode* n = &ast.nodes[cond_idx];
 
+	// Disjunction `a || b` — recurse on both sides; if same subject, merge
+	// labels with ", " (Kotlin when arm comma list).
+	if (n.kind == BINARY_EXPR && n.extra_text == "||") {
+		uint left_idx = uint.max;
+		uint right_idx = uint.max;
+		for (uint i = 0; i < ast.node_count; i++) {
+			if (ast.nodes[i].parent != cond_idx) continue;
+			if (left_idx == uint.max) {
+				left_idx = i;
+			} else if (right_idx == uint.max) {
+				right_idx = i;
+			}
+		}
+		if (left_idx == uint.max || right_idx == uint.max) return;
+		String l_subj; String l_label;
+		String r_subj; String r_label;
+		classify_subject_cond(ast, content, left_idx, &l_subj, &l_label);
+		if (l_subj.len == 0) return;
+		classify_subject_cond(ast, content, right_idx, &r_subj, &r_label);
+		if (r_subj.len == 0 || r_subj != l_subj) return;
+		*subject = l_subj;
+		*label = string::tformat("%s, %s", l_label, r_label);
+		return;
+	}
+
 	if (n.kind == TYPE_CHECK_EXPR) {
 		uint subj_idx = uint.max;
 		for (uint i = 1; i < ast.node_count; i++) {
@@ -633,9 +658,13 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 	String[16] cond_texts;
 	String[16] body_texts;
 	uint[16] cond_ast;
+	uint[16] body_starts;
+	uint[16] body_ends;
 	usz arm_count = 0;
 	String else_body_text = "";
 	bool has_else = false;
+	uint else_body_start = 0;
+	uint else_body_end = 0;
 
 	uint cur = top_idx;
 	while (arm_count < 16) {
@@ -671,6 +700,8 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 		cond_texts[arm_count] = cond_text;
 		cond_ast[arm_count] = cond_node;
 		body_texts[arm_count] = doc.content[(usz)then_n.start_offset..(usz)then_n.end_offset - 1];
+		body_starts[arm_count] = then_n.start_offset;
+		body_ends[arm_count] = then_n.end_offset;
 		arm_count++;
 
 		if (else_idx == uint.max) break;
@@ -680,11 +711,56 @@ fn Object* try_convert_if_chain_to_when(String uri, Document* doc, ParseResult* 
 			continue;
 		}
 		else_body_text = doc.content[(usz)else_n.start_offset..(usz)else_n.end_offset - 1];
+		else_body_start = else_n.start_offset;
+		else_body_end = else_n.end_offset;
 		has_else = true;
 		break;
 	}
 
 	if (arm_count < 2) return null;
+
+	// ── Bail on inter-arm comments ────────────────────────────────
+	// Comments between arms (between bodies, around 'else if', after closing braces)
+	// would be silently dropped by the rewrite. Refuse the refactor when any such
+	// comment exists. Comments inside arm body slices survive because we copy the
+	// body source verbatim; only check the bytes NOT covered by any body span.
+	{
+		usz scan_lo = top.start_offset;
+		usz scan_hi = top.end_offset;
+		// Build sorted (start, end) span list of body slices to skip.
+		uint[17] span_starts;
+		uint[17] span_ends;
+		usz span_n = 0;
+		for (usz i = 0; i < arm_count; i++) {
+			span_starts[span_n] = body_starts[i];
+			span_ends[span_n] = body_ends[i];
+			span_n++;
+		}
+		if (has_else) {
+			span_starts[span_n] = else_body_start;
+			span_ends[span_n] = else_body_end;
+			span_n++;
+		}
+		// Sort by start (small N — bubble sort fine).
+		for (usz i = 0; i + 1 < span_n; i++) {
+			for (usz j = 0; j + 1 < span_n - i; j++) {
+				if (span_starts[j] > span_starts[j+1]) {
+					uint ts = span_starts[j]; span_starts[j] = span_starts[j+1]; span_starts[j+1] = ts;
+					uint te = span_ends[j]; span_ends[j] = span_ends[j+1]; span_ends[j+1] = te;
+				}
+			}
+		}
+		usz cursor = scan_lo;
+		for (usz i = 0; i < span_n; i++) {
+			if (span_starts[i] > cursor) {
+				if (range_has_comment(doc.content, cursor, span_starts[i])) return null;
+			}
+			if (span_ends[i] > cursor) cursor = span_ends[i];
+		}
+		if (cursor < scan_hi) {
+			if (range_has_comment(doc.content, cursor, scan_hi)) return null;
+		}
+	}
 
 	// Try to detect a common subject across all arms.
 	// Each arm classified into (subject_name, arm_label).
