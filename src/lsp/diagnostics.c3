@@ -165,6 +165,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		add_unreachable_code_diagnostics(diagnostics, ast, type_info);
 		if (type_info != null) {
 			add_unreachable_cfg_diagnostics(diagnostics, ast, type_info);
+			add_shortcircuit_nothing_diagnostics(diagnostics, ast, type_info);
 		}
 		if (config::unreachable_catch_diagnostic_enabled()) {
 			add_unreachable_catch_diagnostics(diagnostics, ast);
@@ -4608,5 +4609,72 @@ fn void add_unit_typed_decl_diagnostics(Object* diagnostics, ParseResult* ast) {
 		if (n.kind == PROPERTY_DECL && n.name == "(destructuring)") continue;
 		String label = n.kind == PARAM ? "Parameter" : "Property";
 		emit_unit_typed_decl_diag(diagnostics, n, label);
+	}
+}
+
+// ── Short-circuit Nothing rhs hint ──────────────────────────────
+//
+// `b && error("...")` and `b || error("...")` are unusual: the rhs
+// only runs when the lhs gates it (true for &&, false for ||). The
+// existing AST-sibling pass deliberately treats these BINARY_EXPRs
+// as conditional and does not flag the next stmt as unreachable.
+// But this pattern is rare in well-formed code — usually the author
+// meant a guard expression like `require(b)` / `check(b)` or an
+// elvis `?:` short-circuit return.
+//
+// We surface a Hint at the operator so the editor can underline it
+// without the noise of a Warning, leaving the choice to the author.
+fn void add_shortcircuit_nothing_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
+	if (!config::shortcircuit_nothing_diagnostic_enabled()) return;
+	if (type_info == null) return;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		String op = n.extra_text;
+		if (op != "&&" && op != "||") continue;
+		// Find the rhs: BINARY_EXPR has children [lhs, rhs] in source order
+		// but children may be lower-indexed — scan and pick the second.
+		uint lhs_idx = ast::NO_PARENT;
+		uint rhs_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+			if (lhs_idx == ast::NO_PARENT) {
+				lhs_idx = c;
+			} else if (rhs_idx == ast::NO_PARENT) {
+				rhs_idx = c;
+				break;
+			}
+		}
+		if (rhs_idx == ast::NO_PARENT) continue;
+		if (!type_info.has_type[rhs_idx]) continue;
+		if (type_info.node_types[rhs_idx].kind != types::TypeKind.NOTHING) continue;
+
+		// Range covers the operator + rhs (use the whole BINARY_EXPR span
+		// minus the lhs — easier: just use the rhs span, since that's the
+		// surprising part).
+		AstNode* rhs = &ast.nodes[rhs_idx];
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)rhs.start_line);
+		start.set("character", (int)rhs.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)rhs.end_line);
+		end_pos.set("character", (int)rhs.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("Right-hand side of '%s' has type Nothing — diverges only when left-hand side is %s",
+			op, op == "&&" ? "true" : "false");
+		diag.set("message", msg.str_view());
+
+		diagnostics.push(diag);
 	}
 }
