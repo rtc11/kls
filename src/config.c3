@@ -42,6 +42,7 @@ struct ServerConfig {
 	bool unsafe_nullable_call_diagnostic; // emit warnings for `x.foo` / `x.bar` where x is nullable and not narrowed
 	bool unit_typed_decl_diagnostic; // emit warnings for `x: Unit` on params and val/var (Unit carries no info)
 	bool shortcircuit_nothing_diagnostic; // emit hints for `b && error(...)` / `b || error(...)` (rhs Nothing)
+	bool foreach_loop_diagnostic;         // emit hints for `xs.forEach { ... }` (suggest `for` loop)
 }
 
 // Module-level global with defaults
@@ -70,6 +71,7 @@ ServerConfig g_config = {
 	.unsafe_nullable_call_diagnostic = true,
 	.unit_typed_decl_diagnostic = true,
 	.shortcircuit_nothing_diagnostic = true,
+	.foreach_loop_diagnostic = true,
 };
 
 /**
@@ -270,6 +272,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.shortcircuit_nothing_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("foreachLoopDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.foreach_loop_diagnostic = val.b;
+			log::debug("[kls] config: foreachLoopDiagnostic = %s",
+				g_config.foreach_loop_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -430,6 +440,10 @@ fn bool unit_typed_decl_diagnostic_enabled() {
 
 fn bool shortcircuit_nothing_diagnostic_enabled() {
 	return g_config.shortcircuit_nothing_diagnostic;
+}
+
+fn bool foreach_loop_diagnostic_enabled() {
+	return g_config.foreach_loop_diagnostic;
 }
 
 /**

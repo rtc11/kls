@@ -167,6 +167,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			add_unreachable_cfg_diagnostics(diagnostics, ast, type_info);
 			add_shortcircuit_nothing_diagnostics(diagnostics, ast, type_info);
 		}
+		if (config::foreach_loop_diagnostic_enabled()) {
+			add_foreach_loop_diagnostics(diagnostics, ast);
+		}
 		if (config::unreachable_catch_diagnostic_enabled()) {
 			add_unreachable_catch_diagnostics(diagnostics, ast);
 		}
@@ -4675,6 +4678,104 @@ fn void add_shortcircuit_nothing_diagnostics(Object* diagnostics, ParseResult* a
 			op, op == "&&" ? "true" : "false");
 		diag.set("message", msg.str_view());
 
+		diagnostics.push(diag);
+	}
+}
+
+// ─── 'forEach' on iterable can be replaced with 'for' loop ──────────
+//
+// Rationale: a for-loop is the idiomatic Kotlin form for unconditional
+// iteration with side effects. `forEach` on Iterable adds a lambda
+// allocation (unless inlined by the platform) and obscures `break` /
+// `continue` / non-local return. Suggest a rewrite when the lambda body
+// does not rely on lambda-specific control-flow semantics.
+//
+// Pattern:
+//   <recv>.forEach { <body> }
+//   <recv>.forEach(label@ { <body> })  — also matched (label preserved)
+//
+// Suppressed when the lambda body contains:
+//   - return / continue / break (semantics differ from a for loop's
+//     equivalent — `return` from a forEach lambda is a non-local return
+//     to the enclosing function; `continue` / `break` are illegal but
+//     a code author may type them and mean labeled @forEach)
+//
+// Severity: Hint (4). Cosmetic suggestion only — not a quickfix.
+fn bool subtree_has_kind(ParseResult* ast, uint root, NodeKind kind) {
+	if (root >= ast.node_count) return false;
+	uint root_lo = ast.nodes[root].start_offset;
+	uint root_hi = ast.nodes[root].end_offset;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != kind) continue;
+		if (n.start_offset < root_lo) continue;
+		if (n.end_offset > root_hi) continue;
+		return true;
+	}
+	return false;
+}
+
+fn void add_foreach_loop_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != "forEach") continue;
+
+		// Callee must be a DOT_EXPR (`recv.forEach` / `recv?.forEach`) –
+		// require a receiver so the suggestion makes sense for collections.
+		uint callee_idx = ast::NO_PARENT;
+		uint trailing_va_idx = ast::NO_PARENT;
+		uint other_arg_count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			AstNode* ch = &ast.nodes[c];
+			if (ch.kind == ANNOTATION_ENTRY) continue;
+			if (ch.kind == VALUE_ARGUMENT) {
+				if (ch.extra_text == "trailing") {
+					trailing_va_idx = c;
+				} else {
+					other_arg_count++;
+				}
+			} else {
+				callee_idx = c;
+			}
+		}
+		if (callee_idx == ast::NO_PARENT) continue;
+		if (trailing_va_idx == ast::NO_PARENT) continue;
+		if (other_arg_count != 0) continue;
+		if (ast.nodes[callee_idx].kind != DOT_EXPR) continue;
+
+		// Trailing arg must wrap a single LAMBDA_EXPR (not an
+		// ANONYMOUS_FUN_EXPR — the latter has different return semantics).
+		uint lambda_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != trailing_va_idx) continue;
+			lambda_idx = c;
+			break;
+		}
+		if (lambda_idx == ast::NO_PARENT) continue;
+		if (ast.nodes[lambda_idx].kind != LAMBDA_EXPR) continue;
+
+		// Skip when the body uses non-local return / continue / break –
+		// rewriting changes semantics in those cases.
+		if (subtree_has_kind(ast, lambda_idx, RETURN_EXPR)) continue;
+		if (subtree_has_kind(ast, lambda_idx, CONTINUE_EXPR)) continue;
+		if (subtree_has_kind(ast, lambda_idx, BREAK_EXPR)) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		diag.set("message", "'forEach' can be replaced with a 'for' loop");
 		diagnostics.push(diag);
 	}
 }
