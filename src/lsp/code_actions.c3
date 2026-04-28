@@ -121,6 +121,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: simplify `b == true` / `b != false` / etc.
+		if (message.starts_with("Redundant comparison to boolean literal") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_simplify_redundant_bool_cmp(uri, doc, ast, diag, message);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -4339,6 +4348,121 @@ fn Object* try_remove_redundant_else_arm(String uri, Document* doc,
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Remove redundant else");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Quickfix: simplify redundant boolean literal comparison ─────
+//
+// Pairs with diagnostic `redundant_bool_comparison_diagnostic`.
+// Rewrites BINARY_EXPR of form `b == true|false` / `b != true|false`
+// (literal on either side) to `b` or `!b`. Negation case wraps the
+// expression in `!(...)` when the operand is a complex expression
+// (binary op, prefix, etc.) — atoms (NAME_EXPR, CALL_EXPR, DOT_EXPR,
+// PAREN_EXPR, THIS_EXPR, SUPER_EXPR, LITERAL_EXPR) get a bare `!`.
+fn Object* try_simplify_redundant_bool_cmp(String uri, Document* doc, ParseResult* ast,
+		Object* diag, String message) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate BINARY_EXPR matching diag start position
+	uint bin_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		if (n.extra_text != "==" && n.extra_text != "!=") continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			bin_idx = i;
+			break;
+		}
+	}
+	if (bin_idx == (uint)-1) return null;
+	AstNode* bin = &ast.nodes[bin_idx];
+
+	// Collect 2 children (BINARY_EXPR may have lower-indexed left).
+	uint[4] children;
+	uint child_count = 0;
+	for (uint c = 0; c < ast.node_count && child_count < 4; c++) {
+		if (ast.nodes[c].parent != bin_idx) continue;
+		children[child_count++] = c;
+	}
+	if (child_count != 2) return null;
+
+	uint lhs = children[0];
+	uint rhs = children[1];
+	AstNode* l = &ast.nodes[lhs];
+	AstNode* r = &ast.nodes[rhs];
+
+	bool l_is_bool_lit = (l.kind == LITERAL_EXPR
+		&& (l.extra_text == "true" || l.extra_text == "false"));
+	bool r_is_bool_lit = (r.kind == LITERAL_EXPR
+		&& (r.extra_text == "true" || r.extra_text == "false"));
+	if (l_is_bool_lit == r_is_bool_lit) return null; // need exactly one literal side
+
+	uint expr_idx = l_is_bool_lit ? rhs : lhs;
+	String lit = l_is_bool_lit ? l.extra_text : r.extra_text;
+	bool is_eq = (bin.extra_text == "==");
+	// `b` if (== true) or (!= false); `!b` otherwise.
+	bool keep_direct = (is_eq && lit == "true") || (!is_eq && lit == "false");
+
+	AstNode* expr = &ast.nodes[expr_idx];
+	String content = doc.content;
+	if (expr.start_offset >= content.len || expr.end_offset > content.len) return null;
+	if (expr.end_offset <= expr.start_offset) return null;
+	String expr_text = content[expr.start_offset:expr.end_offset - expr.start_offset];
+
+	DString new_text;
+	new_text.tinit();
+	if (keep_direct) {
+		new_text.append(expr_text);
+	} else {
+		if (needs_parens_for_negation(expr.kind)) {
+			new_text.appendf("!(%s)", expr_text);
+		} else {
+			new_text.appendf("!%s", expr_text);
+		}
+	}
+
+	// Build replacement range spanning full BINARY_EXPR.
+	Object* edit_range = object::new_obj(tmem);
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)bin.start_line);
+	edit_start.set("character", (int)bin.start_col);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", (int)bin.end_line);
+	edit_end.set("character", (int)bin.end_col);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Simplify boolean comparison");
 	action.set("kind", "quickfix");
 	action.set("isPreferred", true);
 	action.set("edit", workspace_edit);
