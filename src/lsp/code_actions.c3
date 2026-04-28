@@ -157,6 +157,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: remove redundant explicit type on val/var
+		if (message.starts_with("Explicitly given type is redundant") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_remove_redundant_explicit_type(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -4928,4 +4937,126 @@ fn bool range_has_comment(String content, usz lo, usz hi) {
 		i++;
 	}
 	return false;
+}
+
+// ── Quick fix: remove redundant explicit type on val/var ────────
+
+fn Object* try_remove_redundant_explicit_type(String uri, Document* doc, ParseResult* ast, Object* diag) {
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint diag_line = (uint)(start.get_int("line") ?? 0);
+	uint diag_col = (uint)(start.get_int("character") ?? 0);
+	long diag_off = document::position_to_byte_offset(doc.content, diag_line, diag_col);
+	if (diag_off < 0) return null;
+
+	// Find PROPERTY_DECL whose name range includes the diag offset.
+	uint prop_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if (n.name_line != diag_line) continue;
+		if (n.name_col != diag_col) continue;
+		prop_idx = i;
+		break;
+	}
+	if (prop_idx == uint.max) return null;
+
+	AstNode* prop = &ast.nodes[prop_idx];
+	if (prop.type_text.len == 0) return null;
+
+	// Locate the colon after the name. Name end offset = name_col bytes after
+	// the line start. Use source scan: from name's start_offset + name_len,
+	// skip whitespace, expect ':'.
+	usz name_end = (usz)prop.start_offset;
+	// PROPERTY_DECL.start_offset begins at modifiers/keyword. Use name_len
+	// + name_col against the line — easier: find the byte offset of the name
+	// then scan forward.
+	long name_off = document::position_to_byte_offset(doc.content, prop.name_line, prop.name_col);
+	if (name_off < 0) return null;
+	usz scan = (usz)name_off + (usz)prop.name_len;
+
+	// Skip whitespace before ':'
+	while (scan < doc.content.len && (doc.content[scan] == ' ' || doc.content[scan] == '\t')) {
+		scan++;
+	}
+	if (scan >= doc.content.len || doc.content[scan] != ':') return null;
+	usz colon_off = scan;
+	scan++; // past ':'
+
+	// Find end of type annotation. The next significant token is either '='
+	// (initializer), 'by' (delegate — but we skip those in the diag), or
+	// newline / EOF (no initializer — skipped too). Conservatively: scan to
+	// the next '=' or newline, whichever comes first.
+	usz type_end = scan;
+	while (type_end < doc.content.len) {
+		char c = doc.content[type_end];
+		if (c == '=' || c == '\n' || c == '\r') break;
+		type_end++;
+	}
+
+	// type_end points at '=' or newline. Trim trailing whitespace from the
+	// region we'll delete so the spacing around '=' looks right after edit.
+	while (type_end > scan && (doc.content[type_end - 1] == ' ' || doc.content[type_end - 1] == '\t')) {
+		type_end--;
+	}
+
+	// Backtrack name_end-1 to swallow the single space between name and ':'
+	// so we don't leave a trailing space. But if there's no preceding space
+	// (e.g. `val x:Int`), don't underflow.
+	usz delete_start = (usz)name_off + (usz)prop.name_len;
+	usz delete_end = type_end;
+	if (delete_end <= delete_start) return null;
+
+	// Convert offsets to LSP positions for the edit range.
+	uint dl_line, dl_col;
+	if (!offset_to_line_col(doc.content, delete_start, &dl_line, &dl_col)) return null;
+	uint de_line, de_col;
+	if (!offset_to_line_col(doc.content, delete_end, &de_line, &de_col)) return null;
+
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)dl_line);
+	edit_start.set("character", (int)dl_col);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", (int)de_line);
+	edit_end.set("character", (int)de_col);
+	Object* edit_range = object::new_obj(tmem);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", "");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Remove explicit type specification");
+	action.set("kind", "quickfix");
+	Object* diags_arr = object::new_obj(tmem);
+	diags_arr.push(diag);
+	action.set("diagnostics", diags_arr);
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+fn bool offset_to_line_col(String content, usz offset, uint* line, uint* col) {
+	if (offset > content.len) return false;
+	uint l = 0;
+	uint c = 0;
+	for (usz i = 0; i < offset; i++) {
+		if (content[i] == '\n') { l++; c = 0; }
+		else { c++; }
+	}
+	*line = l;
+	*col = c;
+	return true;
 }
