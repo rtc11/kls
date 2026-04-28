@@ -3225,6 +3225,71 @@ fn void parse_type_param_no_variance() @test {
 	};
 }
 
+fn void parse_type_param_single_bound() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun <T : Comparable<T>> f(x: T) {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		AstNode* tp = find_kind(r, fun, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		assert(count_kind(r, tp, TYPE_REF) == 1, "expected 1 bound, got %d", (int)count_kind(r, tp, TYPE_REF));
+		AstNode* bound = find_kind(r, tp, TYPE_REF);
+		assert(bound.type_text == "Comparable<T>", "expected 'Comparable<T>', got '%s'", bound.type_text);
+	};
+}
+
+fn void parse_type_param_multi_bounds() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun <T : Comparable<T> & Serializable> sort(x: T) {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		AstNode* tp = find_kind(r, fun, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		assert(count_kind(r, tp, TYPE_REF) == 2, "expected 2 bounds, got %d", (int)count_kind(r, tp, TYPE_REF));
+
+		bool found_comparable = false;
+		bool found_serializable = false;
+		for (uint i = 0; i < tp.child_count; i++) {
+			AstNode* ch = ast::get_child(r, tp, i)!!;
+			if (ch.kind != TYPE_REF) continue;
+			if (ch.type_text == "Comparable<T>") found_comparable = true;
+			if (ch.type_text == "Serializable") found_serializable = true;
+		}
+		assert(found_comparable, "expected Comparable<T> bound");
+		assert(found_serializable, "expected Serializable bound");
+	};
+}
+
+fn void parse_type_param_three_bounds() @test {
+	@pool() {
+		ParseResult* r = do_parse("class C<T : A & B & C>(val x: T)"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* cls = child(r, f, 0);
+		AstNode* tp = find_kind(r, cls, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		assert(count_kind(r, tp, TYPE_REF) == 3, "expected 3 bounds, got %d", (int)count_kind(r, tp, TYPE_REF));
+	};
+}
+
+fn void parse_type_param_return_type_amp_not_bound() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun <T> f(x: T): T & Any = x!!"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		AstNode* tp = find_kind(r, fun, TYPE_PARAM);
+		assert(tp.name == "T", "expected type param 'T', got '%s'", tp.name);
+		assert(count_kind(r, tp, TYPE_REF) == 0, "expected 0 bounds, got %d", (int)count_kind(r, tp, TYPE_REF));
+	};
+}
+
 // ── #13: MOD_VAR flag on property declarations ─────────────────────
 
 fn void parse_var_has_mod_var_flag() @test {

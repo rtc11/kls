@@ -1602,6 +1602,7 @@ fn void Parser.parse_type_params(Parser* self) {
 	while (!self.at(RANGLE) && !self.at_eof()) {
 		uint idx = self.add_node(TYPE_PARAM);
 		self.node_start(idx, self.current);
+		uint children_start = self.result.node_count;
 
 		// Variance: in/out
 		uint mods = ast::MOD_NONE;
@@ -1624,13 +1625,34 @@ fn void Parser.parse_type_params(Parser* self) {
 		// Upper bound: : Type
 		if (self.eat(COLON)) {
 			uint type_start = self.current.offset;
-			self.skip_type_ref();
-			uint type_end = self.previous.offset + self.previous.len;
-			if (type_end > type_start) {
-				self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			uint last_end = type_start;
+
+			while (true) {
+				if (self.at(RANGLE) || self.at(COMMA) || self.at_eof()) break;
+
+				uint bound_start = self.current.offset;
+
+				uint bound_idx = self.add_node(TYPE_REF);
+				self.node_start(bound_idx, self.current);
+
+				self.skip_type_param_bound_ref();
+				uint bound_end = self.previous.offset + self.previous.len;
+				if (bound_end > last_end) last_end = bound_end;
+				if (bound_end > bound_start) {
+					self.result.nodes[bound_idx].type_text = self.source[bound_start:bound_end - bound_start];
+				}
+				self.node_end(bound_idx);
+
+				if (!self.eat(AMP)) break;
+				last_end = self.current.offset;
+			}
+
+			if (last_end > type_start) {
+				self.result.nodes[idx].type_text = self.source[type_start:last_end - type_start];
 			}
 		}
 
+		self.adopt_children(idx, children_start);
 		self.node_end(idx);
 		if (!self.eat(COMMA)) break;
 	}
@@ -4070,9 +4092,71 @@ fn void Parser.skip_type_ref(Parser* self) {
 			}
 		}
 
-		// Intersection type (definitely non-nullable): T & Any
-		if (self.eat(AMP)) {
-			self.skip_type_ref();
+		}
+
+	// Intersection type (definitely non-nullable): T & Any
+	if (self.eat(AMP)) {
+		self.skip_type_ref();
+	}
+
+	return;
+}
+
+/**
+ * Skip a type bound inside type parameter constraints.
+ * Same as skip_type_ref(), but stop before top-level '&' so callers can
+ * split intersection bounds into separate child nodes.
+ */
+fn void Parser.skip_type_param_bound_ref(Parser* self) {
+	// Handle function types: (A, B) -> C
+	if (self.at(LPAREN)) {
+		self.skip_balanced_parens();
+		if (self.eat(ARROW)) {
+			self.skip_type_param_bound_ref(); // return type
+		}
+		while (self.eat(QUEST)) {}
+		return;
+	}
+
+	// Handle suspend function types: suspend (A) -> B, suspend Type.() -> B
+	if (self.at(KW_SUSPEND)) {
+		self.advance();
+		self.skip_type_param_bound_ref();
+		return;
+	}
+
+	if (self.at_identifier() || self.at(KW_DYNAMIC)) {
+		self.advance();
+
+		while (self.eat(DOT)) {
+			if (self.at_identifier()) {
+				self.advance();
+			} else if (self.at(LPAREN)) {
+				self.skip_balanced_parens();
+				if (self.eat(ARROW)) {
+					self.skip_type_param_bound_ref();
+				}
+				while (self.eat(QUEST)) {}
+				return;
+			} else {
+				break;
+			}
+		}
+
+		if (self.at(LANGLE)) {
+			self.skip_angle_brackets();
+		}
+
+		while (self.eat(QUEST)) {}
+
+		if (self.eat(DOT)) {
+			if (self.at(LPAREN)) {
+				self.skip_balanced_parens();
+				if (self.eat(ARROW)) {
+					self.skip_type_param_bound_ref();
+				}
+				while (self.eat(QUEST)) {}
+			}
 		}
 
 		return;
