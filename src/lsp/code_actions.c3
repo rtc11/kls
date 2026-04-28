@@ -94,6 +94,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: simplify subject-less `when { cond -> true; else -> false }` → `cond`
+		if (message.starts_with("Redundant 'when'") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_simplify_redundant_when_bool(uri, doc, ast, diag, message);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: remove redundant elvis `?:` on non-null LHS
 		if (message.starts_with("Elvis operator (?:) on non-null") && doc != null && ast != null
 			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
@@ -4676,4 +4685,154 @@ fn Object* try_replace_type_check_with_literal(String uri, Document* doc, ParseR
 	action.set("diagnostics", action_diags);
 
 	return action;
+}
+
+// ── Quickfix: simplify redundant subject-less when ────────────
+//
+// For `when { cond -> true; else -> false }` → replace whole when with cond text.
+// For `when { cond -> false; else -> true }` → replace with `!(cond)` or `!cond`.
+//
+// Note: parser's parse_when_entry_conditions falls back to skip_when_condition
+// for many shapes (e.g. binary expressions with `>`), which consumes tokens
+// without producing AST nodes. So cond AST may not exist; instead extract cond
+// text from source as `[entry.start_offset, body.start_offset - "->".len)`,
+// trimmed of whitespace.
+fn Object* try_simplify_redundant_when_bool(String uri, Document* doc, ParseResult* ast,
+		Object* diag, String message) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	uint when_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_EXPR) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			when_idx = i;
+			break;
+		}
+	}
+	if (when_idx == (uint)-1) return null;
+	AstNode* when_node = &ast.nodes[when_idx];
+
+	uint regular_entry = (uint)-1;
+	for (uint c = when_node.children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != when_idx) continue;
+		if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+		if (ast.nodes[c].extra_text == "else") continue;
+		regular_entry = c;
+		break;
+	}
+	if (regular_entry == (uint)-1) return null;
+
+	// Body = last child (LITERAL_EXPR or BLOCK)
+	uint body_idx = (uint)-1;
+	for (uint c = ast.nodes[regular_entry].children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != regular_entry) continue;
+		body_idx = c;
+	}
+	if (body_idx == (uint)-1) return null;
+
+	String content = doc.content;
+	AstNode* entry = &ast.nodes[regular_entry];
+	AstNode* body = &ast.nodes[body_idx];
+	if (entry.start_offset >= content.len) return null;
+	if (body.start_offset > content.len) return null;
+	if (body.start_offset <= entry.start_offset) return null;
+
+	// Slice from entry start to body start, then trim trailing whitespace + "->"
+	String raw = content[entry.start_offset:body.start_offset - entry.start_offset];
+	usz end = raw.len;
+	// Trim trailing whitespace
+	while (end > 0 && (raw[end - 1] == ' ' || raw[end - 1] == '\t' || raw[end - 1] == '\n' || raw[end - 1] == '\r')) {
+		end--;
+	}
+	// Strip trailing "->"
+	if (end >= 2 && raw[end - 2] == '-' && raw[end - 1] == '>') {
+		end -= 2;
+	}
+	// Trim again
+	while (end > 0 && (raw[end - 1] == ' ' || raw[end - 1] == '\t' || raw[end - 1] == '\n' || raw[end - 1] == '\r')) {
+		end--;
+	}
+	if (end == 0) return null;
+	String cond_text = raw[:end];
+
+	bool negated = message.contains("negated");
+	DString new_text;
+	new_text.tinit();
+	if (negated) {
+		// Conservative: parens whenever cond text isn't a "simple atom"
+		// (contains space or non-identifier operator chars).
+		bool needs_parens = cond_text_needs_parens(cond_text);
+		if (needs_parens) {
+			new_text.appendf("!(%s)", cond_text);
+		} else {
+			new_text.appendf("!%s", cond_text);
+		}
+	} else {
+		new_text.append(cond_text);
+	}
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", range);
+	edit.set("newText", new_text.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", negated ? "Replace with negated condition" : "Replace with condition");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// True if cond text needs parentheses to safely apply unary `!`.
+// Heuristic: any binary operator, space, or `is`/`in`/`as` keyword present.
+fn bool cond_text_needs_parens(String s) {
+	// Allow simple call expressions: foo(...) without spaces or top-level operators.
+	// Allow simple member access: foo.bar
+	// Reject anything with binary operators.
+	for (usz i = 0; i < s.len; i++) {
+		char c = s[i];
+		switch (c) {
+			case ' ':
+			case '\t':
+			case '<':
+			case '>':
+			case '+':
+			case '-':
+			case '*':
+			case '/':
+			case '%':
+			case '=':
+			case '&':
+			case '|':
+			case '^':
+			case '?':
+				return true;
+			default:
+				break;
+		}
+	}
+	return false;
 }
