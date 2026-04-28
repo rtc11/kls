@@ -319,6 +319,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (lateinit_lazy != null) {
 			actions.push(lateinit_lazy);
 		}
+		Object* null_pass = try_simplify_null_passthrough(uri, doc, ast, params);
+		if (null_pass != null) {
+			actions.push(null_pass);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -6266,6 +6270,182 @@ fn Object* try_lateinit_to_lazy(String uri, Document* doc, ParseResult* ast, Obj
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Convert 'lateinit var' to 'val by lazy { TODO }'");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ─── Refactor: `if (x != null) x else null` / `if (x == null) null else x` → `x` ─
+//
+// Cursor-based refactor.rewrite. The two if-branches are exactly `x` and
+// `null`, gated by a `x != null` (or `x == null`) check. The whole thing
+// is just `x` — the type system already gives the same result.
+//
+// Skips:
+//   - condition is not a binary `==`/`!=` between a name and `null`
+//   - branches are not exactly the same name and a null literal
+//   - any comment in the if-expr span (preserve author intent)
+//   - if-expr without an else branch
+fn uint null_passthrough_unwrap(ParseResult* ast, uint branch_idx) {
+	// Strip BLOCK wrapping a single statement.
+	if (branch_idx >= ast.node_count) return ast::NO_PARENT;
+	AstNode* n = &ast.nodes[branch_idx];
+	if (n.kind != BLOCK) return branch_idx;
+	uint inner = ast::NO_PARENT;
+	uint count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != branch_idx) continue;
+		inner = c;
+		count++;
+		if (count > 1) return ast::NO_PARENT;
+	}
+	if (count != 1) return ast::NO_PARENT;
+	return inner;
+}
+
+fn Object* try_simplify_null_passthrough(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest IF_EXPR containing cursor.
+	uint if_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != IF_EXPR) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			if_idx = i;
+		}
+	}
+	if (if_idx == uint.max) return null;
+
+	AstNode* iff = &ast.nodes[if_idx];
+
+	// Collect children: cond, then, else.
+	uint cond_idx = ast::NO_PARENT;
+	uint then_idx = ast::NO_PARENT;
+	uint else_idx = ast::NO_PARENT;
+	uint child_seen = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != if_idx) continue;
+		if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+		if (child_seen == 0) {
+			cond_idx = c;
+		} else if (child_seen == 1) {
+			then_idx = c;
+		} else if (child_seen == 2) {
+			else_idx = c;
+		} else {
+			return null;
+		}
+		child_seen++;
+	}
+	if (cond_idx == ast::NO_PARENT) return null;
+	if (then_idx == ast::NO_PARENT) return null;
+	if (else_idx == ast::NO_PARENT) return null;
+
+	// Cond must be BINARY_EXPR with op `==` or `!=`.
+	AstNode* cond = &ast.nodes[cond_idx];
+	if (cond.kind != BINARY_EXPR) return null;
+	bool is_ne;
+	if (cond.extra_text == "!=") {
+		is_ne = true;
+	} else if (cond.extra_text == "==") {
+		is_ne = false;
+	} else {
+		return null;
+	}
+
+	// Cond children: lhs, rhs.
+	uint cond_lhs = ast::NO_PARENT;
+	uint cond_rhs = ast::NO_PARENT;
+	uint cseen = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != cond_idx) continue;
+		if (cseen == 0) {
+			cond_lhs = c;
+		} else if (cseen == 1) {
+			cond_rhs = c;
+		} else {
+			return null;
+		}
+		cseen++;
+	}
+	if (cond_lhs == ast::NO_PARENT) return null;
+	if (cond_rhs == ast::NO_PARENT) return null;
+
+	// One side must be NAME_EXPR, the other LITERAL_EXPR `null`.
+	String name_text = "";
+	if (ast.nodes[cond_lhs].kind == NAME_EXPR
+		&& ast.nodes[cond_rhs].kind == LITERAL_EXPR
+		&& ast.nodes[cond_rhs].extra_text == "null") {
+		name_text = ast.nodes[cond_lhs].name;
+	} else if (ast.nodes[cond_rhs].kind == NAME_EXPR
+		&& ast.nodes[cond_lhs].kind == LITERAL_EXPR
+		&& ast.nodes[cond_lhs].extra_text == "null") {
+		name_text = ast.nodes[cond_rhs].name;
+	} else {
+		return null;
+	}
+	if (name_text.len == 0) return null;
+
+	// Unwrap branches (strip BLOCK if single-stmt).
+	uint then_inner = null_passthrough_unwrap(ast, then_idx);
+	uint else_inner = null_passthrough_unwrap(ast, else_idx);
+	if (then_inner == ast::NO_PARENT) return null;
+	if (else_inner == ast::NO_PARENT) return null;
+
+	// Determine which branch is name and which is null based on op.
+	// `x != null` → then=x, else=null. `x == null` → then=null, else=x.
+	uint name_branch = is_ne ? then_inner : else_inner;
+	uint null_branch = is_ne ? else_inner : then_inner;
+
+	if (ast.nodes[name_branch].kind != NAME_EXPR) return null;
+	if (ast.nodes[name_branch].name != name_text) return null;
+	if (ast.nodes[null_branch].kind != LITERAL_EXPR) return null;
+	if (ast.nodes[null_branch].extra_text != "null") return null;
+
+	// Comment guard.
+	if (range_has_comment(doc.content, iff.start_offset, iff.end_offset)) return null;
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, iff.start_offset, &start_line, &start_col);
+	offset_to_line_col(doc.content, iff.end_offset, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", name_text);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Simplify null pass-through to expression");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
