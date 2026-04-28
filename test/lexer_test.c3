@@ -335,6 +335,20 @@ fn void scientific_with_f_suffix() @test {
 	assert(tok.text == "1.5e-3f");
 }
 
+fn void scientific_underscore_in_exponent() @test {
+	// Kotlin spec §1.4: numeric literals allow `_` as visual separator,
+	// including inside the exponent.
+	Token tok = first("1.5e1_0");
+	assert(tok.kind == FLOAT_LITERAL, "expected FLOAT_LITERAL, got %d", (int)tok.kind);
+	assert(tok.text == "1.5e1_0", "expected '1.5e1_0', got '%s'", tok.text);
+}
+
+fn void scientific_underscore_in_signed_exponent() @test {
+	Token tok = first("2.5E-1_2");
+	assert(tok.kind == FLOAT_LITERAL);
+	assert(tok.text == "2.5E-1_2");
+}
+
 // ── String Literals ─────────────────────────────────────────────────
 
 fn void simple_string() @test {
@@ -390,6 +404,24 @@ fn void escaped_char() @test {
 	Token tok = first(`'\n'`);
 	assert(tok.kind == CHARACTER_LITERAL);
 	assert(tok.text == `'\n'`);
+}
+
+fn void unicode_escape_exact_4_hex() @test {
+	// Kotlin spec §16.5: \uXXXX requires exactly 4 hex digits.
+	Token tok = first(`'\u1234'`);
+	assert(tok.kind == CHARACTER_LITERAL);
+	assert(tok.text == `'\u1234'`, "expected full literal consumed, got '%s'", tok.text);
+}
+
+fn void unicode_escape_rejects_underscore() @test {
+	// `_` not a valid hex digit inside `\uXXXX`.
+	// We do not validate via diagnostic — strict consumption stops at the `_`,
+	// so the closing `'` is not paired and the token text reflects that.
+	Token tok = first(`'\u1_234'`);
+	assert(tok.kind == CHARACTER_LITERAL);
+	// Lexer must NOT have consumed any of the hex (since first one was followed
+	// by `_` < 4 valid digits). Token must therefore not span all 8 chars.
+	assert(tok.text.len < 9, "expected lexer to reject invalid \\u escape, got '%s'", tok.text);
 }
 
 // ── Operators ───────────────────────────────────────────────────────

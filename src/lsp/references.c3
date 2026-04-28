@@ -76,13 +76,19 @@ fn Object*? handle_references(DocumentStore* store, WorkspaceIndex* workspace, O
 		target = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, tok.offset, is_call);
 		// If cursor IS on a declaration and resolution failed, treat
 		// the declaration site itself as the target.
-		if (target.kind == TargetKind.NONE && is_declaration_name(pr, tok.offset)) {
-			target = (TokenTarget){
-				.kind = TargetKind.IN_FILE,
-				.uri = uri,
-				.name_offset = tok.offset,
-			};
+		if (target.kind == TargetKind.NONE) {
+			uint decl_idx_self = 0;
+			if (find_decl_idx_at_offset(pr, target_name, tok.offset, &decl_idx_self)) {
+				target = definition::make_ast_target(uri, decl_idx_self);
+			}
 		}
+	}
+
+	// Precompute the in-file decl token offset (if AST_NODE points at this file).
+	bool target_in_this_file = (target.kind == TargetKind.AST_NODE && target.uri == uri);
+	uint decl_byte_offset = uint.max;
+	if (target_in_this_file && target.decl_idx < pr.node_count) {
+		decl_byte_offset = pr.nodes[target.decl_idx].name_offset;
 	}
 
 	// Collect IDENTIFIER tokens matching target_name,
@@ -119,12 +125,13 @@ fn Object*? handle_references(DocumentStore* store, WorkspaceIndex* workspace, O
 		}
 
 		// Scope-aware filtering: when target is in this file, verify each
-		// candidate token resolves to the same target. CROSS_FILE targets
-		// skip per-token verification (current file shouldn't have decl);
-		// matches by name only — same as the existing fallback.
-		if (pr != null && target.kind == TargetKind.IN_FILE) {
-			// Cursor's own declaration site (raw byte offset path)
-			if (t.offset == target.name_offset) {
+		// candidate token resolves to the same target. Cross-file targets
+		// (AST_NODE in another uri, DEP_SYMBOL, EXTERNAL) skip per-token
+		// verification — current file shouldn't have decl; matches by
+		// name only — same as the existing fallback.
+		if (pr != null && target_in_this_file) {
+			// Cursor's own declaration site
+			if (decl_byte_offset != uint.max && t.offset == decl_byte_offset) {
 				if (include_declaration) {
 					Object* location = build_location(uri, t);
 					locations.push(location);
@@ -134,10 +141,11 @@ fn Object*? handle_references(DocumentStore* store, WorkspaceIndex* workspace, O
 			if (!definition::token_binds_to_target(target, pr, ti, workspace, store, uri, target_name, t.offset, is_call)) {
 				continue;
 			}
-		} else if (pr != null && target.kind == TargetKind.CROSS_FILE) {
-			// Verify candidate also resolves cross-file to the same URI.
+		} else if (pr != null && target.kind != TargetKind.NONE) {
+			// Cross-file / dep / external target: verify candidate
+			// resolves to the same target.
 			TokenTarget cand = definition::resolve_token_binding(pr, ti, workspace, store, uri, target_name, t.offset, is_call);
-			if (cand.kind != TargetKind.CROSS_FILE || cand.uri != target.uri) continue;
+			if (!definition::target_equals(target, cand)) continue;
 		}
 
 		// Build Location for this occurrence
@@ -170,6 +178,23 @@ fn bool is_declaration_name(ParseResult* pr, uint offset) {
 		if (n.name_offset == offset && n.name_len > 0) {
 			return true;
 		}
+	}
+	return false;
+}
+
+/**
+ * Find the AST decl node index whose name token starts at `offset` and
+ * matches `name`. Used to build an AST_NODE TokenTarget for a cursor
+ * sitting on a declaration site itself (self-binding case).
+ */
+fn bool find_decl_idx_at_offset(ParseResult* pr, String name, uint offset, uint* out_idx) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ast::is_declaration(n.kind)) continue;
+		if (n.name_offset != offset || n.name_len == 0) continue;
+		if (n.name != name) continue;
+		*out_idx = i;
+		return true;
 	}
 	return false;
 }

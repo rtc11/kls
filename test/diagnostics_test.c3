@@ -16,7 +16,7 @@ fn Object* build_test_diagnostics(String content) {
 	defer { pr.free_errors(); mem::free(pr); }
 	parser::parse(content, pr);
 	TypeInfo* ti = mem::new(TypeInfo);
-	defer mem::free(ti);
+	defer { types::free_type_info(ti); mem::free(ti); };
 	types::resolve_types(pr, ti);
 	return diagnostics::build_diagnostics_array(content, pr, null, ti);
 }
@@ -241,14 +241,20 @@ fun main() { val _x: Foo = Foo(); val _y: Baz = Baz() }`
 
 fn void import_used_in_type_annotation() @test {
 	@pool() {
-		// The imported name appears only as a type annotation
+		// The imported name appears only as a type annotation.
+		// Test scoped to: no "Unused import" diagnostic should appear.
+		// (An "unused parameter" hint for `x` is expected and unrelated.)
 		Object* result = build_test_diagnostics(
 			`import com.example.MyType
 fun process(x: MyType) {}`
 		);
 		assert(result.is_indexable());
 		if (result.is_array()) {
-			assert(result.get_len() == 0, "expected 0 diagnostics when import used as type, got %d", (int)result.get_len());
+			for (usz i = 0; i < result.get_len(); i++) {
+				String msg = result.get_at(i).get_string("message") ?? "";
+				assert(!msg.contains("Unused import"),
+					"unexpected unused-import diagnostic: %s", msg);
+			}
 		}
 	};
 }
@@ -1592,5 +1598,747 @@ fn void no_false_diagnostic_for_call_in_lambda_with_nested_arrow_lambda() @test 
 		);
 		assert(!has_diagnostic_containing(result, "Expected ')'"),
 			"multi-arg call in lambda with nested arrow lambda should not produce false diagnostic");
+	};
+}
+
+fn void write_only_var_flagged_as_unused() @test {
+	@pool() {
+		// `var x` written but never read — should be flagged
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var x = 0
+    x = 5
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("'x' is never used")) flagged = true;
+		}
+		assert(flagged, "write-only var should be flagged");
+	};
+}
+
+fn void destructuring_component_unused_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    val pair = Pair(1, 2)
+    val (a, b) = pair
+    println(a)
+}`
+		);
+		bool flagged_b = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("'b' is never used")) flagged_b = true;
+		}
+		assert(flagged_b, "destructuring component 'b' should be flagged");
+	};
+}
+
+fn void for_loop_unused_var_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    for (i in 1..10) {
+        println("hi")
+    }
+}`
+		);
+		bool flagged = false;
+		for (usz j = 0; j < result.get_len(); j++) {
+			String msg = result.get_at(j).get_string("message") ?? "";
+			if (msg.contains("'i' is never used")) flagged = true;
+		}
+		assert(flagged, "for-loop var 'i' should be flagged");
+	};
+}
+
+fn void catch_unused_param_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        println("try")
+    } catch (e: Exception) {
+        println("oops")
+    }
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("'e' is never used")) flagged = true;
+		}
+		assert(flagged, "catch param 'e' should be flagged");
+	};
+}
+
+fn void compound_assign_counts_as_read() @test {
+	@pool() {
+		// `+=` reads the current value, so x is "used" — no flag
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var x = 0
+    x += 5
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("'x' is never used"),
+				"compound-assigned var should NOT be flagged: %s", msg);
+		}
+	};
+}
+
+fn void read_after_write_not_flagged() @test {
+	@pool() {
+		// pure write `x = 5`, then read `println(x)` — used, no flag
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    var x = 0
+    x = 5
+    println(x)
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("'x' is never used"),
+				"read-after-write var should NOT be flagged: %s", msg);
+		}
+	};
+}
+
+fn void catch_swallows_no_use_no_throw_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println("oops")
+    }
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Exception 'e' is never used")) flagged = true;
+		}
+		assert(flagged, "swallowed exception should be flagged");
+	};
+}
+
+fn void catch_rethrow_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println("oops")
+        throw e
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("Exception 'e' is never used"),
+				"rethrow should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_param_used_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        println(e.message)
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("Exception 'e' is never used"),
+				"used param should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_underscore_param_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (_: Exception) {
+        println("ignored")
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("catch swallows"),
+				"underscore param should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_throws_wrapped_not_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+        throw RuntimeException("wrapped")
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("Exception 'e' is never used"),
+				"throw (any) should NOT flag: %s", msg);
+		}
+	};
+}
+
+fn void catch_empty_body_not_double_flagged() @test {
+	@pool() {
+		// empty catch is handled by add_empty_catch_diagnostics; we
+		// must NOT also emit the swallows diagnostic.
+		Object* result = build_test_diagnostics(
+			`fun main() {
+    try {
+        risky()
+    } catch (e: Exception) {
+    }
+}`
+		);
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			assert(!msg.contains("catch swallows"),
+				"empty catch should NOT trigger swallows: %s", msg);
+		}
+	};
+}
+
+fn void redund_bool_cmp_eq_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b == true) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with expression")) flagged = true;
+		}
+		assert(flagged, "b == true should suggest 'replace with expression'");
+	};
+}
+
+fn void redund_bool_cmp_neq_false() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b != false) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with expression")) flagged = true;
+		}
+		assert(flagged, "b != false should suggest 'replace with expression'");
+	};
+}
+
+fn void redund_bool_cmp_eq_false() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b == false) println("n")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with negated expression")) flagged = true;
+		}
+		assert(flagged, "b == false should suggest 'replace with negated expression'");
+	};
+}
+
+fn void redund_bool_cmp_neq_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (b != true) println("n")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")
+				&& msg.contains("replace with negated expression")) flagged = true;
+		}
+		assert(flagged, "b != true should suggest 'replace with negated expression'");
+	};
+}
+
+fn void redund_bool_cmp_literal_lhs() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(b: Boolean) {
+    if (true == b) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) flagged = true;
+		}
+		assert(flagged, "true == b (literal on left) should also be flagged");
+	};
+}
+
+fn void redund_bool_cmp_both_literals_skipped() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    if (true == false) println("never")
+}`
+		);
+		int redund_cmp_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) redund_cmp_count++;
+		}
+		assert(redund_cmp_count == 0,
+			"true == false (both literal) should NOT trigger redundant-bool-cmp");
+	};
+}
+
+fn void redund_bool_cmp_non_bool_literal_skipped() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Int) {
+    if (x == 1) println("y")
+}`
+		);
+		int redund_cmp_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) redund_cmp_count++;
+		}
+		assert(redund_cmp_count == 0,
+			"x == 1 (int literal) should NOT trigger redundant-bool-cmp");
+	};
+}
+
+fn void redund_bool_cmp_no_literal_skipped() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(a: Boolean, b: Boolean) {
+    if (a == b) println("y")
+}`
+		);
+		int redund_cmp_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Redundant comparison to boolean literal")) redund_cmp_count++;
+		}
+		assert(redund_cmp_count == 0,
+			"a == b (no literal) should NOT trigger redundant-bool-cmp");
+	};
+}
+
+fn void useless_cast_subtype_int_to_number() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    val y = x as Number
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast") && msg.contains("Number")) flagged = true;
+		}
+		assert(flagged, "x: Int as Number should be flagged (Int <: Number)");
+	};
+}
+
+fn void useless_cast_nonnull_to_nullable_target() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    val y = x as Int?
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast") && msg.contains("Int?")) flagged = true;
+		}
+		assert(flagged, "x: Int as Int? should be flagged (non-null assignable to nullable)");
+	};
+}
+
+fn void useless_cast_nullable_to_nonnull_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Int?) {
+    val y = x as Int
+}`
+		);
+		int useless_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast")) useless_count++;
+		}
+		assert(useless_count == 0,
+			"x: Int? as Int should NOT be flagged (cast performs null check)");
+	};
+}
+
+fn void useless_cast_unrelated_types_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: String = "a"
+    val y = x as Int
+}`
+		);
+		int useless_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast")) useless_count++;
+		}
+		assert(useless_count == 0,
+			"x: String as Int should NOT be flagged (different types)");
+	};
+}
+
+fn void useless_cast_supertype_to_subtype_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Any) {
+    val y = x as Int
+}`
+		);
+		int useless_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Useless cast")) useless_count++;
+		}
+		assert(useless_count == 0,
+			"x: Any as Int should NOT be flagged (downcast is meaningful)");
+	};
+}
+
+fn void useless_cast_carries_unnecessary_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    val y = x as Int
+}`
+		);
+		bool found_with_tag = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* d = result.get_at(i);
+			String msg = d.get_string("message") ?? "";
+			if (!msg.contains("Useless cast")) continue;
+			Object* tags = d.get("tags") ?? null;
+			if (tags == null) continue;
+			for (usz t = 0; t < tags.get_len(); t++) {
+				int tag_val = tags.get_int_at(t) ?? 0;
+				if (tag_val == 1) { found_with_tag = true; break; }
+			}
+			if (found_with_tag) break;
+		}
+		assert(found_with_tag,
+			"Useless cast diagnostic should include Unnecessary tag (1) for editor strikethrough");
+	};
+}
+
+fn void private_var_member_can_be_val() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun read(): Int = x
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged = true;
+		}
+		assert(flagged, "private var x (read-only) should be flagged");
+	};
+}
+
+fn void private_var_member_reassigned_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun mutate() { x = 2 }
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0, "private var reassigned bare should NOT be flagged");
+	};
+}
+
+fn void private_var_member_reassigned_via_this_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun mutate() { this.x = 2 }
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0, "private var reassigned via this should NOT be flagged");
+	};
+}
+
+fn void public_var_member_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    var x = 1
+    fun read(): Int = x
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"public var (no private modifier) should NOT be flagged — external mutation possible");
+	};
+}
+
+fn void internal_var_member_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    internal var x = 1
+    fun read(): Int = x
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"internal var should NOT be flagged — module-wide mutation possible");
+	};
+}
+
+fn void private_lateinit_var_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private lateinit var x: String
+    fun read(): String = x
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"private lateinit var should NOT be flagged — lateinit semantic requires var");
+	};
+}
+
+fn void private_var_with_postfix_increment_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun inc() { x++ }
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"private var with x++ should NOT be flagged — postfix is a write");
+	};
+}
+
+fn void private_var_in_object_can_be_val() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`object Singleton {
+    private var counter = 0
+    fun get(): Int = counter
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'counter' can be 'val'")) flagged = true;
+		}
+		assert(flagged, "private var in object (singleton) should also be flagged");
+	};
+}
+
+fn void redund_type_check_is_int_always_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is Int) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always true") && msg.contains("Int")) flagged = true;
+		}
+		assert(flagged, "x: Int 'is Int' should be flagged always true");
+	};
+}
+
+fn void redund_type_check_subtype_always_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is Number) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always true") && msg.contains("Number")) flagged = true;
+		}
+		assert(flagged, "x: Int 'is Number' should be flagged always true (Int <: Number)");
+	};
+}
+
+fn void redund_type_check_neg_is_always_false() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x !is Int) println("never")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always false") && msg.contains("Int")) flagged = true;
+		}
+		assert(flagged, "x: Int '!is Int' should be flagged always false");
+	};
+}
+
+fn void redund_type_check_downcast_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Any) {
+    if (x is Int) println("y")
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"x: Any 'is Int' should NOT be flagged (downcast is meaningful)");
+	};
+}
+
+fn void redund_type_check_nullable_to_nonnull_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Int?) {
+    if (x is Int) println("y")
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"x: Int? 'is Int' should NOT be flagged (filters out null)");
+	};
+}
+
+fn void redund_type_check_unrelated_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is String) println("never")
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"x: Int 'is String' should NOT be flagged (unrelated, separate concern)");
+	};
+}
+
+fn void redund_type_check_carries_unnecessary_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is Int) println("y")
+}`
+		);
+		bool found_with_tag = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* d = result.get_at(i);
+			String msg = d.get_string("message") ?? "";
+			if (!msg.contains("Type check is always")) continue;
+			Object* tags = d.get("tags") ?? null;
+			if (tags == null) continue;
+			for (usz t = 0; t < tags.get_len(); t++) {
+				int tag_val = tags.get_int_at(t) ?? 0;
+				if (tag_val == 1) { found_with_tag = true; break; }
+			}
+			if (found_with_tag) break;
+		}
+		assert(found_with_tag,
+			"Redundant type check should include Unnecessary tag (1)");
 	};
 }

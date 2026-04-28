@@ -343,3 +343,108 @@ fn void callable_ref_includes_member_usages() @test {
 		assert(total >= 3, "expected >= 3 references for callable-ref member, got %d", (int)total);
 	};
 }
+
+// Cursor on the *declaration* itself must include the callable-ref usage.
+// This is the reverse of `callable_ref_includes_member_usages`: forward
+// path (use → decl) was the original bug; this verifies the symmetric
+// reverse path (decl → use) now also resolves through the same identity.
+fn void callable_ref_references_from_decl_site() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String file_a =
+			"class Header {\n"
+			"    companion object {\n"
+			"        fun fromString(s: String): Header = Header()\n"
+			"    }\n"
+			"}\n";
+		ws.index_file("file:///header.kt", file_a);
+		store.open("file:///header.kt", "kotlin", 1, file_a);
+
+		String file_b =
+			"fun useIt() { listOf(\"a\").map(Header::fromString) }\n";
+		ws.index_file("file:///use.kt", file_b);
+		store.open("file:///use.kt", "kotlin", 1, file_b);
+
+		// Cursor on `fromString` at decl site (line 2, col 12 — after "        fun ").
+		Object* params = make_params("file:///header.kt", 2, 12);
+		Object* result = references::handle_references(&store, &ws, params)!!;
+
+		assert(result != null, "expected references array");
+
+		// Walk results: at least one location must be in use.kt.
+		bool found_use = false;
+		usz n = result.get_len();
+		for (usz i = 0; i < n; i++) {
+			if (get_uri(result, i) == "file:///use.kt") {
+				found_use = true;
+				break;
+			}
+		}
+		assert(found_use, "expected refs from decl-site to include callable-ref usage in use.kt");
+	};
+}
+
+// Strict identity: two unrelated decls sharing a name must not cross-pollute.
+// `A.foo` and `B.foo` are distinct decls. Refs from `A::foo` must not include
+// `B::foo`. Verifies AST_NODE identity uses (uri, decl_idx) — name alone is not enough.
+fn void strict_identity_excludes_unrelated_same_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		// Two unrelated classes, both with a `foo` member.
+		String file_src =
+			"class A {\n"
+			"    companion object {\n"
+			"        fun foo(): Int = 1\n"
+			"    }\n"
+			"}\n"
+			"class B {\n"
+			"    companion object {\n"
+			"        fun foo(): Int = 2\n"
+			"    }\n"
+			"}\n"
+			"fun useA() { A::foo }\n"
+			"fun useB() { B::foo }\n";
+		ws.index_file("file:///ab.kt", file_src);
+		store.open("file:///ab.kt", "kotlin", 1, file_src);
+
+		// Cursor on `foo` in `A::foo` — line 10 (0-indexed), col where 'f' starts.
+		// "fun useA() { A::foo }"  — 'f' of foo at col 16.
+		Object* params = make_params("file:///ab.kt", 10, 16);
+		Object* result = references::handle_references(&store, &ws, params)!!;
+
+		assert(result != null, "expected references array");
+
+		// Every returned location must NOT be on a `B::foo` line or on B's decl.
+		// A's decl is line 2; A's usage line 10. B's decl line 7; B's usage line 11.
+		usz n = result.get_len();
+		for (usz i = 0; i < n; i++) {
+			int ln = get_line(result, i);
+			assert(ln != 7, "B's foo decl (line 7) must not be in A::foo refs");
+			assert(ln != 11, "B::foo usage (line 11) must not be in A::foo refs");
+		}
+		// Sanity: A's own decl + usage should be present.
+		bool found_decl = false;
+		bool found_usage = false;
+		for (usz i = 0; i < n; i++) {
+			int ln = get_line(result, i);
+			if (ln == 2) found_decl = true;
+			if (ln == 10) found_usage = true;
+		}
+		assert(found_decl, "expected A's foo decl (line 2) in refs");
+		assert(found_usage, "expected A::foo usage (line 10) in refs");
+	};
+}

@@ -13,6 +13,7 @@ fn ParseResult* do_parse_script(String src) {
 
 fn void free_result(ParseResult* r) {
 	for (uint i = 0; i < r.node_count; i++) {
+		if (r.nodes[i].kind == ANNOTATION_ENTRY) continue;
 		String ann = r.nodes[i].annotation_text;
 		if (ann.len > 0) {
 			bool has_space = false;

@@ -48,7 +48,7 @@ fn void DocumentStore.free(DocumentStore* self) {
 				mem::free(doc.cached_ast);
 			}
 			if (doc.cached_types != null) {
-				mem::free(doc.cached_types);
+				types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 			}
 			if (doc.cached_chunks != null) {
 				mem::free(doc.cached_chunks);
@@ -75,7 +75,7 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 			mem::free(old.cached_ast);
 		}
 		if (old.cached_types != null) {
-			mem::free(old.cached_types);
+			types::free_type_info(old.cached_types); mem::free(old.cached_types);
 		}
 		if (old.cached_chunks != null) {
 			mem::free(old.cached_chunks);
@@ -114,7 +114,7 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 			doc.cached_ast = null;
 		}
 		if (doc.cached_types != null) {
-			mem::free(doc.cached_types);
+			types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 			doc.cached_types = null;
 		}
 		if (doc.cached_chunks != null) {
@@ -147,7 +147,7 @@ fn void DocumentStore.invalidate_all_caches(DocumentStore* self) {
 				doc.cached_ast = null;
 			}
 			if (doc.cached_types != null) {
-				mem::free(doc.cached_types);
+				types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 				doc.cached_types = null;
 			}
 			if (doc.cached_chunks != null) {
@@ -209,7 +209,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 				// Incremental parse succeeded -- invalidate types only
 				// (types depend on the AST which was updated in-place)
 				if (doc.cached_types != null) {
-					mem::free(doc.cached_types);
+					types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 					doc.cached_types = null;
 				}
 				// Update name/type_text/extra_text String slices that point into
@@ -232,7 +232,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 				doc.cached_ast = null;
 			}
 			if (doc.cached_types != null) {
-				mem::free(doc.cached_types);
+				types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 				doc.cached_types = null;
 			}
 			if (doc.cached_chunks != null) {
@@ -374,7 +374,7 @@ fn void DocumentStore.close(DocumentStore* self, String uri) {
 			mem::free(doc.cached_ast);
 		}
 		if (doc.cached_types != null) {
-			mem::free(doc.cached_types);
+			types::free_type_info(doc.cached_types); mem::free(doc.cached_types);
 		}
 		if (doc.cached_chunks != null) {
 			mem::free(doc.cached_chunks);
@@ -407,7 +407,15 @@ fn ParseResult*? DocumentStore.get_ast(DocumentStore* self, String uri) {
 
 	if (doc.cached_ast == null) {
 		doc.cached_ast = mem::new(ParseResult);
-		parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"));
+
+		// Collect workspace-wide infix function names (other files only;
+		// same-file is auto-detected by parser pre-scan). Temp-allocated.
+		String[] ws_infix = {};
+		if (self.workspace != null) {
+			ws_infix = collect_workspace_infix_names(self.workspace, uri);
+		}
+
+		parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"), ws_infix);
 
 		// Build chunk map for incremental parsing
 		if (doc.cached_chunks == null) {
@@ -438,7 +446,11 @@ fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
 		// Ensure AST is available first
 		if (doc.cached_ast == null) {
 			doc.cached_ast = mem::new(ParseResult);
-			parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"));
+			String[] ws_infix = {};
+			if (self.workspace != null) {
+				ws_infix = collect_workspace_infix_names(self.workspace, uri);
+			}
+			parser::parse(doc.content, doc.cached_ast, uri.ends_with(".kts"), ws_infix);
 		}
 		doc.cached_types = mem::new(TypeInfo);
 		if (self.workspace != null) {
@@ -449,4 +461,27 @@ fn TypeInfo*? DocumentStore.get_types(DocumentStore* self, String uri) {
 	}
 
 	return doc.cached_types;
+}
+
+/**
+ * Collect names of `infix fun` declarations from across the workspace,
+ * excluding the file currently being parsed (its own infix fns are
+ * already discovered by the parser's same-file pre-scan).
+ *
+ * Returns a tmem-allocated slice; caller must hold a temp pool open.
+ * Used to inform `parser::parse` about cross-file user-defined infix
+ * operators so `a customOp b` is recognized in the Pratt loop.
+ */
+fn String[] collect_workspace_infix_names(WorkspaceIndex* ws, String exclude_uri) {
+	if (ws == null) return {};
+	List{String} names;
+	names.tinit();
+	for (usz i = 0; i < ws.symbols.len(); i++) {
+		WorkspaceSymbol* sym = &ws.symbols[i];
+		if (sym.name.len == 0) continue;       // tombstone
+		if (!sym.is_infix) continue;
+		if (sym.uri == exclude_uri) continue;  // same-file scanned by parser
+		names.push(sym.name);
+	}
+	return names.array_view();
 }

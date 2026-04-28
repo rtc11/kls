@@ -25,6 +25,7 @@ struct WorkspaceSymbol {
 	uint col;              // 0-based column
 	uint name_len;         // length of name for range building
 	bool is_private;       // declared with 'private' modifier (not importable)
+	bool is_infix;         // declared with 'infix' modifier (functions)
 	String[symbols::MAX_SUPERTYPES] supertypes;  // heap-copied supertype names
 	usz supertype_count;
 }
@@ -61,6 +62,30 @@ struct WorkspaceFile {
 	usz symbol_count;      // number of symbols from this file
 }
 
+// ── Cached parse result per file ───────────────────────────────────
+//
+// Pairs heap-owned source content with its ParseResult so AstNode
+// String fields (which borrow from `content`) stay valid for the
+// entry's lifetime. Used by cross-file resolution in definition.c3
+// to recover decl indices without disk I/O.
+
+struct AstCacheEntry {
+	String content;        // heap-copied source
+	ParseResult* pr;       // heap-allocated, parsed against `content`
+}
+
+// ── Cached typealias declaration ───────────────────────────────────
+//
+// Stores enough of a TYPEALIAS_DECL for cross-file unwrapping (Kotlin
+// spec §11.1.5). Looked up by alias name in WorkspaceIndex.typealiases.
+
+struct TypealiasInfo {
+	String name;                  // heap-copied alias name (e.g. "StringMap")
+	String aliased_type_text;     // heap-copied RHS (e.g. "Map<String, V>")
+	String[8] tp_names;           // heap-copied type-parameter names
+	usz tp_count;
+}
+
 // ── Workspace index ────────────────────────────────────────────────
 
 struct WorkspaceIndex {
@@ -71,7 +96,10 @@ struct WorkspaceIndex {
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
+	HashMap{String, uint} class_mod_flags;           // class name -> mod_flags of CLASS_DECL (MOD_ENUM, MOD_DATA, MOD_VALUE, etc.)
 	HashMap{String, List{String}} class_type_params; // class name -> generic type parameter names (e.g. MappedStream -> [K, V])
+	HashMap{String, AstCacheEntry} ast_cache; // uri -> cached (content, ParseResult) for cross-file lookups
+	HashMap{String, TypealiasInfo} typealiases; // alias name -> indexed typealias decl (Kotlin spec §11.1.5)
 	List{String} ext_cache_keys;                     // heap-allocated keys for extension entries
 	Classpath classpath;                      // resolved dependency JARs
 	DependencyIndex dep_index;                // indexed symbols from JARs
@@ -85,7 +113,10 @@ fn void WorkspaceIndex.init(WorkspaceIndex* self) {
 	self.name_index.init(mem);
 	self.super_index.init(mem);
 	self.member_cache.init(mem);
+	self.class_mod_flags.init(mem);
 	self.class_type_params.init(mem);
+	self.ast_cache.init(mem);
+	self.typealiases.init(mem);
 	self.ext_cache_keys.init(mem);
 	self.classpath.init();
 	self.dep_index.init();
@@ -185,12 +216,40 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 	};
 	self.class_type_params.free();
 
+	// class_mod_flags has only primitive uint values; HashMap key strings
+	// share storage with class names (no separate allocations to free).
+	self.class_mod_flags.free();
+
 	// Free heap-allocated extension cache keys
 	for (usz i = 0; i < self.ext_cache_keys.len(); i++) {
 		String k = self.ext_cache_keys[i];
 		if (k.len > 0) mem::free(k.ptr);
 	}
 	self.ext_cache_keys.free();
+
+	// Free ast_cache entries (heap content + ParseResult)
+	@pool() {
+		foreach (&entry : self.ast_cache.tvalues()) {
+			if (entry.content.len > 0) mem::free(entry.content.ptr);
+			if (entry.pr != null) {
+				entry.pr.free_errors();
+				mem::free(entry.pr);
+			}
+		}
+	};
+	self.ast_cache.free();
+
+	// Free typealias entries: name + aliased_type_text + tp_names are heap-copied.
+	@pool() {
+		foreach (&info : self.typealiases.tvalues()) {
+			if (info.name.len > 0) mem::free(info.name.ptr);
+			if (info.aliased_type_text.len > 0) mem::free(info.aliased_type_text.ptr);
+			for (usz i = 0; i < info.tp_count; i++) {
+				if (info.tp_names[i].len > 0) mem::free(info.tp_names[i].ptr);
+			}
+		}
+	};
+	self.typealiases.free();
 
 	self.classpath.free();
 	self.dep_index.free();
@@ -278,6 +337,13 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 					tparams.free();
 				}
 			}
+
+			// Record class mod_flags so cross-file resolvers can detect
+			// MOD_ENUM / MOD_DATA / MOD_VALUE for synthetic-member synthesis
+			// (Kotlin spec §11.2.4 data, §11.2.6 enum). Last-write wins on
+			// duplicate class names — acceptable since modifiers shouldn't
+			// vary across files for the same class.
+			self.class_mod_flags.set(class_name, n.mod_flags);
 
 			// Found the class — create member list
 			List{MemberDecl} members;
@@ -429,6 +495,24 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
 							};
 							valid = true;
 						}
+					case ENUM_ENTRY:
+						// Enum entries are accessible as ClassName.ENTRY
+						// cross-file (Kotlin spec §11.2.6). Type is the
+						// enclosing enum class itself; encoded as type_text
+						// so resolve_workspace_member_type handles it via
+						// the standard parse_type_text path.
+						m = {
+							.name = child.name.copy(mem),
+							.type_text = class_name.copy(mem),
+							.uri = uri.copy(mem),
+							.node_kind = ENUM_ENTRY,
+							.mod_flags = child.mod_flags,
+							.line = child.name_line,
+							.col = child.name_col,
+							.name_len = child.name_len,
+							.param_count = 0,
+						};
+						valid = true;
 					default:
 				}
 
@@ -526,6 +610,15 @@ fn void WorkspaceIndex.cache_class_members(WorkspaceIndex* self, String uri, Str
  */
 fn List{MemberDecl}*? WorkspaceIndex.lookup_members(WorkspaceIndex* self, String class_name) {
 	return self.member_cache.get_ref(class_name);
+}
+
+/**
+ * Look up the indexed mod_flags for a class declaration. Returns 0 when
+ * unknown. Used by cross-file resolvers to detect MOD_ENUM / MOD_DATA /
+ * MOD_VALUE without re-walking the AST.
+ */
+fn uint WorkspaceIndex.lookup_class_mod_flags(WorkspaceIndex* self, String class_name) {
+	return self.class_mod_flags.get(class_name) ?? 0;
 }
 
 /**
@@ -701,6 +794,7 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 			.col = buf[i].col,
 			.name_len = buf[i].len,
 			.is_private = buf[i].is_private,
+			.is_infix = buf[i].is_infix,
 			.supertype_count = buf[i].supertype_count,
 		};
 
@@ -751,6 +845,105 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
 
 	// Populate member cache for class-like declarations
 	self.cache_class_members(uri, content, &buf, count, start);
+
+	// Cache (content, ParseResult) for cross-file decl_idx recovery.
+	// Cleared and reparsed on every index_file call so AST stays in sync
+	// with the latest content. Source is heap-copied because AstNode
+	// String fields borrow from it.
+	self.cache_ast(uri, content);
+}
+
+/**
+ * Heap-copy `content`, parse it, and cache the (content, ParseResult)
+ * pair under `uri`. Frees any prior entry for this URI.
+ *
+ * The cached AST is consumed by `find_decl_idx_by_position` in
+ * definition.c3 to recover decl indices for cross-file lookups
+ * without forcing a disk read.
+ */
+fn void WorkspaceIndex.cache_ast(WorkspaceIndex* self, String uri, String content) {
+	// Free any prior entry
+	if (try old = self.ast_cache.get_ref(uri)) {
+		if (old.content.len > 0) mem::free(old.content.ptr);
+		if (old.pr != null) {
+			old.pr.free_errors();
+			mem::free(old.pr);
+		}
+	}
+
+	if (content.len == 0) {
+		self.ast_cache.remove(uri);
+		return;
+	}
+
+	String content_copy = content.copy(mem);
+	ParseResult* pr = mem::new(ParseResult);
+	parser::parse(content_copy, pr);
+
+	AstCacheEntry entry = { .content = content_copy, .pr = pr };
+	self.ast_cache.set(uri, entry);
+
+	// Index top-level TYPEALIAS_DECLs into the workspace alias map
+	// (Kotlin spec §11.1.5). Cross-file resolvers walk this for
+	// transparent member access through aliases declared in other files.
+	self.index_typealiases(pr);
+}
+
+/**
+ * Walk the parsed file looking for top-level TYPEALIAS_DECL nodes;
+ * record each as a TypealiasInfo in self.typealiases. Last-write-wins
+ * on duplicate names (alias names are global per Kotlin spec §11.1.5).
+ */
+fn void WorkspaceIndex.index_typealiases(WorkspaceIndex* self, ParseResult* pr) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != TYPEALIAS_DECL) continue;
+		if (n.name.len == 0 || n.type_text.len == 0) continue;
+		// Skip nested typealiases (only top-level supported)
+		if (n.parent < pr.node_count) {
+			NodeKind pk = pr.nodes[n.parent].kind;
+			if (pk == CLASS_DECL || pk == INTERFACE_DECL || pk == OBJECT_DECL) continue;
+		}
+
+		// Free old entry if re-indexing
+		if (try old = self.typealiases.get_ref(n.name)) {
+			if (old.name.len > 0) mem::free(old.name.ptr);
+			if (old.aliased_type_text.len > 0) mem::free(old.aliased_type_text.ptr);
+			for (usz k = 0; k < old.tp_count; k++) {
+				if (old.tp_names[k].len > 0) mem::free(old.tp_names[k].ptr);
+			}
+		}
+
+		TypealiasInfo info = {
+			.name = n.name.copy(mem),
+			.aliased_type_text = n.type_text.copy(mem),
+			.tp_count = 0,
+		};
+		// Collect TYPE_PARAM children
+		for (uint k = 0; k < pr.node_count && info.tp_count < 8; k++) {
+			if (pr.nodes[k].parent != i) continue;
+			if (pr.nodes[k].kind != TYPE_PARAM) continue;
+			if (pr.nodes[k].name.len == 0) continue;
+			info.tp_names[info.tp_count++] = pr.nodes[k].name.copy(mem);
+		}
+		self.typealiases.set(info.name, info);
+	}
+}
+
+/**
+ * Look up an indexed typealias by name. Returns null on miss.
+ */
+fn TypealiasInfo* WorkspaceIndex.lookup_typealias(WorkspaceIndex* self, String name) {
+	return self.typealiases.get_ref(name) ?? null;
+}
+
+/**
+ * Look up a cached ParseResult for a workspace file. Returns null when
+ * the URI hasn't been indexed (or had empty content).
+ */
+fn ParseResult*? WorkspaceIndex.get_cached_ast(WorkspaceIndex* self, String uri) {
+	AstCacheEntry* entry = self.ast_cache.get_ref(uri)!;
+	return entry.pr;
 }
 
 /**
@@ -758,6 +951,16 @@ fn void WorkspaceIndex.index_file(WorkspaceIndex* self, String uri, String conte
  * Frees heap strings, compacts the symbols list, and rebuilds indices.
  */
 fn void WorkspaceIndex.remove_file(WorkspaceIndex* self, String uri) {
+	// Invalidate cached AST entry for this file
+	if (try old = self.ast_cache.get_ref(uri)) {
+		if (old.content.len > 0) mem::free(old.content.ptr);
+		if (old.pr != null) {
+			old.pr.free_errors();
+			mem::free(old.pr);
+		}
+		self.ast_cache.remove(uri);
+	}
+
 	WorkspaceFile* wf = self.files.get_ref(uri) ?? null;
 	if (wf == null) {
 		return;
@@ -1030,6 +1233,25 @@ fn usz WorkspaceIndex.symbol_count(WorkspaceIndex* self) {
 		if (self.symbols[i].name.len > 0) count++;
 	}
 	return count;
+}
+
+/**
+ * Check if any indexed symbol with the given name is an `infix fun`.
+ * Used by parser to recognize cross-file user-defined infix calls in
+ * Pratt expression parsing (`a foo b`). O(matches) via name_index.
+ */
+fn bool WorkspaceIndex.is_infix_name(WorkspaceIndex* self, String name) {
+	if (try list_ref = self.name_index.get_ref(name)) {
+		List{usz}* list = list_ref;
+		for (usz i = 0; i < list.len(); i++) {
+			usz idx = (*list)[i];
+			if (idx >= self.symbols.len()) continue;
+			WorkspaceSymbol* sym = &self.symbols[idx];
+			if (sym.name.len == 0) continue; // tombstone
+			if (sym.kind == FUNCTION && sym.is_infix) return true;
+		}
+	}
+	return false;
 }
 
 // ── Workspace scanning ─────────────────────────────────────────────

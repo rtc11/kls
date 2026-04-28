@@ -1194,3 +1194,106 @@ fn void lambda_param_type_hint_cross_file_class_generic_substitution() @test {
 		assert(found, "expected ': StatusReply' hint via class generic V→StatusReply substitution");
 	};
 }
+
+// ── Lambda return type hints (multi-statement) ───────────────────
+
+fn void lambda_return_type_multi_statement() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun foo() {` "\n"
+			`    val f = {` "\n"
+			`        val x = 1` "\n"
+			`        x + 2` "\n"
+			`    }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
+		assert(result != null, "expected non-null result");
+
+		bool found = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			String label = get_hint_label(result, i);
+			if (label.contains("Int") && get_hint_line(result, i) == 4) {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected ': Int' return hint at line 4 (lambda close)");
+	};
+}
+
+fn void lambda_return_type_skips_single_statement() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun foo() {` "\n"
+			`    val f = { 42 }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
+		assert(result != null, "expected non-null result");
+
+		// Should NOT emit a return type hint at the lambda's closing brace
+		// (single-expression body — type already obvious).
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			int line = get_hint_line(result, i);
+			String label = get_hint_label(result, i);
+			// Hint on line 1 (the val f line) at the lambda close should NOT exist
+			// for return type. Type hint for `f` itself (after `f`) is fine.
+			// We check there is no label like ": Int" attached *inside* the lambda
+			// body close position. Crude check: a return hint is at end of line 1
+			// (col high). Skip if it's the val-type hint (just after `f`).
+			if (line == 1 && label == ": Int") {
+				int col = get_hint_character(result, i);
+				// val f hint position is right after `f` (col ~9). Lambda-close
+				// would be at col ~19. Reject anything > col 15.
+				assert(col < 15, "should not emit lambda-close return hint for single-expr lambda, got col %d", col);
+			}
+		}
+	};
+}
+
+fn void lambda_return_type_skips_unit() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String uri = "file:///test.kt";
+		String content =
+			`fun foo() {` "\n"
+			`    val f = {` "\n"
+			`        println("hi")` "\n"
+			`        println("bye")` "\n"
+			`    }` "\n"
+			`}`;
+		store.open(uri, "kotlin", 1, content);
+
+		Object* params = make_inlay_hint_params(uri, 0, 10);
+		Object* result = inlay_hints::handle_inlay_hints(&store, null, params) ?? null;
+		assert(result != null, "expected non-null result");
+
+		// Unit return — should NOT emit at lambda close (line 4)
+		for (usz i = 0; i < result.get_len(); i++) {
+			if (get_hint_kind(result, i) != 1) continue;
+			if (get_hint_line(result, i) != 4) continue;
+			String label = get_hint_label(result, i);
+			assert(!label.contains("Unit"), "should not emit Unit return hint, got '%s'", label);
+		}
+	};
+}

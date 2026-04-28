@@ -23,6 +23,7 @@ struct Symbol {
 	uint offset;
 	uint len;
 	bool is_private;       // declared with 'private' modifier
+	bool is_infix;         // declared with 'infix' modifier (functions only)
 	String[MAX_SUPERTYPES] supertypes;  // supertype names (slices into source)
 	usz supertype_count;
 }
@@ -46,26 +47,29 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 	usz count = 0;
 	int brace_depth = 0;  // track nesting: only top-level fun/val/var are importable
 	bool saw_private = false;  // track private modifier for current declaration
+	bool saw_infix = false;    // track infix modifier for current fun declaration
 
 	while (count < out_buf.len) {
 		Token tok = lex.next();
 		if (tok.kind == EOF) break;
 
 		// Track brace depth for nesting awareness
-		if (tok.kind == LCURL) { brace_depth++; saw_private = false; continue; }
-		if (tok.kind == RCURL) { if (brace_depth > 0) brace_depth--; saw_private = false; continue; }
+		if (tok.kind == LCURL) { brace_depth++; saw_private = false; saw_infix = false; continue; }
+		if (tok.kind == RCURL) { if (brace_depth > 0) brace_depth--; saw_private = false; saw_infix = false; continue; }
 
 		switch (tok.kind) {
 			case KW_FUN:
 				// Skip nested functions (local funs, class members -- members
 				// are found via member_cache from the full parser).
-				if (brace_depth > 0) { saw_private = false; break; }
+				if (brace_depth > 0) { saw_private = false; saw_infix = false; break; }
 				if (try sym = scan_fun_name(&lex)) {
 					sym.is_private = saw_private;
+					sym.is_infix = saw_infix;
 					out_buf[count] = sym;
 					count++;
 				}
 				saw_private = false;
+				saw_infix = false;
 
 		case KW_CLASS:
 			if (try sym = scan_simple_name(&lex, SymbolKind.CLASS)) {
@@ -147,7 +151,10 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 		case KW_INLINE:
 			nextcase;
 		case KW_INFIX:
-			nextcase;
+			// Tracked separately so we can flag the next fun as infix.
+			saw_infix = true;
+			break;
+
 		case KW_OPERATOR:
 			nextcase;
 		case KW_SUSPEND:
@@ -176,6 +183,7 @@ fn usz scan_declarations(String content, Symbol[] out_buf) {
 
 			default:
 				saw_private = false;
+				saw_infix = false;
 				break;
 		}
 	}

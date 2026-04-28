@@ -56,12 +56,25 @@ enum NodeKind : int {
 	BINARY_EXPR,         // expr op expr -- operator in extra_text
 	ASSIGNMENT_EXPR,     // expr = expr, expr += expr -- operator in extra_text
 	LAMBDA_EXPR,         // { params -> body } or { body }
+	ANONYMOUS_FUN_EXPR,  // fun(params): T { body } / fun(params) = expr -- expression form
 	CALLABLE_REF_EXPR,   // ::name or Type::name -- name in name field
 	STRING_TEMPLATE_EXPR,// "...$x...${expr}..."
 	OBJECT_EXPR,         // object : Type { body }
 	SPREAD_EXPR,         // *array
 	TYPE_CHECK_EXPR,     // expr is Type / expr !is Type
 	TYPE_CAST_EXPR,      // expr as Type / expr as? Type
+
+	// Annotations (children of declarations or FILE)
+	ANNOTATION_ENTRY,    // @Foo / @Foo("x") / @get:JvmName("y") / @[A B] expanded as siblings
+
+	// Call argument wrapper (child of CALL_EXPR for each parenthesized arg).
+	// Trailing lambdas are also wrapped in VALUE_ARGUMENT with extra_text == "trailing"
+	// to distinguish them from parenthesized args. Use `find_call_for_lambda` to walk
+	// from a LAMBDA_EXPR up to its enclosing CALL_EXPR (handles both forms).
+	// `name` field = arg name (empty if positional), `extra_text` = "*" if spread,
+	// "trailing" if trailing lambda, else "".
+	// Has exactly 1 child: the argument expression.
+	VALUE_ARGUMENT,
 
 	// Error recovery
 	ERROR_NODE,
@@ -287,6 +300,7 @@ fn bool is_expression(NodeKind kind) {
 		case BINARY_EXPR:
 		case ASSIGNMENT_EXPR:
 		case LAMBDA_EXPR:
+		case ANONYMOUS_FUN_EXPR:
 		case CALLABLE_REF_EXPR:
 		case STRING_TEMPLATE_EXPR:
 		case OBJECT_EXPR:
@@ -323,6 +337,141 @@ fn bool AstNode.has_annotation(AstNode* self, String name) {
 		if (word == name) return true;
 	}
 	return false;
+}
+
+/**
+ * Find the first ANNOTATION_ENTRY child whose simple name matches.
+ * Returns null fault if not found. Searches across all entries (handles
+ * cases where multiple annotations are attached to the same declaration).
+ */
+fn AstNode*? find_annotation(ParseResult* result, AstNode* parent, String simple_name) {
+	if (parent.child_count == 0) return NOT_FOUND~;
+	uint parent_idx = node_index(result, parent);
+	for (uint i = parent.children_start; i < result.node_count; i++) {
+		if (result.nodes[i].parent == parent_idx
+			&& result.nodes[i].kind == ANNOTATION_ENTRY
+			&& result.nodes[i].name == simple_name) {
+			return &result.nodes[i];
+		}
+	}
+	return NOT_FOUND~;
+}
+
+/**
+ * Get the use-site target of an ANNOTATION_ENTRY (e.g. "get", "set", "field",
+ * "param", "property", "receiver", "setparam", "delegate", "file").
+ * Returns empty string if no target was specified.
+ */
+fn String AstNode.annotation_target(AstNode* self) {
+	if (self.kind != ANNOTATION_ENTRY) return "";
+	return self.type_text;
+}
+
+// ── Call argument helpers ──────────────────────────────────────────
+
+/**
+ * Count VALUE_ARGUMENT children of a CALL_EXPR. Excludes trailing lambdas
+ * (which are direct LAMBDA_EXPR children, not wrapped in VALUE_ARGUMENT).
+ */
+fn uint count_call_args(ParseResult* result, uint call_idx) {
+	if (call_idx >= result.node_count) return 0;
+	AstNode* call = &result.nodes[call_idx];
+	if (call.child_count == 0) return 0;
+	uint count = 0;
+	for (uint i = call.children_start; i < result.node_count; i++) {
+		if (result.nodes[i].parent == call_idx
+			&& result.nodes[i].kind == VALUE_ARGUMENT) {
+			count++;
+		}
+	}
+	return count;
+}
+
+/**
+ * Get the expression child of a VALUE_ARGUMENT node, or NOT_FOUND.
+ * VALUE_ARGUMENT always has exactly 1 child: the argument expression.
+ */
+fn AstNode*? get_arg_expr(ParseResult* result, uint value_arg_idx) {
+	if (value_arg_idx >= result.node_count) return NOT_FOUND~;
+	AstNode* va = &result.nodes[value_arg_idx];
+	if (va.kind != VALUE_ARGUMENT || va.child_count == 0) return NOT_FOUND~;
+	for (uint i = va.children_start; i < result.node_count; i++) {
+		if (result.nodes[i].parent == value_arg_idx) {
+			return &result.nodes[i];
+		}
+	}
+	return NOT_FOUND~;
+}
+
+/**
+ * Get the expression child index of a VALUE_ARGUMENT node, or uint.max.
+ */
+fn uint get_arg_expr_idx(ParseResult* result, uint value_arg_idx) {
+	if (value_arg_idx >= result.node_count) return uint.max;
+	AstNode* va = &result.nodes[value_arg_idx];
+	if (va.kind != VALUE_ARGUMENT || va.child_count == 0) return uint.max;
+	for (uint i = va.children_start; i < result.node_count; i++) {
+		if (result.nodes[i].parent == value_arg_idx) {
+			return i;
+		}
+	}
+	return uint.max;
+}
+
+/**
+ * Whether a VALUE_ARGUMENT is named (has `name = expr` form). Returns
+ * the name slice, empty string if positional.
+ */
+fn String arg_name(AstNode* value_arg) {
+	if (value_arg.kind != VALUE_ARGUMENT) return "";
+	return value_arg.name;
+}
+
+/**
+ * Whether a VALUE_ARGUMENT is a spread (`*expr`).
+ */
+fn bool arg_is_spread(AstNode* value_arg) {
+	if (value_arg.kind != VALUE_ARGUMENT) return false;
+	return value_arg.extra_text == "*";
+}
+
+// ── PARAM helpers ──────────────────────────────────────────────────
+
+/**
+ * Get the source slice of a parameter's default value expression
+ * (the text after `=`), or empty if no default. Stored in PARAM.extra_text
+ * during parsing.
+ */
+fn String param_default_text(AstNode* param) {
+	if (param.kind != PARAM) return "";
+	return param.extra_text;
+}
+
+/**
+ * Whether a PARAM has a default value.
+ */
+fn bool param_has_default(AstNode* param) {
+	if (param.kind != PARAM) return false;
+	return param.extra_text.len > 0;
+}
+
+/**
+ * Walk up from a LAMBDA_EXPR (by index) to its enclosing CALL_EXPR.
+ * Handles both forms:
+ *   - Direct child of CALL_EXPR (legacy synthesized form)
+ *   - Wrapped in VALUE_ARGUMENT (parenthesized arg or trailing lambda)
+ * Returns the CALL_EXPR index, or NO_PARENT if no enclosing call.
+ */
+fn uint find_call_for_lambda(ParseResult* result, uint lambda_idx) {
+	if (lambda_idx >= result.node_count) return NO_PARENT;
+	uint parent = result.nodes[lambda_idx].parent;
+	if (parent == NO_PARENT) return NO_PARENT;
+	if (result.nodes[parent].kind == CALL_EXPR) return parent;
+	if (result.nodes[parent].kind == VALUE_ARGUMENT) {
+		uint gp = result.nodes[parent].parent;
+		if (gp != NO_PARENT && result.nodes[gp].kind == CALL_EXPR) return gp;
+	}
+	return NO_PARENT;
 }
 
 // ── Incremental parsing: node array manipulation ───────────────────

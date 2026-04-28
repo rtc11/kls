@@ -588,3 +588,65 @@ fn void hover_class_ref_does_not_leak_any_toString() @test {
 		}
 	};
 }
+
+// ── Object expression body member hover ───────────────────────────
+
+fn void hover_object_expr_body_member() @test {
+	// Hover on `o.extra` where `o = object : Greeter { val extra: Int = 42 }`.
+	// Should show extra: Int from the body, not bail or show Greeter members.
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String content =
+`interface Greeter { fun greet(): String }
+fun main() {
+    val o = object : Greeter {
+        override fun greet(): String = "hi"
+        val extra: Int = 42
+    }
+    o.extra
+}`;
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		// Cursor on 'extra' at line 6, col 6
+		Object* params = make_params("file:///main.kt", 6, 6);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		assert(result != null, "expected hover for object body member");
+		String value = get_hover_value(result);
+		assert(value.contains("extra") && value.contains("Int"),
+			"hover should mention 'extra' and 'Int', got: '%s'", value);
+	};
+}
+
+fn void hover_object_expr_anonymous_body_member() @test {
+	// Pure-anonymous (no supertype). Hover must still resolve.
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String content =
+`fun main() {
+    val o = object {
+        val name: String = "anon"
+    }
+    o.name
+}`;
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 4, 6);
+		Object* result = hover::handle_hover(&store, &ws, params) ?? null;
+		assert(result != null, "expected hover for anonymous object body member");
+		String value = get_hover_value(result);
+		assert(value.contains("name") && value.contains("String"),
+			"hover should mention 'name' and 'String', got: '%s'", value);
+	};
+}

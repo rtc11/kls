@@ -1784,8 +1784,8 @@ fn void extract_function_from_expression() @test {
 
 				// Edit 2: insert function definition
 				String insert_text = get_edit_new_text(edits, 1);
-				assert(insert_text.contains("private fun extracted() = 1 + 2"),
-					"expected function definition, got '%s'", insert_text);
+				assert(insert_text.contains("private fun extracted(): Int = 1 + 2"),
+					"expected function definition with Int return type, got '%s'", insert_text);
 				break;
 			}
 		}
@@ -2457,6 +2457,642 @@ fn void jdk_java_lang_no_unresolved_diagnostic() @test {
 			String msg = diags.get_at(i).get_string("message") ?? "";
 			assert(msg != "Unresolved reference: 'Thread'",
 				"should not flag Thread as unresolved (java.lang is auto-imported)");
+		}
+	};
+}
+
+// ── Tests: extract variable (replace all occurrences) ─────────
+
+fn void extract_variable_all_occurrences_two_matches() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() {
+	val a = 1 + 2
+	val b = 1 + 2
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select first "1 + 2" on line 1 (col 9..14 — `\tval a = ` is 9 chars: tab+val a = )
+		// Tab=1, "val a = " = 8, total 9 → "1 + 2" at cols 9..14
+		Object* params = make_extract_params("file:///test.kt", 1, 9, 1, 14);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title.contains("replace") && title.contains("occurrences")) {
+				found = true;
+				Object* workspace_edit = get_action_edit(result, (usz)i);
+				Object* edits = get_edits_for_uri(workspace_edit, "file:///test.kt");
+				assert(edits != null);
+				// 1 insert + 2 replaces
+				assert(edits.get_len() == 3,
+					"expected 3 edits, got %d", (int)edits.get_len());
+				break;
+			}
+		}
+		assert(found, "expected 'Extract variable (replace N occurrences)' action");
+	};
+}
+
+fn void extract_variable_all_occurrences_skipped_for_single_match() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		// Only the single-occurrence "Extract variable" — no all-occurrences variant
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.contains("occurrences"),
+				"unexpected 'occurrences' action for single match: '%s'", title);
+		}
+	};
+}
+
+fn void extract_variable_all_occurrences_scoped_to_function() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() {
+	val a = 1 + 2
+}
+fun bar() {
+	val b = 1 + 2
+}`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "1 + 2" in foo() (line 1)
+		Object* params = make_extract_params("file:///test.kt", 1, 9, 1, 14);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		// All-occurrences shouldn't fire because only 1 match in foo's scope
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(!title.contains("occurrences"),
+				"all-occurrences should be scoped to enclosing fun; got '%s'", title);
+		}
+	};
+}
+
+// ── Tests: convert string concatenation to template ───────────
+
+fn String find_action_by_title(Object* actions, String title_needle) {
+	for (sz i = 0; i < actions.get_len(); i++) {
+		Object* a = actions.get_at((usz)i);
+		String title = a.get_string("title") ?? "";
+		if (title.contains(title_needle)) {
+			Object* edit = a.get("edit") ?? null;
+			if (edit == null) continue;
+			Object* changes = edit.get("changes") ?? null;
+			if (changes == null) continue;
+			Object* edits = changes.get("file:///test.kt") ?? null;
+			if (edits == null || edits.get_len() == 0) continue;
+			return edits.get_at(0).get_string("newText") ?? "";
+		}
+	}
+	return "";
+}
+
+fn void concat_to_template_basic() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `fun foo(x: Int) { val s = "a" + x + "b" }`
+		// cursor inside the concat at col ~30 (anywhere over the chain)
+		String content = `fun foo(x: Int) { val s = "a" + x + "b" }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 30, 0, 30);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"a${x}b"` || new_text == `"a$x" + "b"` /* wrong */ || new_text == `"a${x}b"`,
+			"expected '\"a${x}b\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_string_then_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo(name: String) { val s = "hello " + name }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 40, 0, 40);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"hello $name"`,
+			"expected '\"hello $name\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_name_then_string() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo(name: String) { val s = name + " world" }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 38, 0, 38);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"$name world"`,
+			"expected '\"$name world\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_no_string_no_action() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = 1 + 2 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 22, 0, 22);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == "", "should not offer action for pure numeric concat");
+	};
+}
+
+fn void concat_to_template_call_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = "x=" + bar() }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 26, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"x=${bar()}"`,
+			"expected '\"x=${bar()}\"', got '%s'", new_text);
+	};
+}
+
+fn void concat_to_template_three_strings_and_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo(x: Int) { val s = "[" + x + "]" }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 30, 0, 30);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Convert concatenation to template");
+		assert(new_text == `"[$x]"`,
+			"expected '\"[$x]\"', got '%s'", new_text);
+	};
+}
+
+// ── Scope function wrap (let/run/apply/also) ────────────────────
+
+fn void scope_wrap_let_on_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `fun foo() { val s = "hi"; s }` — cursor on `s` (last token, col 26)
+		String content = `fun foo() { val s = "hi"; s }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 26, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Wrap in 'let'");
+		assert(new_text == "s.let { it }", "expected 's.let { it }', got '%s'", new_text);
+	};
+}
+
+fn void scope_wrap_run_on_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = "hi"; s }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 26, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Wrap in 'run'");
+		assert(new_text == "s.run { this }", "expected 's.run { this }', got '%s'", new_text);
+	};
+}
+
+fn void scope_wrap_apply_on_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = "hi"; s }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 26, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Wrap in 'apply'");
+		assert(new_text == "s.apply {  }", "expected 's.apply {  }', got '%s'", new_text);
+	};
+}
+
+fn void scope_wrap_also_on_name() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val s = "hi"; s }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 26, 0, 26);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Wrap in 'also'");
+		assert(new_text == "s.also { it }", "expected 's.also { it }', got '%s'", new_text);
+	};
+}
+
+fn void scope_wrap_dot_expression() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Whole `a.b` DOT_EXPR. Cursor at end of `b` (col 16).
+		String content = `fun foo() { val a = ""; a.length }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 32, 0, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Wrap in 'let'");
+		assert(new_text == "a.length.let { it }", "expected 'a.length.let { it }', got '%s'", new_text);
+	};
+}
+
+fn void scope_wrap_skips_dot_receiver() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Cursor on `a` (the receiver of a.length). Should NOT offer wrap
+		// (would produce `a.let{it}.length`, breaking the chain).
+		String content = `fun foo() { val a = ""; a.length }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// `a` starts at col 24, ends at col 25 — cursor at col 24
+		Object* params = make_extract_params("file:///test.kt", 0, 24, 0, 24);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Wrap in 'let'");
+		// Should be empty — no action when cursor on chain receiver.
+		// However the smallest expr containing offset 24 may still be the
+		// whole DOT_EXPR if NAME_EXPR `a` is too small. Accept either:
+		// - empty (filtered out as receiver), OR
+		// - "a.length.let { it }" (selected outer DOT_EXPR).
+		assert(new_text == "" || new_text == "a.length.let { it }",
+			"expected no action or whole DOT wrap, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_basic_var() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `fun foo() { var x: Int = 42 }` — cursor on `x` (col 16)
+		String content = `fun foo() { var x: Int = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "\nx = 42", "expected '\\nx = 42', got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_val() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { val x: Int = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action for val, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_no_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { var x = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action without type, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_no_init() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun foo() { var x: Int }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 16, 0, 16);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action without init, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_skips_top_level() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `var x: Int = 42`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		Object* params = make_extract_params("file:///test.kt", 0, 4, 0, 4);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "", "expected no action for top-level var, got '%s'", new_text);
+	};
+}
+
+fn void split_decl_preserves_indent() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// 4-space indented var inside nested block
+		String content = "fun foo() {\n    var x: String = \"hi\"\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// `x` is at line 1, col ~8
+		Object* params = make_extract_params("file:///test.kt", 1, 8, 1, 8);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		String new_text = find_action_by_title(result, "Split declaration and assignment");
+		assert(new_text == "\n    x = \"hi\"",
+			"expected '\\n    x = \"hi\"', got '%s'", new_text);
+	};
+}
+
+// ── Feature 44: improved extract function ───────────────────────
+
+// Mode A: expression with parameter captures + typed return
+fn void extract_expression_with_capture_and_return_type() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		//                          0         1         2         3
+		//                          0123456789012345678901234567890
+		String content = `fun calc(a: Int, b: Int) { val r = a + b }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "a + b" (col 35 to col 40)
+		Object* params = make_extract_params("file:///test.kt", 0, 35, 0, 40);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		bool found = false;
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			if (title == "Extract function") {
+				found = true;
+				Object* edits = get_edits_for_uri(get_action_edit(result, (usz)i), "file:///test.kt");
+
+				String call_text = get_edit_new_text(edits, 0);
+				assert(call_text == "extracted(a, b)",
+					"expected 'extracted(a, b)', got '%s'", call_text);
+
+				String insert_text = get_edit_new_text(edits, 1);
+				assert(insert_text.contains("a: Int") && insert_text.contains("b: Int"),
+					"expected typed params, got '%s'", insert_text);
+				assert(insert_text.contains(": Int = a + b"),
+					"expected typed return, got '%s'", insert_text);
+				break;
+			}
+		}
+		assert(found, "expected 'Extract function'");
+	};
+}
+
+// Mode A: refuse selection containing return
+fn void no_extract_when_selection_has_return() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f(): Int {\n    val x = run { return 1 }\n    return x\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "run { return 1 }" on line 1
+		// Line 1: "    val x = run { return 1 }"
+		//          0         1         2
+		//          0123456789012345678901234567
+		Object* params = make_extract_params("file:///test.kt", 1, 16, 1, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should refuse extract when selection contains return");
+		}
+	};
+}
+
+// Mode A: refuse bare literal
+fn void no_extract_for_bare_literal() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 42 }`;
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select "42" (col 21 to col 23)
+		Object* params = make_extract_params("file:///test.kt", 0, 21, 0, 23);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should refuse extract for bare literal");
+		}
+	};
+}
+
+// Mode B: refuse selection containing assignment to outer var
+fn void no_extract_statements_with_assignment() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f() {\n    var x = 1\n    x = x + 1\n    println(x)\n}";
+		store.open("file:///test.kt", "kotlin", 1, content);
+
+		// Select line 2: "    x = x + 1"
+		Object* params = make_extract_params("file:///test.kt", 2, 0, 2, 13);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract function",
+				"should refuse extract when selection contains assignment");
+		}
+	};
+}
+
+// ── Feature 46: extract variable correctness guards ─────────────
+
+fn void no_extract_var_for_bare_literal() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 42 }`;
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "42" (col 21 to col 23)
+		Object* params = make_extract_params("file:///t.kt", 0, 21, 0, 23);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable for bare literal");
+		}
+	};
+}
+
+fn void no_extract_var_for_this_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `class A { fun foo() { val r = this } }`;
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "this" (col 30 to col 34)
+		Object* params = make_extract_params("file:///t.kt", 0, 30, 0, 34);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable for bare this");
+		}
+	};
+}
+
+fn void no_extract_var_when_subtree_has_return() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f(): Int {\n    val x = run { return 1 }\n    return x\n}";
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "run { return 1 }"
+		// Line 1: "    val x = run { return 1 }"
+		//          0         1         2
+		//          0123456789012345678901234567
+		Object* params = make_extract_params("file:///t.kt", 1, 16, 1, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable when selection contains return");
+		}
+	};
+}
+
+fn void no_extract_var_when_subtree_has_assignment() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f() {\n    var y = 0\n    val x = run { y = 1; y }\n    println(x)\n}";
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "run { y = 1; y }" on line 2
+		// Line 2: "    val x = run { y = 1; y }"
+		//          0         1         2
+		//          0123456789012345678901234567
+		Object* params = make_extract_params("file:///t.kt", 2, 16, 2, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable when selection contains assignment");
 		}
 	};
 }

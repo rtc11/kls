@@ -3,6 +3,7 @@ module kls::kotlin::parser;
 import kls::kotlin::lexer;
 import kls::kotlin::token;
 import kls::kotlin::ast;
+import std::collections::list;
 
 // ── Parser struct ──────────────────────────────────────────────────
 
@@ -14,7 +15,32 @@ struct Parser {
 	ParseResult* result;
 	String last_annotations;  // set by parse_modifiers, read by declaration parsers
 	bool allow_angle_comparison;  // when true, treat < > as comparison in expressions
+	bool in_when_body;            // when true, break expression at newline-`is`/`!is` (Kotlin spec §16.30 entry separator)
 	bool is_script;  // when true, allow top-level statements/expressions (.kts files)
+
+	// User-defined infix function names. Populated by `parse()` from a quick
+	// pre-scan over `source` (same-file infix funs) AND from caller-provided
+	// workspace-wide infix names. Used by `is_user_defined_infix` to recognize
+	// `a foo b` style calls in the Pratt loop. Both slices are tcopy/tinit.
+	String[] same_file_infix;
+	String[] workspace_infix;
+
+	// Pending annotation source ranges captured by parse_modifiers, flushed
+	// into ANNOTATION_ENTRY child nodes by the declaration parser via
+	// begin_decl_children_with_annotations(decl_idx).
+	AnnotationRange[MAX_PENDING_ANNS] pending_anns;
+	uint pending_ann_count;
+}
+
+const uint MAX_PENDING_ANNS = 32;
+
+struct AnnotationRange {
+	uint start_offset;  // offset of '@'
+	uint end_offset;    // exclusive end (after closing ')' or end of name)
+	uint start_line;
+	uint start_col;
+	uint args_start;    // offset of '(' (0 if no args)
+	uint args_end;      // offset after ')' (0 if no args)
 }
 
 // ── Public entry point ─────────────────────────────────────────────
@@ -22,8 +48,15 @@ struct Parser {
 /**
  * Parse a complete Kotlin source file into the given ParseResult.
  * The result's node_count and error_count are reset to 0 before parsing.
+ *
+ * `workspace_infix`: optional slice of infix function names from other
+ * workspace files. Combined with same-file infix names (auto-detected
+ * by a pre-scan) so the Pratt loop recognizes user-defined infix calls
+ * like `a customOp b`. Default empty (parser uses only the hard-coded
+ * stdlib infix whitelist).
  */
-fn void parse(String source, ParseResult* result, bool is_script = false) {
+fn void parse(String source, ParseResult* result, bool is_script = false,
+		String[] workspace_infix = {}) {
 	result.node_count = 0;
 	result.error_count = 0;
 	result.is_script = is_script;
@@ -33,12 +66,80 @@ fn void parse(String source, ParseResult* result, bool is_script = false) {
 		.lexer = lexer::init(source),
 		.result = result,
 		.is_script = is_script,
+		.same_file_infix = scan_same_file_infix_names(source),
+		.workspace_infix = workspace_infix,
 	};
 
 	// Prime the parser with the first token
 	p.current = p.lexer.next();
 
 	p.parse_file();
+}
+
+/**
+ * One-pass scan over `source` collecting names of `infix fun` declarations.
+ * Used to populate Parser.same_file_infix so the Pratt loop can recognize
+ * forward-referenced infix calls inside the same file. Result allocated
+ * with tmem (request-scoped); caller must be inside a temp-allocator pool.
+ */
+fn String[] scan_same_file_infix_names(String source) {
+	List{String} names;
+	names.tinit();
+	Lexer lex = lexer::init(source);
+	bool saw_infix = false;
+	while (true) {
+		Token tok = lex.next();
+		if (tok.kind == EOF) break;
+		switch (tok.kind) {
+			case KW_INFIX:
+				saw_infix = true;
+			case KW_FUN:
+				if (saw_infix) {
+					// Skip optional `<T>` type params, optional `Receiver.`, then name.
+					Token t = lex.next();
+					if (t.kind == LANGLE) {
+						int depth = 1;
+						while (depth > 0) {
+							t = lex.next();
+							if (t.kind == EOF) return names.array_view();
+							if (t.kind == LANGLE) {
+								depth++;
+							} else if (t.kind == RANGLE) {
+								depth--;
+							}
+						}
+						t = lex.next();
+					}
+					// Skip receiver `Foo.` if present
+					if (t.kind == IDENTIFIER) {
+						Lexer save = lex;
+						Token after = lex.next();
+						if (after.kind == DOT) {
+							t = lex.next();
+						} else {
+							lex = save;
+						}
+					}
+					if (t.kind == IDENTIFIER) {
+						names.push(t.text);
+					}
+				}
+				saw_infix = false;
+			case KW_VAL:
+				nextcase;
+			case KW_VAR:
+				nextcase;
+			case KW_CLASS:
+				nextcase;
+			case KW_INTERFACE:
+				nextcase;
+			case KW_OBJECT:
+				saw_infix = false;
+			default:
+				break;
+		}
+	}
+	return names.array_view();
 }
 
 /**
@@ -126,6 +227,49 @@ fn bool Parser.peek_is_constructor(Parser* self) {
 	return next.kind == KW_CONSTRUCTOR;
 }
 
+/**
+ * Check if current IDENT is followed by `AT LCURL` on the same line.
+ * Used to detect labeled lambda expressions: `label@ { ... }`.
+ * Per Kotlin spec, no whitespace allowed between IDENT and `@`, but we
+ * relax to same-line check since the lexer emits a single AT token.
+ */
+fn bool Parser.peek_is_label_at_for_lambda(Parser* self) {
+	if (self.current.kind != IDENTIFIER) return false;
+	Lexer save = self.lexer;
+	Token at_tok = self.lexer.next();
+	bool result = false;
+	if (at_tok.kind == AT && at_tok.line == self.current.line) {
+		Token after = self.lexer.next();
+		if (after.kind == LCURL && after.line == at_tok.line) {
+			result = true;
+		}
+	}
+	self.lexer = save;
+	return result;
+}
+
+/**
+ * Check if current IDENT is followed by `AT (for|while|do)` on same line.
+ * Used to detect labeled loop statements: `outer@ for (...)`, `loop@ while (...)`,
+ * `block@ do { ... } while (...)`.  Kotlin spec §17.13 (labeled statements).
+ * Returns the loop's TokenKind via out-param, or sentinel EOF on miss.
+ */
+fn bool Parser.peek_is_label_at_for_loop(Parser* self, TokenKind* loop_kind) {
+	if (self.current.kind != IDENTIFIER) return false;
+	Lexer save = self.lexer;
+	Token at_tok = self.lexer.next();
+	bool result = false;
+	if (at_tok.kind == AT && at_tok.line == self.current.line) {
+		Token after = self.lexer.next();
+		if (after.kind == KW_FOR || after.kind == KW_WHILE || after.kind == KW_DO) {
+			result = true;
+			*loop_kind = after.kind;
+		}
+	}
+	self.lexer = save;
+	return result;
+}
+
 fn void Parser.expect(Parser* self, TokenKind kind) {
 	if (self.current.kind == kind) {
 		self.advance();
@@ -209,7 +353,9 @@ fn uint Parser.add_node(Parser* self, NodeKind kind) {
 /**
  * Adopt all unparented nodes in [start..node_count) as children of parent_idx.
  * Only nodes with parent == NO_PARENT become children (nested nodes already
- * have their parent set by inner parse calls).
+ * have their parent set by inner parse calls). Nodes already parented to
+ * parent_idx (e.g. ANNOTATION_ENTRY children pre-attached by
+ * begin_decl_children_with_annotations) are also counted.
  */
 fn void Parser.adopt_children(Parser* self, uint parent_idx, uint start) {
 	if (parent_idx == ast::OVERFLOW_NODE) return;
@@ -217,6 +363,8 @@ fn void Parser.adopt_children(Parser* self, uint parent_idx, uint start) {
 	for (usz i = start; i < self.result.node_count; i++) {
 		if (self.result.nodes[i].parent == ast::NO_PARENT) {
 			self.result.nodes[i].parent = parent_idx;
+			count++;
+		} else if (self.result.nodes[i].parent == parent_idx) {
 			count++;
 		}
 	}
@@ -305,13 +453,15 @@ fn void Parser.node_set_name(Parser* self, usz idx, Token tok) {
 fn void Parser.parse_file(Parser* self) {
 	uint file_idx = self.add_node(FILE);
 	self.node_start(file_idx, self.current);
-	uint children_start = self.result.node_count;
 
-	// Skip file-level annotations (e.g., @file:Suppress("UNCHECKED_CAST"))
-	// These can appear before the package declaration.
+	// Scan file-level annotations first (e.g., @file:Suppress("UNCHECKED_CAST"))
+	// so their source ranges land in the pending buffer; we then flush them as
+	// ANNOTATION_ENTRY children of FILE before capturing children_start.
 	while (self.at(AT) && self.is_file_annotation()) {
 		self.scan_annotation();
 	}
+	uint children_start = self.result.node_count;
+	self.flush_pending_annotations(file_idx);
 
 	// Optional package declaration
 	if (self.at(KW_PACKAGE)) {
@@ -460,6 +610,9 @@ fn uint Parser.parse_modifiers(Parser* self) {
 	int ann_count = 0;
 	DString multi_buf;
 
+	// Clear stale pending annotation ranges from a previous (failed/empty) modifier scan.
+	self.pending_ann_count = 0;
+
 	while (!self.at_eof()) {
 		// Annotations
 		if (self.at(AT)) {
@@ -555,8 +708,15 @@ fn bool Parser.is_file_annotation(Parser* self) {
  * Scan an annotation: @Name or @Name(...).
  * Also handles use-site targets: @file:Name, @get:Name, etc.
  * Returns the simple (last segment) annotation name, e.g. "Test" for @org.junit.Test.
+ *
+ * Records the full source range (from '@' through closing ')' if present)
+ * into the pending_anns buffer so a subsequent declaration parser can build
+ * ANNOTATION_ENTRY child nodes via begin_decl_children_with_annotations().
  */
 fn String Parser.scan_annotation(Parser* self) {
+	uint range_start = self.current.offset;
+	uint range_start_line = self.current.line;
+	uint range_start_col = self.current.col;
 	self.advance(); // consume '@'
 
 	// Consume the first identifier (annotation name or use-site target)
@@ -571,6 +731,31 @@ fn String Parser.scan_annotation(Parser* self) {
 	// If colon follows, the identifier was a use-site target (e.g. file:, get:)
 	// and the real annotation name comes after
 	if (self.eat(COLON)) {
+		// Bracketed form: @target:[A B C]
+		if (self.at(LSQUARE)) {
+			self.advance(); // consume '['
+			while (!self.at(RSQUARE) && !self.at_eof()) {
+				if (self.at_identifier()) {
+					name = self.current.text;
+					self.advance();
+					while (self.eat(DOT)) {
+						if (self.at_identifier()) {
+							name = self.current.text;
+							self.advance();
+						}
+					}
+					if (self.at(LPAREN)) {
+						self.skip_balanced_parens();
+					}
+				} else {
+					self.advance();
+				}
+			}
+			self.eat(RSQUARE);
+			uint range_end_b = self.previous.offset + self.previous.len;
+			self.record_pending_annotation(range_start, range_end_b, range_start_line, range_start_col, 0, 0);
+			return name;
+		}
 		if (self.at_identifier()) {
 			name = self.current.text;
 			self.advance();
@@ -587,11 +772,179 @@ fn String Parser.scan_annotation(Parser* self) {
 	}
 
 	// Skip annotation arguments
+	uint args_start = 0;
+	uint args_end = 0;
 	if (self.at(LPAREN)) {
+		args_start = self.current.offset;
 		self.skip_balanced_parens();
+		args_end = self.previous.offset + self.previous.len;
 	}
 
+	uint range_end = self.previous.offset + self.previous.len;
+	self.record_pending_annotation(range_start, range_end, range_start_line, range_start_col, args_start, args_end);
 	return name;
+}
+
+/**
+ * Push an annotation source range onto the pending buffer. Silently drops
+ * if buffer full (>32 anns on one declaration is unrealistic).
+ */
+fn void Parser.record_pending_annotation(Parser* self, uint start, uint end, uint line, uint col, uint args_start, uint args_end) {
+	if (self.pending_ann_count >= MAX_PENDING_ANNS) return;
+	self.pending_anns[self.pending_ann_count] = {
+		.start_offset = start,
+		.end_offset = end,
+		.start_line = line,
+		.start_col = col,
+		.args_start = args_start,
+		.args_end = args_end,
+	};
+	self.pending_ann_count++;
+}
+
+/**
+ * Capture children_start for a declaration AND emit any pending ANNOTATION_ENTRY
+ * child nodes (parent set to decl_idx) before child parsing begins. The pending
+ * buffer is cleared. Must be called exactly once per declaration immediately
+ * before any real children are parsed.
+ *
+ * Returns children_start (the index of the first ANNOTATION_ENTRY, or
+ * node_count if there are none).
+ */
+fn uint Parser.begin_decl_children_with_annotations(Parser* self, uint decl_idx) {
+	uint children_start = self.result.node_count;
+	self.flush_pending_annotations(decl_idx);
+	return children_start;
+}
+
+/**
+ * Flush all pending annotation source ranges into ANNOTATION_ENTRY child
+ * nodes parented to parent_idx. Clears the pending buffer.
+ */
+fn void Parser.flush_pending_annotations(Parser* self, uint parent_idx) {
+	uint count = self.pending_ann_count;
+	for (uint i = 0; i < count; i++) {
+		AnnotationRange r = self.pending_anns[i];
+		self.build_annotation_entry(parent_idx, r);
+	}
+	self.pending_ann_count = 0;
+}
+
+/**
+ * Build a single ANNOTATION_ENTRY node by re-lexing the captured source range.
+ * Parent is set to decl_idx. Use-site target (if any) goes into type_text;
+ * simple name into name; full dotted path into extra_text; arguments are
+ * parsed as expression children.
+ */
+fn void Parser.build_annotation_entry(Parser* self, uint decl_idx, AnnotationRange r) {
+	uint idx = self.add_node(ANNOTATION_ENTRY);
+	self.result.nodes[idx].parent = decl_idx;
+	self.result.nodes[idx].start_offset = r.start_offset;
+	self.result.nodes[idx].start_line = r.start_line;
+	self.result.nodes[idx].start_col = r.start_col;
+	self.result.nodes[idx].end_offset = r.end_offset;
+	// We don't track exact end line/col since the range is bounded; estimate.
+	self.result.nodes[idx].end_line = r.start_line;
+	self.result.nodes[idx].end_col = r.start_col + (r.end_offset - r.start_offset);
+
+	// Slice and re-lex
+	if (r.end_offset > r.start_offset && r.end_offset <= self.source.len) {
+		// Save outer parser state
+		Lexer save_lexer = self.lexer;
+		Token save_current = self.current;
+		Token save_previous = self.previous;
+
+		// Init a sub-lexer over a slice of the source (zero-copy via subview)
+		String slice = self.source[r.start_offset:r.end_offset - r.start_offset];
+		self.lexer = lexer::init(slice);
+		self.current = self.lexer.next();
+		self.previous = self.current;
+
+		// Parse: @ [target:] [path.]Name [( args )]
+		if (self.at(AT)) self.advance();
+
+		String target = "";
+		String simple = "";
+		uint path_start = self.current.offset;
+		Token last_ident = self.current;
+
+		if (self.at_identifier()) {
+			Token first = self.current;
+			self.advance();
+			if (self.at(COLON)) {
+				// Use-site target
+				target = first.text;
+				self.advance(); // consume ':'
+				if (self.at(LSQUARE)) {
+					// Bracketed form @target:[A B] -- store target only;
+					// the entries inside collapse into a single ANNOTATION_ENTRY
+					// here (richer modeling deferred).
+					self.advance();
+					if (self.at_identifier()) {
+						last_ident = self.current;
+						simple = self.current.text;
+						self.advance();
+						while (self.eat(DOT)) {
+							if (self.at_identifier()) {
+								last_ident = self.current;
+								simple = self.current.text;
+								self.advance();
+							}
+						}
+					}
+				} else if (self.at_identifier()) {
+					last_ident = self.current;
+					simple = self.current.text;
+					path_start = self.current.offset;
+					self.advance();
+				}
+			} else {
+				// No target -- first identifier is start of dotted path
+				last_ident = first;
+				simple = first.text;
+				path_start = first.offset;
+			}
+
+			while (self.eat(DOT)) {
+				if (self.at_identifier()) {
+					last_ident = self.current;
+					simple = self.current.text;
+					self.advance();
+				} else {
+					break;
+				}
+			}
+		}
+
+		// Capture full dotted path text from outer source (offsets relative to slice
+		// — slice starts at r.start_offset, so add it back)
+		uint path_end = self.previous.offset + self.previous.len;
+		if (path_end > path_start) {
+			uint abs_start = r.start_offset + path_start;
+			uint abs_end = r.start_offset + path_end;
+			if (abs_end <= self.source.len) {
+				self.result.nodes[idx].extra_text = self.source[abs_start:abs_end - abs_start];
+			}
+		}
+
+		self.result.nodes[idx].name = simple;
+		self.result.nodes[idx].name_offset = r.start_offset + last_ident.offset;
+		self.result.nodes[idx].name_line = last_ident.line;
+		self.result.nodes[idx].name_col = last_ident.col;
+		self.result.nodes[idx].name_len = last_ident.len;
+		self.result.nodes[idx].type_text = target;
+
+		// Argument list (if any) -- store raw source slice (including parens)
+		// in annotation_text. Full sub-AST parsing deferred to a later phase.
+		if (r.args_end > r.args_start && r.args_end <= self.source.len) {
+			self.result.nodes[idx].annotation_text = self.source[r.args_start:r.args_end - r.args_start];
+		}
+
+		// Restore outer parser state
+		self.lexer = save_lexer;
+		self.current = save_current;
+		self.previous = save_previous;
+	}
 }
 
 // ── Declaration dispatch ───────────────────────────────────────────
@@ -671,7 +1024,7 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
 		self.node_set_name(idx, name);
 	}
 
-	uint children_start = self.result.node_count;
+	uint children_start = self.begin_decl_children_with_annotations(idx);
 
 	// Type parameters: <T, R>
 	if (self.at(LANGLE)) {
@@ -734,7 +1087,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'fun'
 
-	uint children_start = self.result.node_count;
+	uint children_start = self.begin_decl_children_with_annotations(idx);
 
 	// Type parameters: <T>
 	if (self.at(LANGLE)) {
@@ -877,7 +1230,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'val' or 'var'
 
-	uint children_start = self.result.node_count;
+	uint children_start = self.begin_decl_children_with_annotations(idx);
 
 	// Type parameters: val <T> List<T>.first: T
 	if (self.at(LANGLE)) {
@@ -984,14 +1337,23 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 	}
 
 	// Property accessors: get() = ..., set(value) { ... }
-	// These are soft keywords, so they appear as KW_GET / KW_SET
-	while (self.at(KW_GET) || self.at(KW_SET)) {
+	// May be preceded by modifiers (private/protected/internal/public/inline/external)
+	// and annotations: `private set`, `@JvmName("getY") get`.
+	// These soft keywords appear as KW_GET / KW_SET.
+	while (self.at(KW_GET) || self.at(KW_SET)
+		|| self.is_accessor_with_modifiers_or_annotations()) {
 		self.parse_property_accessor();
 	}
 
 	// Delegation: by expression
 	if (self.eat(KW_BY)) {
-		self.parse_expression_body();
+		uint delegate_root = self.parse_expression(PREC_NONE);
+		self.eat(SEMICOLON);
+		// Tag the delegate root so the type system can distinguish
+		// `val x by lazy {...}` from `val x = lazy {...}`.
+		if (delegate_root < self.result.node_count) {
+			self.result.nodes[delegate_root].extra_text = "delegate";
+		}
 	}
 
 	self.adopt_children(idx, children_start);
@@ -1012,7 +1374,7 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 		self.node_set_name(idx, name);
 	}
 
-	uint children_start = self.result.node_count;
+	uint children_start = self.begin_decl_children_with_annotations(idx);
 
 	// Type parameters
 	if (self.at(LANGLE)) {
@@ -1044,7 +1406,7 @@ fn void Parser.parse_constructor_decl(Parser* self, uint mods) {
 	self.node_set_name(idx, self.current);
 	self.advance(); // consume 'constructor'
 
-	uint children_start = self.result.node_count;
+	uint children_start = self.begin_decl_children_with_annotations(idx);
 
 	// Parameters
 	if (self.at(LPAREN)) {
@@ -1085,7 +1447,7 @@ fn void Parser.parse_init_block(Parser* self) {
 	self.advance(); // consume 'init'
 
 	if (self.at(LCURL)) {
-		uint children_start = self.result.node_count;
+		uint children_start = self.begin_decl_children_with_annotations(idx);
 		self.parse_block();
 		self.adopt_children(idx, children_start);
 	}
@@ -1116,7 +1478,7 @@ fn void Parser.parse_companion_object(Parser* self, uint mods) {
 		self.result.nodes[idx].name = "Companion";
 	}
 
-	uint children_start = self.result.node_count;
+	uint children_start = self.begin_decl_children_with_annotations(idx);
 
 	// Super types
 	if (self.at(COLON)) {
@@ -1206,8 +1568,17 @@ fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
 	}
 
 	// Default value: = expression
+	// Capture the source slice in `extra_text` for hover/completion display.
+	// Sub-AST is not yet built (deferred); slice supports text-only display.
 	if (self.eat(ASSIGNMENT)) {
+		uint default_start = self.current.offset;
 		self.skip_param_default();
+		uint default_end = self.previous.offset + self.previous.len;
+		// Defensive: ensure end didn't roll back into nothing.
+		if (default_end > default_start && default_end <= self.source.len) {
+			self.result.nodes[idx].extra_text =
+				self.source[default_start:default_end - default_start];
+		}
 	}
 
 	self.node_end(idx);
@@ -1522,6 +1893,38 @@ fn void Parser.parse_block(Parser* self) {
  * Returns true if something was parsed, false otherwise.
  */
 fn bool Parser.parse_statement(Parser* self) {
+	// Labeled loop: `outer@ for (...)`, `loop@ while (...)`, `block@ do {...} while`
+	// (Kotlin spec §17.13). Detect before the switch since current token is IDENT.
+	{
+		TokenKind loop_kind;
+		if (self.peek_is_label_at_for_loop(&loop_kind)) {
+			Token label_tok = self.current;
+			self.advance(); // label IDENT
+			self.advance(); // AT
+			uint before = self.result.node_count;
+			switch (loop_kind) {
+				case KW_FOR:   self.parse_for_stmt();
+				case KW_WHILE: self.parse_while_stmt();
+				case KW_DO:    self.parse_do_while_stmt();
+				default: break;
+			}
+			// Stamp label name + extend start to cover the label, mirroring
+			// parse_labeled_lambda_expr. The stmt was just appended at `before`.
+			// Set name_* fields too so go-to-definition reports the label
+			// token position via build_location_from_node.
+			if (self.result.node_count > before) {
+				self.result.nodes[before].extra_text = label_tok.text;
+				self.result.nodes[before].start_offset = label_tok.offset;
+				self.result.nodes[before].name = label_tok.text;
+				self.result.nodes[before].name_offset = label_tok.offset;
+				self.result.nodes[before].name_line = label_tok.line;
+				self.result.nodes[before].name_col = label_tok.col;
+				self.result.nodes[before].name_len = (uint)label_tok.text.len;
+			}
+			return true;
+		}
+	}
+
 	switch (self.current.kind) {
 		case KW_VAL:
 			nextcase;
@@ -1641,10 +2044,12 @@ fn void Parser.parse_if_expr(Parser* self) {
 			self.result.error_count = save_error_count;
 
 			self.allow_angle_comparison = true;
-			self.advance(); // consume '('
-			if (!self.at(RPAREN) && !self.at_eof()) {
-				self.parse_expression(0);
-			}
+		self.advance(); // consume '('
+		if (!self.at(RPAREN) && !self.at_eof()) {
+			self.allow_angle_comparison = true;
+			self.parse_expression(0);
+			self.allow_angle_comparison = false;
+		}
 			self.allow_angle_comparison = false;
 
 			if (self.at(RPAREN)) {
@@ -1710,7 +2115,10 @@ fn void Parser.parse_when_expr(Parser* self) {
 		usz save_error_count = self.result.error_count;
 
 		self.advance(); // consume '('
-		if (!self.at(RPAREN) && !self.at_eof()) {
+		if (self.at(KW_VAL) || self.at(KW_VAR)) {
+			// when (val x = expr) -- subject binding (Kotlin spec §16.30)
+			self.parse_property_decl(ast::MOD_NONE);
+		} else if (!self.at(RPAREN) && !self.at_eof()) {
 			self.parse_expression(0);
 		}
 
@@ -1748,13 +2156,19 @@ fn void Parser.parse_when_expr(Parser* self) {
 
 			// Arrow: ->
 			if (self.eat(ARROW)) {
-				// Branch body: block or statement(s)
+				// Branch body: block or statement(s). Set in_when_body so the
+				// expression parser breaks at newline-`is`/`!is` to prevent
+				// the body from consuming the next entry's bare condition
+				// (Kotlin spec §16.30: each branch is separated by newline or `;`).
+				bool save_in_when_body = self.in_when_body;
+				self.in_when_body = true;
 				if (self.at(LCURL)) {
 					self.parse_block();
 				} else if (!self.at(RCURL) && !self.at_eof()) {
 					// Single expression/statement branch
 					self.parse_statement();
 				}
+				self.in_when_body = save_in_when_body;
 			}
 
 			self.adopt_children(entry_idx, entry_children_start);
@@ -2095,7 +2509,7 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
 			uint save_node_count = self.result.node_count;
 			usz save_error_count = self.result.error_count;
 
-			self.advance(); // consume '('
+		self.advance(); // consume '('
 			if (!self.at(RPAREN) && !self.at_eof()) {
 				self.parse_expression(0);
 			}
@@ -2103,33 +2517,33 @@ fn void Parser.parse_do_while_stmt(Parser* self) {
 			if (self.at(RPAREN)) {
 				// Expression parsing consumed the condition correctly
 				self.advance(); // consume ')'
-		} else {
-			// Rollback and retry with < > as comparison operators
-			self.lexer = save_lexer;
-			self.current = save_current;
-			self.previous = save_previous;
-			self.result.node_count = save_node_count;
-			self.result.error_count = save_error_count;
-
-			self.allow_angle_comparison = true;
-			self.advance(); // consume '('
-			if (!self.at(RPAREN) && !self.at_eof()) {
-				self.parse_expression(0);
-			}
-			self.allow_angle_comparison = false;
-
-			if (self.at(RPAREN)) {
-				self.advance(); // consume ')'
 			} else {
-				// Still can't parse -- final fallback to skipping
+				// Rollback and retry with < > as comparison operators
 				self.lexer = save_lexer;
 				self.current = save_current;
 				self.previous = save_previous;
 				self.result.node_count = save_node_count;
 				self.result.error_count = save_error_count;
-				self.skip_balanced_parens();
+
+				self.allow_angle_comparison = true;
+				self.advance(); // consume '('
+				if (!self.at(RPAREN) && !self.at_eof()) {
+					self.parse_expression(0);
+				}
+				self.allow_angle_comparison = false;
+
+				if (self.at(RPAREN)) {
+					self.advance(); // consume ')'
+				} else {
+					// Still can't parse -- final fallback to skipping
+					self.lexer = save_lexer;
+					self.current = save_current;
+					self.previous = save_previous;
+					self.result.node_count = save_node_count;
+					self.result.error_count = save_error_count;
+					self.skip_balanced_parens();
+				}
 			}
-		}
 		}
 	}
 
@@ -2222,9 +2636,10 @@ fn uint Parser.parse_return_expr(Parser* self) {
 	self.advance(); // consume 'return'
 	uint children_start = self.result.node_count;
 
-	// Optional label: @label
+	// Optional label: @label  -- store name in extra_text for go-to-def
 	if (self.eat(AT)) {
 		if (self.at_identifier()) {
+			self.result.nodes[idx].extra_text = self.current.text;
 			self.advance();
 		}
 	}
@@ -2275,9 +2690,13 @@ fn void Parser.parse_break_continue(Parser* self, NodeKind kind) {
 	self.node_start(idx, self.current);
 	self.advance(); // consume 'break' or 'continue'
 
-	// Optional label: @label
+	// Optional label: @label  -- store name in extra_text.
+	// Targets resolved by definition::find_label_target which walks enclosing
+	// FUN_DECL/LAMBDA_EXPR/FOR_STMT/WHILE_STMT/DO_WHILE_STMT for matching
+	// `name`/`extra_text`. See Kotlin spec §17.13 (labeled statements).
 	if (self.eat(AT)) {
 		if (self.at_identifier()) {
+			self.result.nodes[idx].extra_text = self.current.text;
 			self.advance();
 		}
 	}
@@ -2430,7 +2849,7 @@ fn uint Parser.parse_expression(Parser* self, int min_prec) {
 		// Only recognize a few well-known infix functions to avoid
 		// mistakenly treating statement-initial identifiers as infix calls.
 		if (prec == PREC_NONE && PREC_INFIX_CALL >= min_prec
-			&& is_known_infix_function(self.current.text)) {
+			&& self.is_user_or_known_infix(self.current.text)) {
 			prec = PREC_INFIX_CALL;
 		}
 
@@ -2438,6 +2857,11 @@ fn uint Parser.parse_expression(Parser* self, int min_prec) {
 
 		// Handle is/!is and as/as? specially (right side is a type, not expression)
 		if (self.current.kind == KW_IS || self.current.kind == NOT_IS) {
+			// In when-body context, a newline-separated `is`/`!is` starts the
+			// next entry's bare condition — don't consume it as part of this
+			// expression. Comparing token line of `is` to the previous token's
+			// line works because expression parser advances `previous` per token.
+			if (self.in_when_body && self.previous.line < self.current.line) break;
 			left = self.parse_type_check(left);
 			left = self.parse_postfix_chain(left);
 			continue;
@@ -2546,6 +2970,10 @@ fn uint Parser.parse_spread_expr(Parser* self) {
 fn uint Parser.parse_primary(Parser* self) {
 	switch (self.current.kind) {
 		case IDENTIFIER:
+			// Detect labeled lambda: `label@ { ... }` -- IDENT AT LCURL on same line.
+			if (self.peek_is_label_at_for_lambda()) {
+				return self.parse_labeled_lambda_expr();
+			}
 			return self.parse_name_expr();
 
 		case INTEGER_LITERAL:
@@ -2583,6 +3011,9 @@ fn uint Parser.parse_primary(Parser* self) {
 
 		case KW_OBJECT:
 			return self.parse_object_expr();
+
+		case KW_FUN:
+			return self.parse_anonymous_fun_expr();
 
 		case KW_IF:
 			return self.parse_if_as_expr();
@@ -2759,6 +3190,23 @@ fn uint Parser.parse_paren_expr(Parser* self) {
 }
 
 /**
+ * Parse a labeled lambda expression: `label@ { ... }`.
+ * Caller has already verified via `peek_is_label_at_for_lambda` that the
+ * current IDENT is followed by `AT LCURL` on the same line.
+ * Stores the label name in `LAMBDA_EXPR.extra_text` for `return@label` resolution.
+ */
+fn uint Parser.parse_labeled_lambda_expr(Parser* self) {
+	Token label_tok = self.current;
+	self.advance(); // consume label IDENT
+	self.advance(); // consume AT
+	uint idx = self.parse_lambda_expr();
+	self.result.nodes[idx].extra_text = label_tok.text;
+	// Extend start to cover the label so highlights/folds include it.
+	self.result.nodes[idx].start_offset = label_tok.offset;
+	return idx;
+}
+
+/**
  * Parse lambda expression: { body } or { params -> body }
  * Lambda parameters create PARAM child nodes.
  */
@@ -2795,6 +3243,77 @@ fn uint Parser.parse_lambda_expr(Parser* self) {
 	}
 
 	self.expect(RCURL);
+	self.adopt_children(idx, children_start);
+	self.node_end(idx);
+	return idx;
+}
+
+/**
+ * Parse anonymous function expression (Kotlin spec §17.7).
+ *
+ * Forms:
+ *   fun(params): ReturnType { body }
+ *   fun(params) = expr
+ *   fun name(params): T { body }       -- name is rare, allowed
+ *   fun Receiver.(params): T { body }  -- extension form (best-effort)
+ *
+ * Caller has already determined `fun` here begins an expression
+ * (not a top-level/local declaration).
+ */
+fn uint Parser.parse_anonymous_fun_expr(Parser* self) {
+	uint idx = self.add_node(ANONYMOUS_FUN_EXPR);
+	self.node_start(idx, self.current);
+	self.advance(); // consume 'fun'
+	uint children_start = self.result.node_count;
+
+	// Optional name (rare): fun foo() {...}
+	if (self.at_identifier() && !self.at(LPAREN)) {
+		// Could be either name or extension receiver. If next-after-ident is
+		// '.' or '?.' or '<', treat first ident as receiver (best-effort).
+		Token first = self.expect_identifier();
+		if (self.at(LANGLE)) {
+			uint recv_start = first.offset;
+			self.parse_type_args();
+			if (self.at(QUEST)) self.advance();
+			if (self.eat(DOT) || self.eat(SAFE_CALL)) {
+				uint recv_end = self.previous.offset;
+				self.result.nodes[idx].extra_text = self.source[recv_start:recv_end - recv_start];
+			}
+		} else if (self.eat(DOT) || self.eat(SAFE_CALL)) {
+			self.result.nodes[idx].extra_text = first.text;
+		} else {
+			// Plain name on anonymous fun
+			self.node_set_name(idx, first);
+		}
+	}
+
+	// Parameters: ( ... )
+	if (self.at(LPAREN)) {
+		self.advance(); // consume '('
+		while (!self.at(RPAREN) && !self.at_eof()) {
+			self.parse_param();
+			if (!self.eat(COMMA)) break;
+		}
+		self.expect(RPAREN);
+	}
+
+	// Optional return type: : Type
+	if (self.eat(COLON)) {
+		uint type_start = self.current.offset;
+		self.skip_type_ref();
+		uint type_end = self.previous.offset + self.previous.len;
+		if (type_end > type_start) {
+			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+		}
+	}
+
+	// Body: { block } or = expr  (both optional -- tolerate missing body)
+	if (self.at(LCURL)) {
+		self.parse_block();
+	} else if (self.eat(ASSIGNMENT)) {
+		self.parse_expression_body();
+	}
+
 	self.adopt_children(idx, children_start);
 	self.node_end(idx);
 	return idx;
@@ -3116,11 +3635,9 @@ fn uint Parser.parse_call_expr(Parser* self, uint left) {
 	self.advance(); // consume '('
 	uint children_start = self.result.node_count;
 
-	// Parse arguments
+	// Parse arguments — each wrapped in a VALUE_ARGUMENT node.
 	while (!self.at(RPAREN) && !self.at_eof()) {
-		// Named argument: name = expr
-		// Regular argument: expr
-		self.parse_expression(PREC_NONE);
+		self.parse_value_argument();
 		if (!self.eat(COMMA)) break;
 	}
 
@@ -3129,6 +3646,39 @@ fn uint Parser.parse_call_expr(Parser* self, uint left) {
 	self.result.nodes[idx].child_count += 1; // +1 for the callee already adopted
 	self.node_end(idx);
 	return idx;
+}
+
+/**
+ * Parse a single call argument and wrap it in a VALUE_ARGUMENT node.
+ * Forms:
+ *   expr            — positional
+ *   name = expr     — named (only if `name` is identifier-like and `=` follows)
+ *   *expr           — spread (vararg expansion)
+ * The VALUE_ARGUMENT has exactly one child: the argument expression.
+ */
+fn uint Parser.parse_value_argument(Parser* self) {
+	uint va_idx = self.add_node(VALUE_ARGUMENT);
+	self.node_start(va_idx, self.current);
+
+	// Detect named argument: IDENT '=' (but not '==')
+	if (self.at_identifier() && self.peek_is(ASSIGNMENT)) {
+		Token name_tok = self.current;
+		self.node_set_name(va_idx, name_tok);
+		self.advance(); // consume name
+		self.advance(); // consume '='
+	}
+
+	// Detect spread: '*expr'
+	if (self.at(MULT)) {
+		self.result.nodes[va_idx].extra_text = "*";
+		self.advance(); // consume '*'
+	}
+
+	uint expr_start = self.result.node_count;
+	self.parse_expression(PREC_NONE);
+	self.adopt_children(va_idx, expr_start);
+	self.node_end(va_idx);
+	return va_idx;
 }
 
 /**
@@ -3218,9 +3768,51 @@ fn uint Parser.parse_member_ref(Parser* self, uint left) {
 
 /**
  * Parse a trailing lambda: expr { ... }
- * Wraps expr + lambda into a CALL_EXPR.
+ *
+ * Two cases (Kotlin spec §11.1.5):
+ *   1. `left` is already a CALL_EXPR `foo(args)` — append the lambda
+ *      as a final VALUE_ARGUMENT to that same call. No wrapper node.
+ *   2. `left` is a NAME_EXPR / DOT_EXPR — synthesize a new CALL_EXPR
+ *      whose only argument is the trailing lambda (no parens form,
+ *      e.g. `runBlocking { ... }`).
+ *
+ * The lambda is wrapped in a VALUE_ARGUMENT (consistent with parenthesized
+ * args). VALUE_ARGUMENT.extra_text = "trailing" marks it as the trailing
+ * form so consumers can distinguish if needed.
  */
 fn uint Parser.parse_trailing_lambda(Parser* self, uint left) {
+	// Case 1: left is an existing CALL_EXPR — append lambda to it.
+	if (left < self.result.node_count
+		&& self.result.nodes[left].kind == CALL_EXPR
+		&& !self.call_has_trailing_lambda(left)) {
+		uint va_idx = self.add_node(VALUE_ARGUMENT);
+		self.node_start(va_idx, self.current);
+		self.result.nodes[va_idx].extra_text = "trailing";
+		self.result.nodes[va_idx].parent = left;
+
+		uint expr_start = self.result.node_count;
+		self.parse_lambda_expr();
+		// Adopt only the freshly-added lambda node(s) into VALUE_ARGUMENT
+		uint expr_count = 0;
+		for (uint i = expr_start; i < self.result.node_count; i++) {
+			if (self.result.nodes[i].parent == ast::NO_PARENT) {
+				self.result.nodes[i].parent = va_idx;
+				expr_count++;
+			}
+		}
+		self.result.nodes[va_idx].child_count = expr_count;
+		self.result.nodes[va_idx].children_start = expr_start;
+		self.node_end(va_idx);
+
+		// Bump the existing CALL_EXPR child count and extend its end span.
+		self.result.nodes[left].child_count += 1;
+		self.result.nodes[left].end_offset = self.result.nodes[va_idx].end_offset;
+		self.result.nodes[left].end_line = self.result.nodes[va_idx].end_line;
+		self.result.nodes[left].end_col = self.result.nodes[va_idx].end_col;
+		return left;
+	}
+
+	// Case 2: synthesize a new CALL_EXPR wrapping left + lambda-as-VALUE_ARGUMENT.
 	uint idx = self.add_node(CALL_EXPR);
 	self.result.nodes[idx].start_offset = self.result.nodes[left].start_offset;
 	self.result.nodes[idx].start_line = self.result.nodes[left].start_line;
@@ -3237,12 +3829,47 @@ fn uint Parser.parse_trailing_lambda(Parser* self, uint left) {
 
 	self.result.nodes[left].parent = idx;
 
+	// Wrap the trailing lambda in a VALUE_ARGUMENT.
 	uint children_start = self.result.node_count;
+	uint va_idx = self.add_node(VALUE_ARGUMENT);
+	self.node_start(va_idx, self.current);
+	self.result.nodes[va_idx].extra_text = "trailing";
+
+	uint expr_start = self.result.node_count;
 	self.parse_lambda_expr();
+	uint expr_count = 0;
+	for (uint i = expr_start; i < self.result.node_count; i++) {
+		if (self.result.nodes[i].parent == ast::NO_PARENT) {
+			self.result.nodes[i].parent = va_idx;
+			expr_count++;
+		}
+	}
+	self.result.nodes[va_idx].child_count = expr_count;
+	self.result.nodes[va_idx].children_start = expr_start;
+	self.node_end(va_idx);
+
 	self.adopt_children(idx, children_start);
 	self.result.nodes[idx].child_count += 1; // +1 for left already adopted
 	self.node_end(idx);
 	return idx;
+}
+
+/**
+ * Check whether a CALL_EXPR already has a trailing lambda (a VALUE_ARGUMENT
+ * child whose extra_text == "trailing", or a direct LAMBDA_EXPR child for
+ * back-compat with synthesized forms).
+ */
+fn bool Parser.call_has_trailing_lambda(Parser* self, uint call_idx) {
+	if (call_idx >= self.result.node_count) return false;
+	AstNode* call = &self.result.nodes[call_idx];
+	if (call.child_count == 0) return false;
+	for (uint i = call.children_start; i < self.result.node_count; i++) {
+		if (self.result.nodes[i].parent != call_idx) continue;
+		if (self.result.nodes[i].kind == LAMBDA_EXPR) return true;
+		if (self.result.nodes[i].kind == VALUE_ARGUMENT
+			&& self.result.nodes[i].extra_text == "trailing") return true;
+	}
+	return false;
 }
 
 /**
@@ -3529,6 +4156,66 @@ fn void Parser.skip_param_default(Parser* self) {
  * Skip a property accessor: get() = ... or set(value) { ... }
  */
 /**
+ * True if `kind` is a modifier keyword that may legally precede a property
+ * accessor (visibility, inline, external). See Kotlin spec §14.3.
+ */
+fn bool is_accessor_modifier_keyword(TokenKind kind) {
+	switch (kind) {
+		case KW_PRIVATE:
+		case KW_PROTECTED:
+		case KW_INTERNAL:
+		case KW_PUBLIC:
+		case KW_INLINE:
+		case KW_EXTERNAL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Lookahead: does the current token start an accessor with leading
+ * modifiers/annotations? Returns true if scanning past modifiers + annotations
+ * lands on KW_GET / KW_SET. Restores parser state in all cases.
+ */
+fn bool Parser.is_accessor_with_modifiers_or_annotations(Parser* self) {
+	if (!self.at(AT) && !is_accessor_modifier_keyword(self.current.kind)) {
+		return false;
+	}
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	uint save_pending = self.pending_ann_count;
+
+	bool found = false;
+	int budget = 16; // bound the scan so we never eat half a decl
+	while (budget-- > 0 && !self.at_eof()) {
+		if (self.at(AT)) {
+			// Skip annotation: @Name(args)?
+			self.advance();
+			if (self.at_identifier()) self.advance();
+			while (self.eat(DOT)) {
+				if (self.at_identifier()) self.advance();
+			}
+			if (self.at(LPAREN)) self.skip_balanced_parens();
+			continue;
+		}
+		if (is_accessor_modifier_keyword(self.current.kind)) {
+			self.advance();
+			continue;
+		}
+		break;
+	}
+	if (self.at(KW_GET) || self.at(KW_SET)) found = true;
+
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.pending_ann_count = save_pending;
+	return found;
+}
+
+/**
  * Parse a property accessor (get/set) into a FUN_DECL child node.
  *
  * Kotlin property accessors:
@@ -3545,6 +4232,23 @@ fn void Parser.parse_property_accessor(Parser* self) {
 	uint idx = self.add_node(FUN_DECL);
 	self.node_start(idx, self.current);
 	uint children_start = self.result.node_count;
+
+	// Optional accessor modifiers / annotations (e.g. `private set`, `@JvmName("x") get`).
+	// Reuses parse_modifiers; populates self.last_annotations + returns flag bits.
+	uint accessor_mods = ast::MOD_NONE;
+	if (self.at(AT) || is_accessor_modifier_keyword(self.current.kind)) {
+		accessor_mods = self.parse_modifiers();
+	}
+	self.result.nodes[idx].mod_flags = accessor_mods;
+	self.result.nodes[idx].annotation_text = self.last_annotations;
+
+	// After modifiers, must see KW_GET / KW_SET (else silently bail to avoid
+	// consuming tokens belonging to the next declaration).
+	if (!self.at(KW_GET) && !self.at(KW_SET)) {
+		self.adopt_children(idx, children_start);
+		self.node_end(idx);
+		return;
+	}
 
 	// Set name to "get" or "set"
 	self.node_set_name(idx, self.current);
@@ -3719,8 +4423,24 @@ fn bool is_known_infix_function(String text) {
 		case "until":    return true;
 		case "downTo":   return true;
 		case "step":     return true;
+		case "implies":  return true;  // kotlin.contracts: returns(...) implies (cond)
 		default:         return false;
 	}
+}
+
+/**
+ * Recognize a name as an infix call: hard-coded stdlib whitelist OR
+ * user-defined `infix fun` from same file or workspace.
+ */
+fn bool Parser.is_user_or_known_infix(Parser* self, String text) {
+	if (is_known_infix_function(text)) return true;
+	for (usz i = 0; i < self.same_file_infix.len; i++) {
+		if (self.same_file_infix[i] == text) return true;
+	}
+	for (usz i = 0; i < self.workspace_infix.len; i++) {
+		if (self.workspace_infix[i] == text) return true;
+	}
+	return false;
 }
 
 /**

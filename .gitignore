@@ -20,3 +20,9 @@ Thumbs.db
 
 # KLS debug server port file
 .kls-debug-port
+
+# Local TODO scratchpad
+TODO
+
+# Debug symbol bundles
+*.dSYM/

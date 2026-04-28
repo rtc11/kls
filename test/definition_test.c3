@@ -1945,3 +1945,99 @@ fun other_fn(module: String) {
 		assert(line == 7, "expected line 7 (Nob.module), got line %d (likely matched unrelated PARAM)", line);
 	};
 }
+
+// ── Labeled loops (Kotlin spec §17.13) ──────────────────────────────
+
+fn void definition_of_labeled_loop_break() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// `break@outer` should resolve to the labeled `for` loop.
+		String content = "fun f() {\n    outer@ for (i in 1..10) {\n        break@outer\n    }\n}";
+		store.open("file:///lbl.kt", "kotlin", 1, content);
+
+		// Cursor on `outer` after `break@` — line 2, col 14
+		Object* params = make_params("file:///lbl.kt", 2, 14);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected location for break@outer label target");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = (int)start.get_int("line")!!;
+		// `outer@ for` starts on line 1 (0-indexed). The label start was
+		// rewound by the parser (start_offset = label IDENT).
+		assert(line == 1, "expected line 1 (labeled for), got %d", line);
+	};
+}
+
+// ── Operator-token definition jump (Phase 6 of operator-call ticket) ──
+
+fn void definition_of_binary_plus_operator() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		// Vec.plus on line 1; cursor on `+` in `a + b` on line 4 col 14.
+		String content = "class Vec(val x: Int) {\n    operator fun plus(other: Vec): Vec = Vec(x + other.x)\n}\nfun f() {\n    val a = Vec(1); val b = Vec(2); val c = a + b\n}";
+		store.open("file:///op.kt", "kotlin", 1, content);
+
+		// Line 4: "    val a = Vec(1); val b = Vec(2); val c = a + b"
+		// `+` at col 46.
+		Object* params = make_params("file:///op.kt", 4, 46);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected definition for binary +");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = (int)start.get_int("line")!!;
+		// `plus` decl is on line 1
+		assert(line == 1, "expected line 1 (Vec.plus decl), got %d", line);
+	};
+}
+
+fn void definition_of_index_operator() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "class Box {\n    operator fun get(i: Int): Int = i\n}\nfun f() {\n    val b = Box(); val v = b[0]\n}";
+		store.open("file:///idx.kt", "kotlin", 1, content);
+
+		// `[` on line 4 — content "    val b = Box(); val v = b[0]"
+		// `[` at col 28.
+		Object* params = make_params("file:///idx.kt", 4, 28);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected definition for index [");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = (int)start.get_int("line")!!;
+		assert(line == 1, "expected line 1 (Box.get decl), got %d", line);
+	};
+}
+
+fn void definition_of_unary_increment_operator() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "class Counter(var n: Int) {\n    operator fun inc(): Counter = Counter(n + 1)\n}\nfun f() {\n    var c = Counter(0); c++\n}";
+		store.open("file:///inc.kt", "kotlin", 1, content);
+
+		// Line 4: "    var c = Counter(0); c++"
+		// `++` after `c` at col 25, so first `+` at col 25.
+		Object* params = make_params("file:///inc.kt", 4, 25);
+		Object* result = definition::handle_definition(&store, null, params)!!;
+		assert(result != null, "expected definition for ++");
+
+		Object* range = result.get("range")!!;
+		Object* start = range.get("start")!!;
+		int line = (int)start.get_int("line")!!;
+		assert(line == 1, "expected line 1 (Counter.inc decl), got %d", line);
+	};
+}

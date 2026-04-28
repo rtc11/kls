@@ -12,9 +12,12 @@ import kls::kotlin::stdlib;
 import kls::kotlin::jdk_symbols;
 import kls::kotlin::types;
 import kls::kotlin::symbols;
+import kls::kotlin::cfg;
+import kls::kotlin::flow;
 import kls::workspace;
 import kls::deps::jar_index;
 import kls::log;
+import kls::config;
 
 /**
  * Run the lexer on content and return a JSON array of LSP Diagnostic
@@ -112,6 +115,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	// Only when lexically clean, AST available, and workspace is known.
 	if (lexer_error_count == 0 && ast != null && workspace != null) {
 		add_unresolved_reference_diagnostics(diagnostics, content, ast, workspace);
+		if (config::missing_override_diagnostic_enabled()) {
+			add_missing_override_diagnostics(diagnostics, ast, workspace);
+		}
 	}
 
 	// ── Deprecated usage (DiagnosticTag.Deprecated) ──────────────
@@ -124,6 +130,17 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	// Flag val/var inside function bodies that are never read.
 	if (lexer_error_count == 0 && ast != null) {
 		add_unused_local_diagnostics(diagnostics, content, ast);
+		add_unused_parameter_diagnostics(diagnostics, content, ast);
+		if (config::var_can_be_val_diagnostic_enabled()) {
+			add_var_can_be_val_diagnostics(diagnostics, content, ast);
+		}
+		if (config::unused_private_diagnostic_enabled()) {
+			add_unused_private_decl_diagnostics(diagnostics, content, ast);
+		}
+		add_unit_typed_decl_diagnostics(diagnostics, ast);
+		if (config::can_be_const_diagnostic_enabled()) {
+			add_can_be_const_diagnostics(diagnostics, ast);
+		}
 	}
 
 	// ── Val reassignment (Error) ─────────────────────────────────
@@ -137,8 +154,72 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 	if (lexer_error_count == 0 && ast != null && ast.error_count == 0) {
 		if (type_info != null) {
 			add_type_mismatch_diagnostics(diagnostics, ast, type_info, workspace);
+			add_smart_cast_impossible_diagnostics(diagnostics, ast, type_info);
+			add_useless_cast_diagnostics(diagnostics, ast, type_info);
+			if (config::unnecessary_not_null_diagnostic_enabled()) {
+				add_unnecessary_not_null_diagnostics(diagnostics, ast, type_info);
+			}
+			if (config::redundant_null_check_diagnostic_enabled()) {
+				add_redundant_null_check_diagnostics(diagnostics, ast, type_info);
+			}
+			if (workspace != null) {
+				add_sealed_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
+				add_enum_exhaustive_diagnostics(diagnostics, ast, type_info, workspace);
+				add_redundant_else_when_diagnostics(diagnostics, ast, type_info, workspace);
+			}
 		}
-		add_unreachable_code_diagnostics(diagnostics, ast);
+		add_unreachable_code_diagnostics(diagnostics, ast, type_info);
+		if (type_info != null) {
+			add_unreachable_cfg_diagnostics(diagnostics, ast, type_info);
+			add_shortcircuit_nothing_diagnostics(diagnostics, ast, type_info);
+		}
+		if (config::foreach_loop_diagnostic_enabled()) {
+			add_foreach_loop_diagnostics(diagnostics, ast);
+		}
+		if (config::unrelated_equality_diagnostic_enabled() && type_info != null) {
+			add_unrelated_equality_diagnostics(diagnostics, ast, type_info);
+		}
+		if (config::redundant_when_else_only_diagnostic_enabled()) {
+			add_redundant_when_else_only_diagnostics(diagnostics, ast);
+		}
+		if (config::unreachable_catch_diagnostic_enabled()) {
+			add_unreachable_catch_diagnostics(diagnostics, ast);
+		}
+		if (type_info != null && config::unnecessary_safe_call_diagnostic_enabled()) {
+			add_unnecessary_safe_call_diagnostics(diagnostics, ast, type_info);
+		}
+		if (config::redundant_if_bool_diagnostic_enabled()) {
+			add_redundant_if_bool_diagnostics(diagnostics, ast);
+			add_redundant_when_bool_diagnostics(diagnostics, ast);
+		}
+		if (type_info != null && config::unnecessary_elvis_diagnostic_enabled()) {
+			add_unnecessary_elvis_diagnostics(diagnostics, ast, type_info);
+		}
+		if (config::empty_catch_diagnostic_enabled()) {
+			add_empty_catch_diagnostics(diagnostics, ast);
+		}
+		add_swallowed_catch_diagnostics(diagnostics, ast);
+		if (config::redundant_override_diagnostic_enabled()) {
+			add_redundant_override_diagnostics(diagnostics, ast);
+		}
+		if (config::redundant_bool_comparison_diagnostic_enabled()) {
+			add_redundant_bool_comparison_diagnostics(diagnostics, ast);
+		}
+		if (type_info != null && config::redundant_type_check_diagnostic_enabled()) {
+			add_redundant_type_check_diagnostics(diagnostics, ast, type_info);
+		}
+		if (type_info != null && config::redundant_explicit_type_diagnostic_enabled()) {
+			add_redundant_explicit_type_diagnostics(diagnostics, ast, type_info);
+		}
+		if (type_info != null && config::redundant_return_type_diagnostic_enabled()) {
+			add_redundant_return_type_diagnostics(diagnostics, ast, type_info);
+		}
+		if (type_info != null && config::arithmetic_op_mismatch_diagnostic_enabled()) {
+			add_arithmetic_op_mismatch_diagnostics(diagnostics, ast, type_info);
+		}
+		if (type_info != null && config::unsafe_nullable_call_diagnostic_enabled()) {
+			add_unsafe_nullable_call_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -728,31 +809,18 @@ fn void check_argument_type_mismatch(Object* diagnostics, ParseResult* ast, Type
 	String call_name = n.name;
 	if (call_name.len == 0) return;
 
-	// Collect argument nodes (expression children of CALL_EXPR, skip first = callee)
+	// Collect argument expression indices via VALUE_ARGUMENT wrappers.
+	// Trailing lambdas (direct LAMBDA_EXPR children of CALL_EXPR) are
+	// not part of the parenthesized list — skip them here.
 	uint[16] arg_indices;
 	usz arg_count = 0;
-	bool skipped_callee = false;
 	for (uint j = 0; j < ast.node_count; j++) {
 		if (ast.nodes[j].parent != idx) continue;
-		AstNode* child = &ast.nodes[j];
-		// Skip non-expression nodes
-		if (child.kind == NAME_EXPR || child.kind == LITERAL_EXPR ||
-		    child.kind == CALL_EXPR || child.kind == DOT_EXPR ||
-		    child.kind == BINARY_EXPR || child.kind == PREFIX_EXPR ||
-		    child.kind == STRING_TEMPLATE_EXPR || child.kind == LAMBDA_EXPR ||
-		    child.kind == THIS_EXPR || child.kind == SUPER_EXPR ||
-		    child.kind == PAREN_EXPR || child.kind == INDEX_EXPR ||
-		    child.kind == CALLABLE_REF_EXPR || child.kind == OBJECT_EXPR ||
-		    child.kind == TYPE_CAST_EXPR || child.kind == IF_EXPR ||
-		    child.kind == WHEN_EXPR || child.kind == TYPE_CHECK_EXPR) {
-			// Skip the first child (callee: NAME_EXPR or DOT_EXPR)
-			if (!skipped_callee) {
-				skipped_callee = true;
-				continue;
-			}
-			if (arg_count < 16) {
-				arg_indices[arg_count++] = j;
-			}
+		if (ast.nodes[j].kind != VALUE_ARGUMENT) continue;
+		uint expr_idx = ast::get_arg_expr_idx(ast, j);
+		if (expr_idx == uint.max) continue;
+		if (arg_count < 16) {
+			arg_indices[arg_count++] = expr_idx;
 		}
 	}
 	if (arg_count == 0) return;
@@ -940,9 +1008,64 @@ fn void check_workspace_arg_mismatch(Object* diagnostics, ParseResult* ast, Type
 // ── Unreachable code diagnostic ───────────────────────────────────
 
 /**
- * Flag statements after return/throw in the same block.
+ * Returns true if `node_idx`'s subtree contains a Nothing-typed expression
+ * that is unconditionally evaluated whenever `node_idx` is evaluated.
+ *
+ * Skips conditional-eval boundaries:
+ *  - LAMBDA_EXPR / ANONYMOUS_FUN_EXPR bodies (deferred / called zero+ times)
+ *  - IF_EXPR / WHEN_EXPR / TRY_EXPR branch bodies (only one branch runs)
+ *  - BINARY_EXPR with `||`, `&&`, `?:` (RHS may be skipped)
+ *
+ * Used by the AST-sibling pass to detect that e.g. `val x = TODO()` or
+ * `println(error("x"))` diverges, so the next sibling is unreachable.
  */
-fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) {
+fn bool subtree_unconditionally_diverges(ParseResult* ast, TypeInfo* ti, uint node_idx) {
+	if (ti == null) return false;
+	if (node_idx >= ast.node_count) return false;
+	if (ti.has_type[node_idx] && ti.node_types[node_idx].kind == types::TypeKind.NOTHING) {
+		return true;
+	}
+	AstNode* n = &ast.nodes[node_idx];
+	// Boundaries: don't descend into deferred / branched children.
+	switch (n.kind) {
+		case LAMBDA_EXPR:
+		case ANONYMOUS_FUN_EXPR:
+		case IF_EXPR:
+		case WHEN_EXPR:
+		case WHEN_ENTRY:
+		case TRY_EXPR:
+		case CATCH_CLAUSE:
+			return false;
+		default:
+			break;
+	}
+	// Short-circuit operators: only LHS is unconditionally evaluated.
+	if (n.kind == BINARY_EXPR) {
+		String op = n.extra_text;
+		if (op == "&&" || op == "||" || op == "?:") {
+			// Find first child (LHS) and recurse only into it.
+			for (uint c = 0; c < ast.node_count; c++) {
+				if (ast.nodes[c].parent != node_idx) continue;
+				return subtree_unconditionally_diverges(ast, ti, c);
+			}
+			return false;
+		}
+	}
+	// Generic descent: any child diverging => stmt diverges.
+	// Children may have lower indices (DOT_EXPR receiver, BINARY_EXPR LHS,
+	// CALL_EXPR callee, etc.) — scan from 0.
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != node_idx) continue;
+		if (subtree_unconditionally_diverges(ast, ti, c)) return true;
+	}
+	return false;
+}
+
+/**
+ * Flag statements after return/throw/break/continue (or any expression of
+ * type Nothing) in the same block.
+ */
+fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
 	// For each BLOCK, find return/throw and flag subsequent siblings
 	for (uint i = 0; i < ast.node_count; i++) {
 		AstNode* n = &ast.nodes[i];
@@ -959,7 +1082,7 @@ fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) 
 			}
 		}
 
-		// Find first return/throw and flag everything after it
+		// Find first divergent stmt and flag everything after it
 		bool found_terminator = false;
 		for (usz c = 0; c < child_count; c++) {
 			uint child_idx = children[c];
@@ -979,9 +1102,91 @@ fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) 
 			if (child.kind == RETURN_EXPR || child.kind == THROW_EXPR ||
 			    child.kind == BREAK_EXPR || child.kind == CONTINUE_EXPR) {
 				found_terminator = true;
+			} else if (type_info != null && type_info.has_type[child_idx]) {
+				// Any expression of type Nothing diverges (e.g. error("..."), TODO()).
+				if (type_info.node_types[child_idx].kind == types::TypeKind.NOTHING) {
+					found_terminator = true;
+				} else if (subtree_unconditionally_diverges(ast, type_info, child_idx)) {
+					// Stmt itself isn't typed Nothing, but contains an
+					// unconditionally-evaluated Nothing sub-expression
+					// (val init, assignment RHS, call argument, ...).
+					found_terminator = true;
+				}
+			} else if (subtree_unconditionally_diverges(ast, type_info, child_idx)) {
+				found_terminator = true;
 			}
 		}
 	}
+}
+
+/**
+ * CFG-based unreachable detection. Catches cases the AST-sibling pass
+ * misses: `if (b) return else throw`, `when` whose every arm returns,
+ * etc. Walks each function's CFG, looking for STATEMENT / terminator
+ * CFG nodes whose in-state is TOP (never reached by the worklist
+ * solver) and emits a diagnostic at the corresponding AST node.
+ *
+ * Dedupes against the AST-sibling pass: skips when the parent block
+ * has a divergent prior sibling that the existing pass would already
+ * flag. Also dedupes within itself by tracking flagged AST indices.
+ */
+fn void add_unreachable_cfg_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
+	if (type_info == null) return;
+	bool[ast::MAX_NODES] flagged;
+	for (uint i = 0; i < type_info.func_flow_count; i++) {
+		FunctionFlow* ff = &type_info.func_flows[i];
+		if (ff.cfg == null || ff.fa == null) continue;
+		for (uint k = 0; k < ff.cfg.node_count; k++) {
+			CfgNode* cn = &ff.cfg.nodes[k];
+			switch (cn.kind) {
+				case STATEMENT:
+				case RETURN:
+				case THROW:
+				case BREAK:
+				case CONTINUE:
+					break;
+				default:
+					continue;
+			}
+			if (k == ff.cfg.entry) continue;
+			FlowState* in_s = &ff.fa.in_state[k];
+			if (!in_s.top) continue;
+			uint ast_idx = cn.ast_idx;
+			if (ast_idx >= ast.node_count) continue;
+			if (flagged[ast_idx]) continue;
+			// Skip cases the AST-sibling pass already handles.
+			if (ast_already_flagged_by_sibling_pass(ast, ast_idx)) continue;
+			AstNode* node = &ast.nodes[ast_idx];
+			Object* diag = make_diagnostic(node.start_line, node.start_col,
+				node.end_line, node.end_col, 2, "Unreachable code");
+			Object* tags = object::new_obj(tmem);
+			tags.push(object::new_int(1, tmem));
+			diag.set("tags", tags);
+			diagnostics.push(diag);
+			flagged[ast_idx] = true;
+		}
+	}
+}
+
+/**
+ * True when `node_idx` would already be flagged by the AST-sibling
+ * pass: there is a direct prior sibling in the same BLOCK that is a
+ * RETURN_EXPR / THROW_EXPR / BREAK_EXPR / CONTINUE_EXPR.
+ */
+fn bool ast_already_flagged_by_sibling_pass(ParseResult* ast, uint node_idx) {
+	uint parent = ast.nodes[node_idx].parent;
+	if (parent == ast::NO_PARENT || parent >= ast.node_count) return false;
+	if (ast.nodes[parent].kind != BLOCK) return false;
+	bool seen_terminator = false;
+	for (uint j = 0; j < ast.node_count; j++) {
+		if (ast.nodes[j].parent != parent) continue;
+		if (j == node_idx) return seen_terminator;
+		NodeKind k = ast.nodes[j].kind;
+		if (k == RETURN_EXPR || k == THROW_EXPR || k == BREAK_EXPR || k == CONTINUE_EXPR) {
+			seen_terminator = true;
+		}
+	}
+	return false;
 }
 
 // ── Receiver lambda member resolution ────────────────────────────
@@ -1011,14 +1216,7 @@ fn uint find_lambda_ancestor(ParseResult* ast, uint node_idx) {
  * Returns the CALL_EXPR index, or ast::NO_PARENT if not found.
  */
 fn uint find_call_parent_of_lambda(ParseResult* ast, uint lambda_idx) {
-	AstNode* lambda = &ast.nodes[lambda_idx];
-	if (lambda.parent == ast::NO_PARENT) return ast::NO_PARENT;
-
-	AstNode* parent = &ast.nodes[lambda.parent];
-	if (parent.kind == CALL_EXPR) {
-		return lambda.parent;
-	}
-	return ast::NO_PARENT;
+	return ast::find_call_for_lambda(ast, lambda_idx);
 }
 
 /**
@@ -1757,6 +1955,12 @@ fn bool is_local_property(ParseResult* ast, uint node_idx) {
 /**
  * Check if a local variable name is used (referenced) anywhere after its
  * declaration within its containing scope. Scans NAME_EXPR nodes.
+ *
+ * A "use" is any NAME_EXPR with the matching name that is NOT the LHS of a
+ * plain `=` ASSIGNMENT_EXPR. Compound assignments (`+=`, `-=`, etc.) and
+ * pre/postfix `++`/`--` are reads (they read the current value), so they
+ * count as uses. Pure write `x = expr` does not count — a `var` that is
+ * assigned but never read is still unused.
  */
 fn bool is_local_name_used(ParseResult* ast, uint decl_idx) {
 	AstNode* decl = &ast.nodes[decl_idx];
@@ -1769,13 +1973,22 @@ fn bool is_local_name_used(ParseResult* ast, uint decl_idx) {
 		AstNode* n = &ast.nodes[i];
 		if (n.kind != NAME_EXPR) continue;
 		if (n.name != name) continue;
+		if (n.start_offset <= decl.start_offset) continue;
 
-		// Verify this NAME_EXPR is within the same scope as the declaration
-		// by checking it shares a common scope ancestor
-		// Simple approach: if start_offset > decl end_offset and same-ish scope, it's a use
-		// But for correctness, just check that ANY NAME_EXPR with same name exists
-		// after the declaration offset
-		if (n.start_offset > decl.start_offset) return true;
+		// Skip pure writes: parent is ASSIGNMENT_EXPR with `=` (not `+=`
+		// etc.) AND we are its LHS (first child).
+		uint p = n.parent;
+		if (p != ast::NO_PARENT && p < ast.node_count
+			&& ast.nodes[p].kind == ASSIGNMENT_EXPR
+			&& ast.nodes[p].extra_text == "=") {
+			uint first = ast::NO_PARENT;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == p) { first = j; break; }
+			}
+			if (first == i) continue; // pure-write LHS, not a read
+		}
+
+		return true;
 	}
 	return false;
 }
@@ -1832,6 +2045,402 @@ fn void add_unused_local_diagnostics(Object* diagnostics, String content, ParseR
 
 			diagnostics.push(diag);
 		}
+	}
+}
+
+// ── Var-can-be-val diagnostics ────────────────────────────────────
+
+/**
+ * Check if a local var is reassigned anywhere after its declaration.
+ * Reassignment forms:
+ *   - ASSIGNMENT_EXPR with LHS NAME_EXPR matching name (covers `=`, `+=`, etc.)
+ *   - PREFIX_EXPR with `++` or `--` operand a NAME_EXPR matching name
+ *   - POSTFIX_EXPR with `++` or `--` operand a NAME_EXPR matching name
+ *
+ * Member assignments (`obj.x = ...`) where LHS is DOT_EXPR are not
+ * counted as reassignments of a local var named the same.
+ */
+fn bool is_var_reassigned(ParseResult* ast, uint decl_idx) {
+	AstNode* decl = &ast.nodes[decl_idx];
+	String name = decl.name;
+	if (name.len == 0) return false;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.start_offset <= decl.start_offset) continue;
+
+		// Find LHS via first child of the operator node
+		uint lhs_idx = uint.max;
+		switch (n.kind) {
+			case ASSIGNMENT_EXPR:
+			case PREFIX_EXPR:
+			case POSTFIX_EXPR:
+				// First child is the target/operand
+				for (uint j = 1; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == i) {
+						lhs_idx = j;
+						break;
+					}
+				}
+				break;
+			default:
+				continue;
+		}
+
+		// For PREFIX/POSTFIX: only `++`/`--` mutate
+		if (n.kind == PREFIX_EXPR || n.kind == POSTFIX_EXPR) {
+			if (n.extra_text != "++" && n.extra_text != "--") continue;
+		}
+
+		if (lhs_idx == uint.max) continue;
+		AstNode* lhs = &ast.nodes[lhs_idx];
+		if (lhs.kind != NAME_EXPR) continue; // skip member assignment etc.
+		if (lhs.name != name) continue;
+
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Scan local `var` declarations in function bodies that are never
+ * reassigned and emit Hint diagnostics suggesting they be `val`.
+ * Also scan `private var` properties at class/object body level —
+ * private encapsulates mutation to the declaring class, so absence
+ * of in-class reassignment proves the property is effectively `val`.
+ *
+ * Skips: top-level/member properties (only locals are safe to flip
+ * without API impact), unused properties (already covered by the
+ * unused-local hint), destructuring decls, names starting with '_'.
+ * For private members also skips: lateinit, open, override, abstract,
+ * external, expect, const, has-custom-setter, delegated (`by`).
+ */
+fn void add_var_can_be_val_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if ((n.mod_flags & ast::MOD_VAR) == 0) continue;
+		if (n.name.len == 0) continue;
+		if (n.name == "(destructuring)") continue;
+		if (n.name[0] == '_') continue;
+
+		bool is_local = is_local_property(ast, i);
+		bool is_private_member = !is_local && is_private_class_member(ast, i);
+		if (!is_local && !is_private_member) continue;
+
+		// Local: skip if also unused — let unused-local diagnostic carry it
+		if (is_local && !is_local_name_used(ast, i)) continue;
+
+		// Private member: skip on intent-of-mutability flags
+		if (is_private_member) {
+			uint exclude = ast::MOD_LATEINIT | ast::MOD_OPEN | ast::MOD_OVERRIDE
+				| ast::MOD_ABSTRACT | ast::MOD_EXTERNAL | ast::MOD_EXPECT
+				| ast::MOD_CONST;
+			if ((n.mod_flags & exclude) != 0) continue;
+			if (property_has_custom_setter(ast, i)) continue;
+			if (property_is_delegated(ast, i)) continue;
+			if (is_private_member_reassigned(ast, i)) continue;
+		} else {
+			if (is_var_reassigned(ast, i)) continue;
+		}
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Variable '%s' can be 'val'", n.name);
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+// True if PROPERTY_DECL is a member of a class/object/companion (not top-level,
+// not local, not interface) AND has MOD_PRIVATE set.
+fn bool is_private_class_member(ParseResult* ast, uint node_idx) {
+	AstNode* n = &ast.nodes[node_idx];
+	if (n.kind != PROPERTY_DECL) return false;
+	if ((n.mod_flags & ast::MOD_PRIVATE) == 0) return false;
+
+	// Walk parent chain: must hit class-like before FILE or function-like.
+	uint cur = n.parent;
+	while (cur != ast::NO_PARENT) {
+		AstNode* p = &ast.nodes[cur];
+		switch (p.kind) {
+			case CLASS_DECL:
+			case OBJECT_DECL:
+			case COMPANION_OBJECT_DECL:
+				return true;
+			case INTERFACE_DECL:
+				return false; // interface vars semantically open
+			case FILE:
+			case FUN_DECL:
+			case LAMBDA_EXPR:
+			case INIT_BLOCK:
+				return false;
+			default:
+				break;
+		}
+		cur = p.parent;
+	}
+	return false;
+}
+
+// True if PROPERTY_DECL has a child FUN_DECL named "set" (custom setter).
+fn bool property_has_custom_setter(ParseResult* ast, uint prop_idx) {
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != prop_idx) continue;
+		if (n.kind != FUN_DECL) continue;
+		if (n.name == "set") return true;
+	}
+	return false;
+}
+
+// True if PROPERTY_DECL has a child marked as `by` delegate root.
+fn bool property_is_delegated(ParseResult* ast, uint prop_idx) {
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != prop_idx) continue;
+		if (n.extra_text == "delegate") return true;
+	}
+	return false;
+}
+
+// True if a private class member `name` is reassigned anywhere in the file
+// via either `name = ...` (bare from inside class) or `this.name = ...`.
+// Conservative: any in-file write counts. This is sound because private
+// scope is per-file (Kotlin treats top-level private as file-private and
+// member private as class-private; both are subsets of file-visible).
+fn bool is_private_member_reassigned(ParseResult* ast, uint decl_idx) {
+	AstNode* decl = &ast.nodes[decl_idx];
+	String name = decl.name;
+	if (name.len == 0) return false;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		uint lhs_idx = uint.max;
+		switch (n.kind) {
+			case ASSIGNMENT_EXPR:
+			case PREFIX_EXPR:
+			case POSTFIX_EXPR:
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == i) {
+						lhs_idx = j;
+						break;
+					}
+				}
+				break;
+			default:
+				continue;
+		}
+
+		if (n.kind == PREFIX_EXPR || n.kind == POSTFIX_EXPR) {
+			if (n.extra_text != "++" && n.extra_text != "--") continue;
+		}
+
+		if (lhs_idx == uint.max) continue;
+		AstNode* lhs = &ast.nodes[lhs_idx];
+
+		// Bare-name LHS
+		if (lhs.kind == NAME_EXPR && lhs.name == name) return true;
+
+		// this.name LHS (DOT_EXPR with THIS_EXPR receiver, dot-name == name)
+		if (lhs.kind == DOT_EXPR && lhs.name == name) {
+			// Find receiver child (DOT_EXPR re-parents left, may be lower idx)
+			uint recv_idx = uint.max;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == lhs_idx) {
+					recv_idx = j;
+					break;
+				}
+			}
+			if (recv_idx != uint.max && ast.nodes[recv_idx].kind == THIS_EXPR) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// ── Unused parameter diagnostics ──────────────────────────────────
+
+/**
+ * Check if a PARAM's enclosing function-like decl is in a context where
+ * unreferenced parameters are normal: override, open, abstract, external,
+ * expect, operator, or interface body.
+ */
+fn bool param_in_skip_context(ParseResult* ast, uint param_idx) {
+	AstNode* p = &ast.nodes[param_idx];
+	uint cur = p.parent;
+	while (cur != ast::NO_PARENT) {
+		AstNode* n = &ast.nodes[cur];
+		switch (n.kind) {
+			case FUN_DECL:
+				uint flags = n.mod_flags;
+				if ((flags & ast::MOD_OVERRIDE) != 0) return true;
+				if ((flags & ast::MOD_OPEN) != 0) return true;
+				if ((flags & ast::MOD_ABSTRACT) != 0) return true;
+				if ((flags & ast::MOD_EXTERNAL) != 0) return true;
+				if ((flags & ast::MOD_EXPECT) != 0) return true;
+				if ((flags & ast::MOD_OPERATOR) != 0) return true;
+				// Enclosing class is interface? Skip.
+				uint cls = n.parent;
+				while (cls != ast::NO_PARENT) {
+					AstNode* cn = &ast.nodes[cls];
+					if (cn.kind == INTERFACE_DECL) return true;
+					if (cn.kind == CLASS_DECL || cn.kind == OBJECT_DECL
+						|| cn.kind == COMPANION_OBJECT_DECL || cn.kind == FUN_DECL
+						|| cn.kind == FILE) break;
+					cls = cn.parent;
+				}
+				// FUN_DECL with no body: parser may still create FUN_DECL but
+				// without a BLOCK child. Skip in that case (abstract-like).
+				bool has_body = false;
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == cur && ast.nodes[j].kind == BLOCK) {
+						has_body = true;
+						break;
+					}
+				}
+				if (!has_body) return true;
+				return false;
+			case CONSTRUCTOR_DECL:
+				return false;
+			case LAMBDA_EXPR:
+			case ANONYMOUS_FUN_EXPR:
+				return true;
+			default:
+				break;
+		}
+		cur = n.parent;
+	}
+	return true;
+}
+
+// Find the function-like / scope-introducing ancestor that "owns" this PARAM.
+fn uint param_owner(ParseResult* ast, uint param_idx) {
+	uint cur = ast.nodes[param_idx].parent;
+	while (cur != ast::NO_PARENT) {
+		NodeKind k = ast.nodes[cur].kind;
+		if (k == FUN_DECL || k == CONSTRUCTOR_DECL || k == LAMBDA_EXPR
+			|| k == ANONYMOUS_FUN_EXPR || k == CATCH_CLAUSE || k == FOR_STMT) {
+			return cur;
+		}
+		cur = ast.nodes[cur].parent;
+	}
+	return ast::NO_PARENT;
+}
+
+// True if a closer scope between `use_idx` and `owner` rebinds `name`.
+fn bool name_shadowed_between(ParseResult* ast, uint use_idx, uint owner, String name) {
+	AstNode* use_n = &ast.nodes[use_idx];
+	uint cur = use_n.parent;
+	while (cur != ast::NO_PARENT && cur != owner) {
+		AstNode* n = &ast.nodes[cur];
+		switch (n.kind) {
+			case FUN_DECL:
+			case CONSTRUCTOR_DECL:
+			case LAMBDA_EXPR:
+			case ANONYMOUS_FUN_EXPR:
+			case CATCH_CLAUSE:
+			case FOR_STMT:
+				for (uint c = 0; c < ast.node_count; c++) {
+					if (ast.nodes[c].parent != cur) continue;
+					NodeKind ck = ast.nodes[c].kind;
+					if (ck == PARAM && ast.nodes[c].name == name) return true;
+					if (ck == PROPERTY_DECL && ast.nodes[c].name == name
+						&& ast.nodes[c].start_offset < use_n.start_offset) return true;
+				}
+			case BLOCK:
+				for (uint c = 0; c < ast.node_count; c++) {
+					if (ast.nodes[c].parent != cur) continue;
+					if (ast.nodes[c].kind != PROPERTY_DECL) continue;
+					if (ast.nodes[c].name != name) continue;
+					if (ast.nodes[c].start_offset < use_n.start_offset) return true;
+				}
+			default:
+				break;
+		}
+		cur = n.parent;
+	}
+	return false;
+}
+
+fn bool is_param_name_used(ParseResult* ast, uint param_idx) {
+	AstNode* p = &ast.nodes[param_idx];
+	String name = p.name;
+	if (name.len == 0) return true;
+	uint owner = param_owner(ast, param_idx);
+	for (uint i = 0; i < ast.node_count; i++) {
+		if (i == param_idx) continue;
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != NAME_EXPR) continue;
+		if (n.name != name) continue;
+		if (n.start_offset <= p.start_offset) continue;
+		if (owner != ast::NO_PARENT && name_shadowed_between(ast, i, owner, name)) continue;
+		return true;
+	}
+	return false;
+}
+
+fn void add_unused_parameter_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	if (!config::unused_parameter_diagnostic_enabled()) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PARAM) continue;
+		if (n.name.len == 0) continue;
+		if (n.name[0] == '_') continue;
+
+		// Primary-ctor val/var PARAM is a public property — skip.
+		// `val` PARAMs get MOD_FINAL (added by parse_primary_constructor),
+		// `var` PARAMs get MOD_VAR. Regular fn params have neither.
+		if ((n.mod_flags & (ast::MOD_FINAL | ast::MOD_VAR)) != 0) continue;
+
+		if (param_in_skip_context(ast, i)) continue;
+		if (is_param_name_used(ast, i)) continue;
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.name_line);
+		start.set("character", (int)n.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.name_line);
+		end_pos.set("character", (int)(n.name_col + n.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Parameter '%s' is never used", n.name);
+		diag.set("message", message.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
 	}
 }
 
@@ -1929,4 +2538,2791 @@ fn bool find_val_in_scope(ParseResult* ast, uint assignment_idx, String name) {
 	}
 
 	return false;
+}
+
+// ── Smart cast impossible (Warning) ──────────────────────────────
+//
+// When a flow fact would narrow `x` at a use site but the binding fails
+// the stability gate (e.g. captured local var, custom-getter property),
+// surface a warning so the user knows why their code still requires a
+// `?.` / `!!` / explicit cast.
+//
+// Gated by config::smart_cast_diagnostic_enabled().
+
+/**
+ * Walk every NAME_EXPR in the file. If a flow fact exists for the name
+ * at that use site AND the resolved declaration is unstable, emit a
+ * Warning-severity diagnostic.
+ */
+fn void add_smart_cast_impossible_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (!config::smart_cast_diagnostic_enabled()) return;
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+
+		// Bare-name use: `x` where x is a captured local var or other
+		// unstable binding.
+		if (node.kind == NAME_EXPR) {
+			if (node.name.len == 0) continue;
+
+			flow::Fact* fact = types::lookup_smart_cast_fact(ast, type_info, i, node.name);
+			if (fact == null) continue;
+			// Only flag facts that would actually narrow something.
+			if (fact.narrowed.kind == types::TypeKind.UNKNOWN && !fact.not_null) continue;
+
+			uint decl_idx = find_decl_for_name(ast, i, node.name);
+			if (decl_idx == ast::NO_PARENT) continue;
+			if (types::is_stable_for_smart_cast(ast, type_info, decl_idx, i)) continue;
+
+			emit_smart_cast_impossible(diagnostics, node, node.name, fact, node.start_col, node.start_col + node.name.len);
+			continue;
+		}
+
+		// Member-access use: `b.x` where receiver is a bare NAME_EXPR or
+		// THIS_EXPR. Skip uses on the LHS of an assignment (writes don't
+		// need a smart cast).
+		if (node.kind == DOT_EXPR && node.name.len > 0) {
+			// Find the receiver child.
+			uint recv_idx = ast::NO_PARENT;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == i) { recv_idx = j; break; }
+			}
+			if (recv_idx == ast::NO_PARENT) continue;
+			AstNode* rn = &ast.nodes[recv_idx];
+			if (rn.kind != NAME_EXPR && rn.kind != THIS_EXPR) continue;
+			String recv_name = rn.kind == THIS_EXPR ? "this" : rn.name;
+			if (recv_name.len == 0) continue;
+
+			// Skip writes: parent is ASSIGNMENT_EXPR and we're its LHS.
+			uint p = node.parent;
+			if (p != ast::NO_PARENT && p < ast.node_count
+				&& ast.nodes[p].kind == ASSIGNMENT_EXPR) {
+				// First child of ASSIGNMENT_EXPR == LHS
+				uint first = ast::NO_PARENT;
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == p) { first = j; break; }
+				}
+				if (first == i) continue;
+			}
+
+			flow::Fact* fact = types::lookup_smart_cast_fact(ast, type_info, i, recv_name, node.name);
+			if (fact == null) continue;
+			if (fact.narrowed.kind == types::TypeKind.UNKNOWN && !fact.not_null) continue;
+
+			// Resolve the receiver type via TypeInfo so we can pass it to
+			// the stability check.
+			if (!type_info.has_type[recv_idx]) continue;
+			types::TypeRef recv_type = type_info.node_types[recv_idx];
+			if (recv_type.kind == types::TypeKind.UNKNOWN) continue;
+
+			if (types::member_access_is_stable(ast, type_info, recv_idx, recv_name, recv_type, node.name)) continue;
+
+			// Range covers the full `recv.member` span.
+			uint end_col = node.start_col + node.name.len;
+			// Diagnostic uses node.name as the symbol referred to in the
+			// message — match Kotlin's compiler wording.
+			DString full_name;
+			full_name.tinit();
+			full_name.appendf("%s.%s", recv_name, node.name);
+			emit_smart_cast_impossible_named(diagnostics, node, full_name.str_view(), fact, node.start_col, end_col);
+		}
+	}
+}
+
+fn void emit_smart_cast_impossible(Object* diagnostics, AstNode* node, String name, flow::Fact* fact, uint start_col, uint end_col) {
+	emit_smart_cast_impossible_named(diagnostics, node, name, fact, start_col, end_col);
+}
+
+fn void emit_smart_cast_impossible_named(Object* diagnostics, AstNode* node, String display_name, flow::Fact* fact, uint start_col, uint end_col) {
+	Object* diag = object::new_obj(tmem);
+
+	Object* range = object::new_obj(tmem);
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)node.start_line);
+	start.set("character", (int)start_col);
+	Object* end = object::new_obj(tmem);
+	end.set("line", (int)node.start_line);
+	end.set("character", (int)end_col);
+	range.set("start", start);
+	range.set("end", end);
+
+	diag.set("range", range);
+	diag.set("severity", 2); // DiagnosticSeverity.Warning
+	diag.set("source", "kls");
+
+	DString message;
+	message.tinit();
+	if (fact.narrowed.kind != types::TypeKind.UNKNOWN) {
+		String narrowed_text = types::format_type(&fact.narrowed);
+		message.appendf("Smart cast to '%s' is impossible, because '%s' is a mutable property that could have been changed by this time",
+			narrowed_text, display_name);
+	} else {
+		message.appendf("Smart cast to non-null is impossible, because '%s' is a mutable property that could have been changed by this time",
+			display_name);
+	}
+	diag.set("message", message.str_view());
+
+	diagnostics.push(diag);
+}
+
+/**
+ * Locate the AST declaration index for `name` as seen from `use_idx`.
+ * Mirrors the scope walk in `types::resolve_name_expr_type` but returns
+ * the index instead of the type. Returns NO_PARENT when not found.
+ */
+/**
+ * Emit "useless cast" warning for `x as T` when typeOf(x) is statically
+ * assignable to T (per Kotlin spec §11.3, the cast is a no-op). Skips:
+ *  - safe cast `as? T` (always returns nullable, never useless even when types match)
+ *  - source type unknown
+ *  - target type empty
+ *  - source nullable + target non-null (cast performs runtime null check)
+ *
+ * Subtype-aware: `Int as Number` is flagged because Int <: Number.
+ * Nullable-widening: `Int as Int?` is flagged because non-null is assignable to nullable.
+ */
+fn void add_useless_cast_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (!config::useless_cast_diagnostic_enabled()) return;
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != TYPE_CAST_EXPR) continue;
+		// Safe cast `as?` never useless — produces nullable result regardless
+		if (node.extra_text == "as?") continue;
+		String target_text = node.type_text.trim();
+		if (target_text.len == 0) continue;
+
+		// Target null-safety from text suffix
+		bool target_nullable = target_text.ends_with("?");
+		String target_name = target_nullable
+			? target_text[..target_text.len - 2].trim()
+			: target_text;
+
+		// Find source expression: first child of TYPE_CAST_EXPR
+		uint src_idx = uint.max;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) { src_idx = j; break; }
+		}
+		if (src_idx == uint.max) continue;
+		if (!type_info.has_type[src_idx]) continue;
+		types::TypeRef src = type_info.node_types[src_idx];
+		if (src.kind == types::TypeKind.UNKNOWN) continue;
+		if (src.name.len == 0) continue;
+
+		// Source nullable + target non-null: cast performs null check, NOT useless.
+		if (src.nullable && !target_nullable) continue;
+
+		// Build a TypeRef for the target (name + nullability) and check assignability
+		// from source to target. is_assignable_to handles stdlib supertypes
+		// (Int <: Number <: Any, etc.) plus nullable-widening (T → T?).
+		types::TypeRef target = types::parse_type_text(target_text);
+		if (target.kind == types::TypeKind.UNKNOWN) continue;
+
+		if (!types::is_assignable_to(src, target)) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end = object::new_obj(tmem);
+		end.set("line", (int)node.end_line);
+		end.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		DString message;
+		message.tinit();
+		String src_display = src.nullable
+			? string::tformat("%s?", src.name)
+			: src.name;
+		message.appendf("Useless cast: '%s' is already of type '%s'",
+			src_display, target_text);
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+fn uint find_decl_for_name(ParseResult* ast, uint use_idx, String name) {
+	uint scope_idx = 0;
+	uint offset = ast.nodes[use_idx].start_offset;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FILE && n.kind != FUN_DECL && n.kind != BLOCK
+			&& n.kind != FOR_STMT && n.kind != LAMBDA_EXPR
+			&& n.kind != CLASS_DECL && n.kind != INTERFACE_DECL
+			&& n.kind != OBJECT_DECL && n.kind != COMPANION_OBJECT_DECL
+			&& n.kind != INIT_BLOCK) continue;
+		if (offset >= n.start_offset && offset < n.end_offset) {
+			scope_idx = i;
+		}
+	}
+
+	uint current = scope_idx;
+	while (true) {
+		for (uint j = 0; j < ast.node_count; j++) {
+			AstNode* candidate = &ast.nodes[j];
+			if (candidate.parent != current) continue;
+			if (candidate.kind != PROPERTY_DECL && candidate.kind != PARAM) continue;
+			if (candidate.name != name) continue;
+			return j;
+		}
+		if (current == 0) break;
+		AstNode* scope = &ast.nodes[current];
+		if (scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+	return ast::NO_PARENT;
+}
+
+// ── Sealed class exhaustiveness ───────────────────────────────────
+
+/**
+ * Emit Warning diagnostics for `when (subject)` arms over a sealed
+ * class subject when the arms do not cover every direct subtype and
+ * no `else` arm is present (Kotlin spec §16.30.5).
+ *
+ * Subtype enumeration uses workspace.super_index (built during
+ * indexing). Sealed-ness of the parent is read from
+ * workspace.lookup_class_mod_flags. Only `is T` arm conditions count
+ * toward coverage; other patterns (literals, ranges) are ignored
+ * conservatively (sealed classes can't have those anyway).
+ *
+ * Gated by config::sealed_exhaustive_diagnostic_enabled().
+ */
+fn void add_sealed_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
+		TypeInfo* type_info, WorkspaceIndex* workspace) {
+	if (!config::sealed_exhaustive_diagnostic_enabled()) return;
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Locate the subject (first non-ENTRY child)
+		uint subj_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == WHEN_ENTRY) break;
+			subj_idx = c;
+			break;
+		}
+		if (subj_idx == ast::NO_PARENT) continue;
+
+		// Resolve subject type
+		if (!type_info.has_type[subj_idx]) continue;
+		TypeRef subj_type = type_info.node_types[subj_idx];
+		if (subj_type.name.len == 0) continue;
+
+		// Check sealed flag
+		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		if (flags & ast::MOD_SEALED == 0) continue;
+
+		// Enumerate direct subtypes via super_index
+		String[64] subtypes;
+		usz subtype_count = 0;
+		if (try sub_indices = workspace.super_index.get(subj_type.name)) {
+			for (usz k = 0; k < sub_indices.len() && subtype_count < 64; k++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(sub_indices.get(k));
+				if (sym.name.len == 0) continue;
+				// Dedup (multiple files may define same name)
+				bool seen = false;
+				for (usz x = 0; x < subtype_count; x++) {
+					if (subtypes[x] == sym.name) { seen = true; break; }
+				}
+				if (!seen) subtypes[subtype_count++] = sym.name;
+			}
+		}
+		if (subtype_count == 0) continue;
+
+		// Walk arms: collect covered subtypes; bail on else
+		bool has_else = false;
+		bool[64] covered;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			AstNode* entry = &ast.nodes[c];
+			if (entry.extra_text == "else") { has_else = true; break; }
+
+			// Walk entry children (skip last = body)
+			uint last_child = ast::NO_PARENT;
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				last_child = k;
+			}
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				if (k == last_child) continue;
+				AstNode* cond = &ast.nodes[k];
+				if (cond.kind != TYPE_CHECK_EXPR || cond.extra_text != "is") continue;
+				for (usz x = 0; x < subtype_count; x++) {
+					if (subtypes[x] == cond.type_text) { covered[x] = true; break; }
+				}
+			}
+		}
+		if (has_else) continue;
+
+		// Compute missing
+		String[64] missing;
+		usz missing_count = 0;
+		for (usz x = 0; x < subtype_count; x++) {
+			if (!covered[x]) {
+				missing[missing_count++] = subtypes[x];
+			}
+		}
+		if (missing_count == 0) continue;
+
+		// Build message: "'when' on sealed class 'Shape' is non-exhaustive: missing 'Square'[, ...]"
+		DString msg;
+		msg.tinit();
+		msg.appendf("'when' on sealed class '%s' is non-exhaustive: missing ", subj_type.name);
+		for (usz x = 0; x < missing_count; x++) {
+			if (x > 0) msg.append(", ");
+			msg.appendf("'%s'", missing[x]);
+		}
+
+		Object* diag = make_diagnostic(
+			node.start_line, node.start_col,
+			node.start_line, node.start_col + 4,  // span "when" keyword
+			2, msg.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+/**
+ * Emit "non-exhaustive when on enum class" warnings (Kotlin spec §17.3).
+ *
+ * Rules:
+ *   - Subject type must have MOD_ENUM in workspace.class_mod_flags.
+ *   - Else arm makes the when exhaustive (no warning).
+ *   - Arm conditions matching `EnumName.ENTRY` (DOT_EXPR with receiver
+ *     name == enum class name and DOT_EXPR.name == entry name) cover that
+ *     entry. Bare `ENTRY` arms (after enum import) also covered when the
+ *     condition is a NAME_EXPR matching an entry name.
+ *   - Reports the missing entry names.
+ *
+ * Gated by config::enum_exhaustive_diagnostic_enabled().
+ */
+fn void add_enum_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
+		TypeInfo* type_info, WorkspaceIndex* workspace) {
+	if (!config::enum_exhaustive_diagnostic_enabled()) return;
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Locate the subject (first non-ENTRY child)
+		uint subj_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == WHEN_ENTRY) break;
+			subj_idx = c;
+			break;
+		}
+		if (subj_idx == ast::NO_PARENT) continue;
+
+		// Resolve subject type
+		if (!type_info.has_type[subj_idx]) continue;
+		TypeRef subj_type = type_info.node_types[subj_idx];
+		if (subj_type.name.len == 0) continue;
+
+		// Check enum flag
+		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		if (flags & ast::MOD_ENUM == 0) continue;
+
+		// Enumerate enum entries via member_cache
+		String[64] entries;
+		usz entry_count = 0;
+		if (try members = workspace.lookup_members(subj_type.name)) {
+			for (usz k = 0; k < members.len() && entry_count < 64; k++) {
+				MemberDecl* m = members.get_ref(k);
+				if (m.node_kind != ENUM_ENTRY) continue;
+				bool seen = false;
+				for (usz x = 0; x < entry_count; x++) {
+					if (entries[x] == m.name) { seen = true; break; }
+				}
+				if (!seen) entries[entry_count++] = m.name;
+			}
+		}
+		if (entry_count == 0) continue;
+
+		// Walk arms: collect covered entries; bail on else
+		bool has_else = false;
+		bool[64] covered;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			AstNode* entry = &ast.nodes[c];
+			if (entry.extra_text == "else") { has_else = true; break; }
+
+			// Walk entry children (skip last = body)
+			uint last_child = ast::NO_PARENT;
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				last_child = k;
+			}
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				if (k == last_child) continue;
+				AstNode* cond = &ast.nodes[k];
+				String entry_name = "";
+				if (cond.kind == DOT_EXPR) {
+					// Look for NAME_EXPR receiver child matching subj_type.name
+					uint recv_idx = ast::NO_PARENT;
+					for (uint r = cond.children_start; r < ast.node_count; r++) {
+						if (ast.nodes[r].parent != k) continue;
+						recv_idx = r;
+						break;
+					}
+					if (recv_idx != ast::NO_PARENT
+						&& ast.nodes[recv_idx].kind == NAME_EXPR
+						&& ast.nodes[recv_idx].name == subj_type.name) {
+						entry_name = cond.name;
+					}
+				} else if (cond.kind == NAME_EXPR) {
+					// Bare entry name (e.g. after `import Color.*`)
+					entry_name = cond.name;
+				}
+				if (entry_name.len == 0) continue;
+				for (usz x = 0; x < entry_count; x++) {
+					if (entries[x] == entry_name) { covered[x] = true; break; }
+				}
+			}
+		}
+		if (has_else) continue;
+
+		// Compute missing
+		String[64] missing;
+		usz missing_count = 0;
+		for (usz x = 0; x < entry_count; x++) {
+			if (!covered[x]) {
+				missing[missing_count++] = entries[x];
+			}
+		}
+		if (missing_count == 0) continue;
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("'when' on enum class '%s' is non-exhaustive: missing ", subj_type.name);
+		for (usz x = 0; x < missing_count; x++) {
+			if (x > 0) msg.append(", ");
+			msg.appendf("'%s'", missing[x]);
+		}
+
+		Object* diag = make_diagnostic(
+			node.start_line, node.start_col,
+			node.start_line, node.start_col + 4,
+			2, msg.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ── Unnecessary !! diagnostics ───────────────────────────────────
+
+/**
+ * Walk every POSTFIX_EXPR with `extra_text == "!!"`. If the operand
+ * is known non-null (by static type, smart-cast fact, or syntactic
+ * shape), emit a Warning "Unnecessary !! on non-null value".
+ *
+ * Operand is non-null if:
+ *  - LITERAL_EXPR, THIS_EXPR, SUPER_EXPR (always non-null in Kotlin)
+ *  - TypeInfo gives a resolved non-nullable type for it
+ *
+ * Conservative: skip when operand kind is unsupported or its type
+ * is UNKNOWN to avoid false positives.
+ */
+fn void add_unnecessary_not_null_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != POSTFIX_EXPR) continue;
+		if (node.extra_text != "!!") continue;
+
+		// Find operand (first child)
+		uint operand_idx = uint.max;
+		for (uint j = 1; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) {
+				operand_idx = j;
+				break;
+			}
+		}
+		if (operand_idx == uint.max) continue;
+
+		AstNode* operand = &ast.nodes[operand_idx];
+
+		bool operand_non_null = false;
+
+		// Syntactic always-non-null shapes
+		switch (operand.kind) {
+			case LITERAL_EXPR:
+			case THIS_EXPR:
+			case SUPER_EXPR:
+			case STRING_TEMPLATE_EXPR:
+				operand_non_null = true;
+				break;
+			default:
+				break;
+		}
+
+		// Type-based check
+		if (!operand_non_null && type_info.has_type[operand_idx]) {
+			types::TypeRef tr = type_info.node_types[operand_idx];
+			if (tr.kind != types::TypeKind.UNKNOWN && !tr.nullable) {
+				operand_non_null = true;
+			}
+		}
+
+		if (!operand_non_null) continue;
+
+		// Build diagnostic — range covers the `!!` operator (last 2 chars
+		// of the POSTFIX_EXPR)
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		uint diag_start_col = node.end_col >= 2 ? node.end_col - 2 : node.end_col;
+		start.set("line", (int)node.end_line);
+		start.set("character", (int)diag_start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+		diag.set("message", "Unnecessary '!!' on non-null value");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant null check diagnostics ─────────────────────────────
+
+/**
+ * Walk every BINARY_EXPR with `==` or `!=`. If one operand is the
+ * literal `null` and the other is known non-null (by static type or
+ * syntactic shape), emit a Warning that the condition is always
+ * true/false.
+ *
+ *  `non_null != null` → always true
+ *  `non_null == null` → always false
+ *
+ * Conservative: skip when the non-null operand has UNKNOWN type and
+ * is not one of the always-non-null shapes.
+ */
+fn void add_redundant_null_check_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		if (node.extra_text != "==" && node.extra_text != "!=") continue;
+
+		// Find the two operands (first two children)
+		uint lhs_idx = uint.max;
+		uint rhs_idx = uint.max;
+		for (uint j = 1; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent != i) continue;
+			if (lhs_idx == uint.max) {
+				lhs_idx = j;
+			} else if (rhs_idx == uint.max) {
+				rhs_idx = j;
+				break;
+			}
+		}
+		if (lhs_idx == uint.max || rhs_idx == uint.max) continue;
+
+		// Identify which side is `null` literal and which is the value
+		uint null_idx = uint.max;
+		uint val_idx = uint.max;
+		if (is_null_literal(&ast.nodes[lhs_idx])) {
+			null_idx = lhs_idx;
+			val_idx = rhs_idx;
+		} else if (is_null_literal(&ast.nodes[rhs_idx])) {
+			null_idx = rhs_idx;
+			val_idx = lhs_idx;
+		}
+		if (null_idx == uint.max) continue;
+
+		// Skip null == null (the other side is also null literal)
+		if (is_null_literal(&ast.nodes[val_idx])) continue;
+
+		AstNode* val_node = &ast.nodes[val_idx];
+
+		// Determine non-null-ness of the value side
+		bool val_non_null = false;
+		switch (val_node.kind) {
+			case THIS_EXPR:
+			case SUPER_EXPR:
+			case STRING_TEMPLATE_EXPR:
+				val_non_null = true;
+				break;
+			case LITERAL_EXPR:
+				// A literal that isn't `null` itself is non-null
+				val_non_null = true;
+				break;
+			default:
+				break;
+		}
+		if (!val_non_null && type_info.has_type[val_idx]) {
+			types::TypeRef tr = type_info.node_types[val_idx];
+			if (tr.kind != types::TypeKind.UNKNOWN && !tr.nullable) {
+				val_non_null = true;
+			}
+		}
+		if (!val_non_null) continue;
+
+		// Build diagnostic
+		bool always_true = node.extra_text == "!=";
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Condition is always %s (operand is non-null)",
+			always_true ? "true" : "false");
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+fn bool is_null_literal(AstNode* n) {
+	return n.kind == LITERAL_EXPR && n.extra_text == "null";
+}
+
+// ── Unreachable catch ─────────────────────────────────────────
+//
+// For each TRY_EXPR, walk its CATCH_CLAUSE children in source order. If a later
+// catch's exception type is a subtype of any earlier catch's type, the later
+// clause is unreachable (Kotlin spec §8.4.4).
+//
+// Cross-file class hierarchy is handled by types::is_assignable_to via the
+// workspace symbol index (when set). Stdlib exception hierarchy is hardcoded
+// in STDLIB_SUPERTYPES.
+fn void add_unreachable_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* try_node = &ast.nodes[i];
+		if (try_node.kind != TRY_EXPR) continue;
+
+		// Collect catch clauses in source order
+		uint[16] catch_indices;
+		String[16] catch_types;
+		uint catch_count = 0;
+
+		for (uint c = try_node.children_start; c < ast.node_count && catch_count < 16; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != CATCH_CLAUSE) continue;
+
+			// Catch param is first child of CATCH_CLAUSE (PARAM with type_text)
+			String type_text = "";
+			for (uint p = ast.nodes[c].children_start; p < ast.node_count; p++) {
+				if (ast.nodes[p].parent != c) continue;
+				if (ast.nodes[p].kind == PARAM) {
+					type_text = ast.nodes[p].type_text;
+				}
+				break; // first child only
+			}
+			if (type_text.len == 0) continue;
+
+			catch_indices[catch_count] = c;
+			catch_types[catch_count] = type_text;
+			catch_count++;
+		}
+
+		// For each catch[k], check if any earlier catch[j] catches a supertype
+		for (uint k = 1; k < catch_count; k++) {
+			TypeRef k_type = types::parse_type_text(catch_types[k]);
+			if (k_type.kind == UNKNOWN) continue;
+
+			for (uint j = 0; j < k; j++) {
+				TypeRef j_type = types::parse_type_text(catch_types[j]);
+				if (j_type.kind == UNKNOWN) continue;
+
+				if (types::is_assignable_to(k_type, j_type)) {
+					AstNode* k_node = &ast.nodes[catch_indices[k]];
+					AstNode* j_node = &ast.nodes[catch_indices[j]];
+
+					Object* diag = object::new_obj(tmem);
+					Object* range = object::new_obj(tmem);
+					Object* start = object::new_obj(tmem);
+					start.set("line", (int)k_node.start_line);
+					start.set("character", (int)k_node.start_col);
+					Object* end_pos = object::new_obj(tmem);
+					end_pos.set("line", (int)k_node.end_line);
+					end_pos.set("character", (int)k_node.end_col);
+					range.set("start", start);
+					range.set("end", end_pos);
+
+					diag.set("range", range);
+					diag.set("severity", 2);
+					diag.set("source", "kls");
+
+					Object* tags = object::new_obj(tmem);
+					tags.push(object::new_int(1, tmem));
+					diag.set("tags", tags);
+
+					DString message;
+					message.tinit();
+					message.appendf("Catch clause is unreachable (already caught by '%s' on line %d)",
+						catch_types[j], (int)j_node.start_line + 1);
+					diag.set("message", message.str_view());
+
+					diagnostics.push(diag);
+					break; // only one diagnostic per unreachable catch
+				}
+			}
+		}
+	}
+}
+
+// ── Unnecessary safe call (?.) ────────────────────────────────
+//
+// Walk DOT_EXPR nodes with extra_text "?." and emit a Warning when
+// the receiver type is statically non-nullable. Phase 10 of resolve_types
+// folds smart-cast narrowing into NAME_EXPR/DOT_EXPR types, so flow facts
+// already show through ti.node_types[recv_idx].nullable.
+//
+// THIS_EXPR receivers are always non-null in Kotlin method bodies and
+// have no TypeInfo entry by default; treat them as non-null.
+fn void add_unnecessary_safe_call_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != DOT_EXPR) continue;
+		if (node.extra_text != "?.") continue;
+
+		// Receiver = first child (by parent index)
+		uint recv_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			recv_idx = c;
+			break;
+		}
+		if (recv_idx == ast::NO_PARENT) continue;
+
+		AstNode* recv = &ast.nodes[recv_idx];
+		bool is_non_null = false;
+
+		// THIS_EXPR / SUPER_EXPR / STRING_TEMPLATE_EXPR always non-null
+		if (recv.kind == THIS_EXPR || recv.kind == SUPER_EXPR ||
+			recv.kind == STRING_TEMPLATE_EXPR) {
+			is_non_null = true;
+		} else if (recv.kind == LITERAL_EXPR && recv.extra_text != "null") {
+			is_non_null = true;
+		} else if (type_info.has_type[recv_idx]) {
+			TypeRef tr = type_info.node_types[recv_idx];
+			if (!tr.nullable && tr.kind != UNKNOWN) {
+				is_non_null = true;
+			}
+		}
+
+		if (!is_non_null) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", "Unnecessary safe call on non-null receiver");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant if/else returning bool ──────────────────────────
+//
+// Detect IF_EXPR of the form `if (cond) true else false` or
+// `if (cond) false else true` (with or without surrounding blocks).
+// Per Kotlin spec §17.6.4: cond is always Boolean, so the if-expression
+// reduces to the condition itself (or its negation).
+//
+// Children of IF_EXPR: [cond?, then, else]. Cond may be absent if parser
+// fell back to skip_balanced_parens (angle-bracket ambiguity), so we
+// identify then/else as the last two children.
+fn void add_redundant_if_bool_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != IF_EXPR) continue;
+
+		// Collect children by parent index
+		uint[8] children;
+		uint child_count = 0;
+		for (uint c = node.children_start; c < ast.node_count && child_count < 8; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			children[child_count++] = c;
+		}
+		if (child_count < 2) continue; // need both then and else
+
+		// Last two = then, else
+		uint then_idx = children[child_count - 2];
+		uint else_idx = children[child_count - 1];
+
+		String then_val = unwrap_bool_literal(ast, then_idx);
+		String else_val = unwrap_bool_literal(ast, else_idx);
+		if (then_val.len == 0 || else_val.len == 0) continue;
+		if (then_val == else_val) continue; // same literal both sides — different smell
+
+		bool negated = (then_val == "false" && else_val == "true");
+		bool direct = (then_val == "true" && else_val == "false");
+		if (!direct && !negated) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", negated
+			? "Redundant 'if': replace with negated condition"
+			: "Redundant 'if': replace with condition");
+
+		diagnostics.push(diag);
+	}
+}
+
+// Returns "true" / "false" if the node is (directly, or via a single-stmt
+// BLOCK) a LITERAL_EXPR with that value. Empty string otherwise.
+fn String unwrap_bool_literal(ParseResult* ast, uint idx) {
+	AstNode* n = &ast.nodes[idx];
+	if (n.kind == LITERAL_EXPR) {
+		if (n.extra_text == "true" || n.extra_text == "false") return n.extra_text;
+		return "";
+	}
+	if (n.kind == BLOCK) {
+		// Find single direct child
+		uint stmt_count = 0;
+		uint sole_child = 0;
+		for (uint c = n.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != idx) continue;
+			sole_child = c;
+			stmt_count++;
+			if (stmt_count > 1) return "";
+		}
+		if (stmt_count != 1) return "";
+		return unwrap_bool_literal(ast, sole_child);
+	}
+	return "";
+}
+
+// ── Unnecessary elvis (?:) ──────────────────────────────────────
+//
+// Detect BINARY_EXPR `lhs ?: rhs` where lhs is statically non-null.
+// Per Kotlin spec: ?: evaluates rhs only if lhs is null. If lhs is
+// non-null, rhs is dead code and the whole expression equals lhs.
+fn void add_unnecessary_elvis_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		if (node.extra_text != "?:") continue;
+
+		// LHS = first child by parent index
+		uint lhs_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			lhs_idx = c;
+			break;
+		}
+		if (lhs_idx == ast::NO_PARENT) continue;
+
+		AstNode* lhs = &ast.nodes[lhs_idx];
+
+		// Skip null-literal LHS (?: is meaningful: always picks RHS)
+		if (lhs.kind == LITERAL_EXPR && lhs.extra_text == "null") continue;
+
+		bool is_non_null = false;
+
+		// Syntactic always-non-null shapes
+		switch (lhs.kind) {
+			case THIS_EXPR:
+			case SUPER_EXPR:
+			case STRING_TEMPLATE_EXPR:
+				is_non_null = true;
+				break;
+			case LITERAL_EXPR:
+				if (lhs.extra_text != "null") is_non_null = true;
+				break;
+			default:
+				break;
+		}
+
+		// Type-based check (covers smart-cast narrowing via phase 10)
+		if (!is_non_null && type_info.has_type[lhs_idx]) {
+			TypeRef tr = type_info.node_types[lhs_idx];
+			if (!tr.nullable && tr.kind != UNKNOWN) {
+				is_non_null = true;
+			}
+		}
+
+		if (!is_non_null) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", "Elvis operator (?:) on non-null value is redundant");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Empty catch block ──────────────────────────────────────────
+//
+// Detect CATCH_CLAUSE whose BLOCK body has zero statement children.
+// Emits a Hint suggesting the catch should log or rethrow.
+fn void add_empty_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != CATCH_CLAUSE) continue;
+
+		// Find BLOCK child (last child, kind == BLOCK)
+		uint block_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == BLOCK) {
+				block_idx = c;
+			}
+		}
+		if (block_idx == ast::NO_PARENT) continue;
+
+		AstNode* block = &ast.nodes[block_idx];
+
+		// Count statement children of BLOCK
+		uint stmt_count = 0;
+		for (uint c = block.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != block_idx) continue;
+			stmt_count++;
+		}
+		if (stmt_count > 0) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)block.start_line);
+		start.set("character", (int)block.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)block.end_line);
+		end_pos.set("character", (int)block.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		diag.set("message", "Empty catch block; consider logging or rethrowing");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant override ─────────────────────────────────────────
+//
+// Detect FUN_DECL with MOD_OVERRIDE where the body just delegates to
+// super with identical signature: `override fun foo(x) = super.foo(x)`
+// or block-body equivalent with single statement.
+
+/**
+ * Try to extract the call_expr index from a fun-body candidate.
+ * Body forms accepted:
+ *   - CALL_EXPR (expression body)
+ *   - BLOCK with exactly 1 statement child that is CALL_EXPR or
+ *     RETURN_EXPR wrapping CALL_EXPR
+ *   - RETURN_EXPR wrapping CALL_EXPR
+ * Returns ast::NO_PARENT if not a single-call body.
+ */
+fn uint extract_single_call(ParseResult* ast, uint body_idx) {
+	if (body_idx >= ast.node_count) return ast::NO_PARENT;
+	AstNode* body = &ast.nodes[body_idx];
+
+	if (body.kind == CALL_EXPR) return body_idx;
+
+	if (body.kind == RETURN_EXPR) {
+		// Return value = first child
+		for (uint c = body.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != body_idx) continue;
+			if (ast.nodes[c].kind == CALL_EXPR) return c;
+			return ast::NO_PARENT;
+		}
+		return ast::NO_PARENT;
+	}
+
+	if (body.kind == BLOCK) {
+		uint single = ast::NO_PARENT;
+		uint stmt_count = 0;
+		for (uint c = body.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != body_idx) continue;
+			single = c;
+			stmt_count++;
+			if (stmt_count > 1) return ast::NO_PARENT;
+		}
+		if (stmt_count != 1) return ast::NO_PARENT;
+		return extract_single_call(ast, single);
+	}
+
+	return ast::NO_PARENT;
+}
+
+fn void add_redundant_override_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != FUN_DECL) continue;
+		if ((node.mod_flags & ast::MOD_OVERRIDE) == 0) continue;
+		if (node.name.len == 0) continue;
+
+		// Collect direct PARAM children + locate body (last non-PARAM,
+		// non-TYPE_PARAM, non-ANNOTATION child whose kind is BLOCK/CALL_EXPR/
+		// RETURN_EXPR/etc).
+		uint[16] param_indices;
+		uint param_count = 0;
+		uint body_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			NodeKind ck = ast.nodes[c].kind;
+			if (ck == PARAM) {
+				if (param_count < 16) {
+					param_indices[param_count++] = c;
+				} else {
+					// Too many params for stack buffer — bail
+					body_idx = ast::NO_PARENT;
+					break;
+				}
+				continue;
+			}
+			if (ck == TYPE_PARAM) continue;
+			// Body candidate: BLOCK or expression-body
+			body_idx = c;
+		}
+		if (body_idx == ast::NO_PARENT) continue;
+
+		uint call_idx = extract_single_call(ast, body_idx);
+		if (call_idx == ast::NO_PARENT) continue;
+
+		AstNode* call = &ast.nodes[call_idx];
+
+		// Callee must be DOT_EXPR with name == fun name and receiver SUPER_EXPR
+		if (call.name != node.name) continue;
+		uint callee_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != call_idx) continue;
+			if (ast.nodes[c].kind == DOT_EXPR) {
+				callee_idx = c;
+				break;
+			}
+		}
+		if (callee_idx == ast::NO_PARENT) continue;
+		AstNode* callee = &ast.nodes[callee_idx];
+		if (callee.name != node.name) continue;
+
+		// Receiver must be SUPER_EXPR
+		uint recv_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != callee_idx) continue;
+			recv_idx = c;
+			break;
+		}
+		if (recv_idx == ast::NO_PARENT) continue;
+		if (ast.nodes[recv_idx].kind != SUPER_EXPR) continue;
+
+		// Args: same count, positional, NAME_EXPR matching PARAM names in order
+		uint arg_count = ast::count_call_args(ast, call_idx);
+		if (arg_count != param_count) continue;
+
+		bool args_match = true;
+		uint pi = 0;
+		for (uint c = call.children_start; c < ast.node_count && args_match; c++) {
+			if (ast.nodes[c].parent != call_idx) continue;
+			if (ast.nodes[c].kind != VALUE_ARGUMENT) continue;
+			AstNode* va = &ast.nodes[c];
+			// Reject named or spread args
+			if (va.name.len != 0) { args_match = false; break; }
+			if (va.extra_text == "*") { args_match = false; break; }
+			uint expr_idx = ast::get_arg_expr_idx(ast, c);
+			if (expr_idx == uint.max) { args_match = false; break; }
+			AstNode* expr = &ast.nodes[expr_idx];
+			if (expr.kind != NAME_EXPR) { args_match = false; break; }
+			if (pi >= param_count) { args_match = false; break; }
+			AstNode* param = &ast.nodes[param_indices[pi]];
+			if (expr.name != param.name) { args_match = false; break; }
+			pi++;
+		}
+		if (!args_match || pi != param_count) continue;
+
+		// Emit diagnostic covering full FUN_DECL
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", "Override is redundant; only delegates to super");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant else after exhaustive when ─────────────────────────
+
+/**
+ * Emit Warning + Unnecessary tag for `when (subject) { ... else -> ... }`
+ * where the non-else arms already cover every variant of a sealed
+ * class or enum class subject. The else arm is dead code.
+ *
+ * Mirrors the structure of add_sealed_exhaustive_diagnostics +
+ * add_enum_exhaustive_diagnostics but inverts the condition:
+ * fires only when has_else && missing_count == 0.
+ *
+ * Gated by config::redundant_else_when_diagnostic_enabled().
+ */
+fn void add_redundant_else_when_diagnostics(Object* diagnostics, ParseResult* ast,
+		TypeInfo* type_info, WorkspaceIndex* workspace) {
+	if (!config::redundant_else_when_diagnostic_enabled()) return;
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Locate the subject (first non-ENTRY child)
+		uint subj_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == WHEN_ENTRY) break;
+			subj_idx = c;
+			break;
+		}
+		if (subj_idx == ast::NO_PARENT) continue;
+
+		// Resolve subject type
+		if (!type_info.has_type[subj_idx]) continue;
+		TypeRef subj_type = type_info.node_types[subj_idx];
+		if (subj_type.name.len == 0) continue;
+
+		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		bool is_sealed = (flags & ast::MOD_SEALED) != 0;
+		bool is_enum = (flags & ast::MOD_ENUM) != 0;
+		if (!is_sealed && !is_enum) continue;
+
+		// Enumerate variants
+		String[64] variants;
+		usz variant_count = 0;
+		if (is_sealed) {
+			if (try sub_indices = workspace.super_index.get(subj_type.name)) {
+				for (usz k = 0; k < sub_indices.len() && variant_count < 64; k++) {
+					WorkspaceSymbol* sym = workspace.get_symbol(sub_indices.get(k));
+					if (sym.name.len == 0) continue;
+					bool seen = false;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == sym.name) { seen = true; break; }
+					}
+					if (!seen) variants[variant_count++] = sym.name;
+				}
+			}
+		} else {
+			// enum
+			if (try members = workspace.lookup_members(subj_type.name)) {
+				for (usz k = 0; k < members.len() && variant_count < 64; k++) {
+					MemberDecl* m = members.get_ref(k);
+					if (m.node_kind != ENUM_ENTRY) continue;
+					bool seen = false;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == m.name) { seen = true; break; }
+					}
+					if (!seen) variants[variant_count++] = m.name;
+				}
+			}
+		}
+		if (variant_count == 0) continue;
+
+		// Walk arms: locate else arm (record its index for range), and
+		// collect covered variants from non-else arms.
+		uint else_arm_idx = ast::NO_PARENT;
+		bool[64] covered;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			AstNode* entry = &ast.nodes[c];
+			if (entry.extra_text == "else") {
+				else_arm_idx = c;
+				continue;
+			}
+
+			uint last_child = ast::NO_PARENT;
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				last_child = k;
+			}
+			for (uint k = entry.children_start; k < ast.node_count; k++) {
+				if (ast.nodes[k].parent != c) continue;
+				if (k == last_child) continue;
+				AstNode* cond = &ast.nodes[k];
+				if (is_sealed) {
+					if (cond.kind != TYPE_CHECK_EXPR || cond.extra_text != "is") continue;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == cond.type_text) { covered[x] = true; break; }
+					}
+				} else {
+					// enum
+					String entry_name = "";
+					if (cond.kind == DOT_EXPR) {
+						uint recv_idx = ast::NO_PARENT;
+						for (uint r = cond.children_start; r < ast.node_count; r++) {
+							if (ast.nodes[r].parent != k) continue;
+							recv_idx = r;
+							break;
+						}
+						if (recv_idx != ast::NO_PARENT
+							&& ast.nodes[recv_idx].kind == NAME_EXPR
+							&& ast.nodes[recv_idx].name == subj_type.name) {
+							entry_name = cond.name;
+						}
+					} else if (cond.kind == NAME_EXPR) {
+						entry_name = cond.name;
+					}
+					if (entry_name.len == 0) continue;
+					for (usz x = 0; x < variant_count; x++) {
+						if (variants[x] == entry_name) { covered[x] = true; break; }
+					}
+				}
+			}
+		}
+		if (else_arm_idx == ast::NO_PARENT) continue; // no else arm
+
+		// Compute missing — must be 0 for else to be redundant
+		usz missing_count = 0;
+		for (usz x = 0; x < variant_count; x++) {
+			if (!covered[x]) missing_count++;
+		}
+		if (missing_count > 0) continue;
+
+		// Build diagnostic on the `else` keyword span
+		AstNode* else_arm = &ast.nodes[else_arm_idx];
+		DString msg;
+		msg.tinit();
+		msg.appendf("'else' is redundant — 'when' is already exhaustive over '%s'",
+			subj_type.name);
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)else_arm.start_line);
+		start.set("character", (int)else_arm.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)else_arm.start_line);
+		end_pos.set("character", (int)(else_arm.start_col + 4)); // "else"
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+		diag.set("message", msg.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Catch swallows exception ──────────────────────────────────────
+
+/**
+ * Walks each CATCH_CLAUSE; if its body contains statements but never
+ * references the exception parameter and never re-throws, emit a Hint
+ * with DiagnosticTag.Unnecessary on the parameter.
+ *
+ * Empty catch blocks are excluded — covered by add_empty_catch_diagnostics.
+ *
+ * Param names starting with '_' are skipped (idiomatic "deliberately
+ * ignored", per Kotlin convention).
+ *
+ * Subtree containment is checked by source-offset bounds (PARAM/BLOCK
+ * end_offsets are reliable).
+ *
+ * Gated by config::catch_swallows_diagnostic_enabled().
+ */
+fn void add_swallowed_catch_diagnostics(Object* diagnostics, ParseResult* ast) {
+	if (!config::catch_swallows_diagnostic_enabled()) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != CATCH_CLAUSE) continue;
+
+		// Find PARAM child and BLOCK child.
+		uint param_idx = ast::NO_PARENT;
+		uint block_idx = ast::NO_PARENT;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == PARAM && param_idx == ast::NO_PARENT) {
+				param_idx = c;
+			}
+			if (ast.nodes[c].kind == BLOCK) {
+				block_idx = c;
+			}
+		}
+		if (param_idx == ast::NO_PARENT) continue;
+		if (block_idx == ast::NO_PARENT) continue;
+
+		AstNode* param = &ast.nodes[param_idx];
+		AstNode* block = &ast.nodes[block_idx];
+
+		// Skip empty body (handled by add_empty_catch_diagnostics).
+		uint stmt_count = 0;
+		for (uint c = block.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != block_idx) continue;
+			stmt_count++;
+		}
+		if (stmt_count == 0) continue;
+
+		// Skip empty / underscore-prefixed param names (intentional).
+		if (param.name.len == 0) continue;
+		if (param.name[0] == '_') continue;
+
+		// Walk all nodes; check those whose source range falls inside
+		// the BLOCK's range. Look for THROW_EXPR or NAME_EXPR matching
+		// the param name.
+		bool has_throw = false;
+		bool uses_param = false;
+		for (uint k = 0; k < ast.node_count; k++) {
+			AstNode* n = &ast.nodes[k];
+			if (n.start_offset < block.start_offset) continue;
+			if (n.end_offset > block.end_offset) continue;
+			if (n.kind == THROW_EXPR) {
+				has_throw = true;
+				if (uses_param) break;
+			} else if (n.kind == NAME_EXPR && n.name == param.name) {
+				uses_param = true;
+				if (has_throw) break;
+			}
+		}
+		if (uses_param) continue;
+		if (has_throw) continue;
+
+		// Build diagnostic: Hint, Unnecessary tag, range = PARAM
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)param.start_line);
+		start.set("character", (int)param.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)param.end_line);
+		end_pos.set("character", (int)param.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("Exception '%s' is never used (catch swallows the exception)",
+			param.name);
+		diag.set("message", msg.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant boolean literal comparison ─────────────────────────
+//
+// Detect BINARY_EXPR `x == true|false` / `x != true|false` (either side).
+// Per Kotlin spec §13.4.4, comparing a Boolean expression to a literal
+// is redundant: `b == true` ≡ `b`, `b != true` ≡ `!b`, `b == false` ≡ `!b`,
+// `b != false` ≡ `b`. Skip when both sides are literals (different smell).
+fn void add_redundant_bool_comparison_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		if (node.extra_text != "==" && node.extra_text != "!=") continue;
+
+		// Collect children (left + right). BINARY_EXPR may have lower-indexed left child.
+		uint[4] children;
+		uint child_count = 0;
+		for (uint c = 0; c < ast.node_count && child_count < 4; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			children[child_count++] = c;
+		}
+		if (child_count != 2) continue;
+
+		uint lhs = children[0];
+		uint rhs = children[1];
+		AstNode* l = &ast.nodes[lhs];
+		AstNode* r = &ast.nodes[rhs];
+
+		bool l_is_bool_lit = (l.kind == LITERAL_EXPR
+			&& (l.extra_text == "true" || l.extra_text == "false"));
+		bool r_is_bool_lit = (r.kind == LITERAL_EXPR
+			&& (r.extra_text == "true" || r.extra_text == "false"));
+
+		// Need exactly one literal side.
+		if (l_is_bool_lit == r_is_bool_lit) continue;
+
+		String lit = l_is_bool_lit ? l.extra_text : r.extra_text;
+		bool is_eq = (node.extra_text == "==");
+		// Result form: `b` if (== true) or (!= false); `!b` otherwise.
+		bool simplifies_to_negation = (is_eq && lit == "false") || (!is_eq && lit == "true");
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diag.set("message", simplifies_to_negation
+			? "Redundant comparison to boolean literal: replace with negated expression"
+			: "Redundant comparison to boolean literal: replace with expression");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant type check (`x is T` / `x !is T`) ──────────────────
+//
+// Per Kotlin spec §11.3 type-check operators are statically decidable
+// when the subject's type is provably assignable to the test type:
+//   `x is T`  → always true   when typeof(x) <: T
+//   `x !is T` → always false  when typeof(x) <: T
+//
+// Skips:
+//   - subject UNKNOWN (no type info to reason from)
+//   - subject nullable + target non-null (the check filters out null,
+//     meaningful runtime behaviour)
+//   - subject is a SUPERTYPE of target (downcast — runtime check
+//     genuinely narrows, NOT redundant)
+fn void add_redundant_type_check_diagnostics(Object* diagnostics, ParseResult* ast,
+		types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != TYPE_CHECK_EXPR) continue;
+		if (node.extra_text != "is" && node.extra_text != "!is") continue;
+		String target_text = node.type_text.trim();
+		if (target_text.len == 0) continue;
+
+		// Find subject (first child).
+		uint subj_idx = uint.max;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent == i) { subj_idx = c; break; }
+		}
+		if (subj_idx == uint.max) continue;
+		if (!type_info.has_type[subj_idx]) continue;
+		types::TypeRef subj = type_info.node_types[subj_idx];
+		if (subj.kind == types::TypeKind.UNKNOWN) continue;
+		if (subj.name.len == 0) continue;
+
+		// Target nullable from text suffix.
+		bool target_nullable = target_text.ends_with("?");
+
+		// Subject nullable + target non-null: meaningful null-filter,
+		// preserves runtime check semantics.
+		if (subj.nullable && !target_nullable) continue;
+
+		types::TypeRef target = types::parse_type_text(target_text);
+		if (target.kind == types::TypeKind.UNKNOWN) continue;
+
+		if (!types::is_assignable_to(subj, target)) continue;
+
+		bool always_true = (node.extra_text == "is");
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		DString message;
+		message.tinit();
+		String subj_display = subj.nullable
+			? string::tformat("%s?", subj.name)
+			: subj.name;
+		message.appendf("Type check is always %s: '%s' is already of type '%s'",
+			always_true ? "true" : "false", subj_display, target_text);
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant subject-less `when` returning bool ─────────────
+//
+// Detect `when { cond -> true; else -> false }` (or inverse), which
+// reduces to `cond` (or `!cond`) per Kotlin spec §17.6.5. Subject-less
+// form only; `when (s) { c -> true; else -> false }` requires emitting
+// `s == c` and is deferred.
+fn void add_redundant_when_bool_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Detect subject (first child is non-WHEN_ENTRY); allow both forms now.
+		bool has_subject = false;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			has_subject = (ast.nodes[c].kind != WHEN_ENTRY);
+			break;
+		}
+
+		// Collect WHEN_ENTRY children
+		uint[8] entries;
+		uint entry_count = 0;
+		for (uint c = node.children_start; c < ast.node_count && entry_count < 8; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			entries[entry_count++] = c;
+		}
+		if (entry_count != 2) continue;
+
+		// Identify regular vs else arm
+		uint regular_idx = ast::NO_PARENT;
+		uint else_idx = ast::NO_PARENT;
+		for (uint k = 0; k < entry_count; k++) {
+			if (ast.nodes[entries[k]].extra_text == "else") {
+				else_idx = entries[k];
+			} else {
+				regular_idx = entries[k];
+			}
+		}
+		if (regular_idx == ast::NO_PARENT || else_idx == ast::NO_PARENT) continue;
+
+		// For subject form: regular arm must have exactly 2 children [cond, body]
+		// (single condition only — multi-cond `1, 2, 3 -> ...` and `in` patterns deferred).
+		// For subject-less form: regular arm has 1 child (body only, cond consumed
+		// at token level via skip_when_condition fallback).
+		if (has_subject) {
+			uint child_count = 0;
+			uint first_child = ast::NO_PARENT;
+			for (uint c = ast.nodes[regular_idx].children_start; c < ast.node_count; c++) {
+				if (ast.nodes[c].parent != regular_idx) continue;
+				if (first_child == ast::NO_PARENT) first_child = c;
+				child_count++;
+			}
+			if (child_count != 2) continue;
+			// Cond must be one of the supported kinds.
+			NodeKind ck = ast.nodes[first_child].kind;
+			bool supported = ck == LITERAL_EXPR || ck == NAME_EXPR || ck == DOT_EXPR
+				|| (ck == TYPE_CHECK_EXPR && ast.nodes[first_child].extra_text == "is");
+			if (!supported) continue;
+		}
+
+		// Body of each = last child
+		uint regular_body = last_child_of(ast, regular_idx);
+		uint else_body = last_child_of(ast, else_idx);
+		if (regular_body == ast::NO_PARENT || else_body == ast::NO_PARENT) continue;
+
+		String reg_val = unwrap_bool_literal(ast, regular_body);
+		String else_val = unwrap_bool_literal(ast, else_body);
+		if (reg_val.len == 0 || else_val.len == 0) continue;
+		if (reg_val == else_val) continue;
+
+		bool negated = (reg_val == "false" && else_val == "true");
+		bool direct = (reg_val == "true" && else_val == "false");
+		if (!direct && !negated) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", negated
+			? "Redundant 'when': replace with negated condition"
+			: "Redundant 'when': replace with condition");
+
+		diagnostics.push(diag);
+	}
+}
+
+fn uint last_child_of(ParseResult* ast, uint parent_idx) {
+	uint last = ast::NO_PARENT;
+	for (uint c = ast.nodes[parent_idx].children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != parent_idx) continue;
+		last = c;
+	}
+	return last;
+}
+
+// ── Unused private declarations ──────────────────────────────────
+
+// True if FUN_DECL/PROPERTY_DECL/CLASS_DECL/OBJECT_DECL is at top-level
+// (direct child of FILE) — not nested inside a class/object/fn.
+fn bool decl_is_top_level(ParseResult* ast, uint idx) {
+	uint p = ast.nodes[idx].parent;
+	if (p == ast::NO_PARENT) return false;
+	return ast.nodes[p].kind == FILE;
+}
+
+// Returns true when the declaration's enclosing scope is a context where a
+// "private" modifier means file-private (top-level) or class-private (member
+// of class/interface/object/companion). These are the scopes where we can
+// soundly run a whole-file name-reference scan to detect dead code: the
+// declaration is invisible outside the file/class anyway.
+fn bool decl_is_private_capable_scope(ParseResult* ast, uint idx) {
+	uint p = ast.nodes[idx].parent;
+	if (p == ast::NO_PARENT) return false;
+	NodeKind pk = ast.nodes[p].kind;
+	return pk == FILE || pk == CLASS_DECL || pk == INTERFACE_DECL
+		|| pk == OBJECT_DECL || pk == COMPANION_OBJECT_DECL;
+}
+
+// Conservative whole-file name reference scan. Returns true if any
+// NAME_EXPR (other than the decl itself) matches `name`. This finds
+// bare-name calls, qualified-call member names, type-name references
+// (since type-text is searched separately), and constructor calls.
+fn bool name_referenced_in_file(ParseResult* ast, uint decl_idx, String name) {
+	if (name.len == 0) return true;
+	for (uint i = 0; i < ast.node_count; i++) {
+		if (i == decl_idx) continue;
+		AstNode* n = &ast.nodes[i];
+		// NAME_EXPR — direct identifier reference (calls, reads, ctor calls).
+		if (n.kind == NAME_EXPR && n.name == name) return true;
+		// DOT_EXPR — member name match (e.g. `obj.helper`).
+		if (n.kind == DOT_EXPR && n.name == name) return true;
+		// Any decl with type_text containing the name as a token (class refs
+		// in property/param type annotations, return-type, etc.).
+		if (n.type_text.len > 0 && type_text_mentions(n.type_text, name)) return true;
+	}
+	return false;
+}
+
+// Cheap word-boundary check on type_text strings like "Foo", "Foo?",
+// "List<Foo>", "Map<String, Foo?>".
+fn bool type_text_mentions(String haystack, String needle) {
+	if (needle.len == 0 || haystack.len < needle.len) return false;
+	for (usz i = 0; i + needle.len <= haystack.len; i++) {
+		// Match candidate
+		bool eq = true;
+		for (usz j = 0; j < needle.len; j++) {
+			if (haystack[i+j] != needle[j]) { eq = false; break; }
+		}
+		if (!eq) continue;
+		// Left boundary
+		if (i > 0) {
+			char c = haystack[i-1];
+			if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+				|| (c >= '0' && c <= '9') || c == '_') continue;
+		}
+		// Right boundary
+		usz r = i + needle.len;
+		if (r < haystack.len) {
+			char c = haystack[r];
+			if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+				|| (c >= '0' && c <= '9') || c == '_') continue;
+		}
+		return true;
+	}
+	return false;
+}
+
+fn void add_unused_private_decl_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		NodeKind k = n.kind;
+		if (k != FUN_DECL && k != PROPERTY_DECL && k != CLASS_DECL && k != OBJECT_DECL) continue;
+		if ((n.mod_flags & ast::MOD_PRIVATE) == 0) continue;
+		if (!decl_is_private_capable_scope(ast, i)) continue;
+		if (n.name.len == 0) continue;
+		if (n.name[0] == '_') continue;
+		if (n.name == "main") continue;
+
+		// Skip overrides (contract-driven), operator funs (called via syntax),
+		// expect/external (no body in this file), and delegated properties.
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OPERATOR) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXPECT) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXTERNAL) != 0) continue;
+		if (k == PROPERTY_DECL && property_is_delegated(ast, i)) continue;
+
+		if (name_referenced_in_file(ast, i, n.name)) continue;
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.name_line);
+		start.set("character", (int)n.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.name_line);
+		end_pos.set("character", (int)(n.name_col + n.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		String kind_label;
+		switch (k) {
+			case FUN_DECL:      kind_label = "Function";
+			case PROPERTY_DECL: kind_label = "Property";
+			case CLASS_DECL:    kind_label = "Class";
+			case OBJECT_DECL:   kind_label = "Object";
+			default:            kind_label = "Declaration";
+		}
+
+		DString message;
+		message.tinit();
+		message.appendf("%s '%s' is never used", kind_label, n.name);
+		diag.set("message", message.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant explicit type on val/var ───────────────────────────
+
+// Find the initializer child of a PROPERTY_DECL: not a FUN_DECL accessor,
+// not a PARAM (destructuring component), not a TYPE_REF, not a delegate
+// root. The initializer is the lone non-FUN_DECL/non-PARAM child.
+fn uint find_property_initializer(ParseResult* ast, uint prop_idx) {
+	uint init_idx = uint.max;
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != prop_idx) continue;
+		NodeKind k = n.kind;
+		if (k == FUN_DECL || k == PARAM) continue;
+		if (n.extra_text == "delegate") continue; // by-delegated property
+		init_idx = c;
+		// Don't break — last expression child wins (custom getter/setter
+		// already filtered out above).
+	}
+	return init_idx;
+}
+
+// Two TypeRefs are equivalent for "redundant explicit type" purposes if:
+// - same kind
+// - same name
+// - same nullability
+// - same generic-arg signature (count + per-arg name + per-arg nullability)
+// We do NOT consider FUNCTION types (lambda inference is rarely redundant
+// in practice and parsing function-type text is brittle).
+fn bool typerefs_equivalent_for_redundancy(types::TypeRef* a, types::TypeRef* b) {
+	if (a.kind != b.kind) return false;
+	if (a.kind == types::TypeKind.UNKNOWN) return false;
+	if (a.kind == types::TypeKind.FUNCTION) return false;
+	if (a.name != b.name) return false;
+	if (a.nullable != b.nullable) return false;
+	if (a.type_arg_count != b.type_arg_count) return false;
+	for (usz i = 0; i < a.type_arg_count; i++) {
+		if (a.type_arg_names[i] != b.type_arg_names[i]) return false;
+		if (a.type_arg_nullable[i] != b.type_arg_nullable[i]) return false;
+	}
+	return true;
+}
+
+fn void add_redundant_explicit_type_diagnostics(Object* diagnostics, ParseResult* ast,
+	types::TypeInfo* type_info) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if (n.type_text.len == 0) continue; // no explicit type
+		if ((n.mod_flags & ast::MOD_LATEINIT) != 0) continue; // lateinit needs explicit type
+		if (property_is_delegated(ast, i)) continue;
+
+		uint init_idx = find_property_initializer(ast, i);
+		if (init_idx == uint.max) continue;
+		if (!type_info.has_type[init_idx]) continue;
+
+		types::TypeRef declared = types::parse_type_text(n.type_text);
+		types::TypeRef init_t = type_info.node_types[init_idx];
+
+		if (!typerefs_equivalent_for_redundancy(&declared, &init_t)) continue;
+
+		// Locate the type annotation in source: it follows the colon after the
+		// property name. We only have the name's location and the full type
+		// text. Place the diagnostic on the declaration name line as a Hint.
+		Object* diag = make_diagnostic(n.name_line, n.name_col,
+			n.name_line, n.name_col + n.name_len, 4, // Hint
+			"Explicitly given type is redundant");
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+		diagnostics.push(diag);
+	}
+}
+
+/**
+ * Emit warnings for `x.foo` / `x.bar()` where x has a nullable type and is not
+ * narrowed by smart-cast. The Kotlin compiler rejects this with "Only safe (?.)
+ * or non-null asserted (!!.) calls are allowed on a nullable receiver".
+ *
+ * Detection:
+ *  - DOT_EXPR with extra_text != "?." (regular dot, not safe call)
+ *  - Receiver has a known type and that type's `nullable` flag is true after
+ *    flow narrowing (TypeInfo entries reflect smart casts via resolve_types
+ *    phase 10)
+ *  - Skip writes (LHS of assignment)
+ *  - Skip when receiver type is UNKNOWN (avoid false positives)
+ */
+fn void add_unsafe_nullable_call_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (!config::unsafe_nullable_call_diagnostic_enabled()) return;
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != DOT_EXPR) continue;
+		if (node.name.len == 0) continue;
+		// Safe call already handles nullable receivers correctly.
+		if (node.extra_text == "?.") continue;
+
+		// Receiver is the lower-indexed child.
+		uint recv_idx = ast::NO_PARENT;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) { recv_idx = j; break; }
+		}
+		if (recv_idx == ast::NO_PARENT) continue;
+
+		if (!type_info.has_type[recv_idx]) continue;
+		types::TypeRef recv_type = type_info.node_types[recv_idx];
+		if (recv_type.kind == types::TypeKind.UNKNOWN) continue;
+		// Class references (e.g. `Color` in `Color.RED`) are not values; the
+		// nullable flag doesn't apply to them as receivers.
+		if (recv_type.is_class_ref) continue;
+		if (!recv_type.nullable) continue;
+
+		// Skip writes: parent is ASSIGNMENT_EXPR and we're its LHS.
+		uint p = node.parent;
+		if (p != ast::NO_PARENT && p < ast.node_count
+			&& ast.nodes[p].kind == ASSIGNMENT_EXPR) {
+			uint first = ast::NO_PARENT;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == p) { first = j; break; }
+			}
+			if (first == i) continue;
+		}
+
+		// Build display name for receiver.
+		String recv_name = recv_type.name;
+		if (recv_name.len == 0) recv_name = "?";
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end = object::new_obj(tmem);
+		end.set("line", (int)node.start_line);
+		end.set("character", (int)(node.start_col + node.name.len));
+		range.set("start", start);
+		range.set("end", end);
+
+		diag.set("range", range);
+		diag.set("severity", 1); // Error - matches kotlinc behaviour
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '%s?'", recv_name);
+		diag.set("message", message.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Unit-typed parameter / property diagnostic ─────────────────
+//
+// Spec §8.2: kotlin.Unit is a singleton — its only value is `Unit`. A
+// parameter or local of type Unit therefore carries no information; it
+// is almost always either a leftover from a refactor (deleted return
+// type that was kept as a param) or an over-explicit annotation.
+//
+// Skipped:
+//   - Override / open / abstract members (signature dictated by parent)
+//   - Anonymous params (name length 0)
+//   - Underscore params (already opt-out marker)
+//   - Function return-type Unit (legitimate explicit-Unit pattern)
+
+fn bool type_text_is_unit(String t) {
+	if (t.len == 0) return false;
+	// Trim trailing '?' (Unit? is also pointless; treat the same).
+	usz end = t.len;
+	while (end > 0 && (t[end - 1] == '?' || t[end - 1] == ' ' || t[end - 1] == '\t')) end--;
+	usz start = 0;
+	while (start < end && (t[start] == ' ' || t[start] == '\t')) start++;
+	String trimmed = t[start:end - start];
+	return trimmed == "Unit" || trimmed == "kotlin.Unit";
+}
+
+fn void emit_unit_typed_decl_diag(Object* diagnostics, AstNode* n, String kind_label) {
+	Object* diag = object::new_obj(tmem);
+
+	Object* range = object::new_obj(tmem);
+	Object* start = object::new_obj(tmem);
+	start.set("line", (int)n.name_line);
+	start.set("character", (int)n.name_col);
+	Object* end_pos = object::new_obj(tmem);
+	end_pos.set("line", (int)n.name_line);
+	end_pos.set("character", (int)(n.name_col + n.name_len));
+	range.set("start", start);
+	range.set("end", end_pos);
+
+	diag.set("range", range);
+	diag.set("severity", 2); // Warning
+	diag.set("source", "kls");
+
+	DString message;
+	message.tinit();
+	message.appendf("%s '%s' has type Unit (carries no information)", kind_label, n.name);
+	diag.set("message", message.str_view());
+
+	diagnostics.push(diag);
+}
+
+fn void add_unit_typed_decl_diagnostics(Object* diagnostics, ParseResult* ast) {
+	if (!config::unit_typed_decl_diagnostic_enabled()) return;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PARAM && n.kind != PROPERTY_DECL) continue;
+		if (n.name.len == 0) continue;
+		if (n.name[0] == '_') continue;
+		if (n.type_text.len == 0) continue;
+		if (!type_text_is_unit(n.type_text)) continue;
+		// Skip overrides — signature dictated by parent. For PARAM the
+		// MOD_OVERRIDE lives on the enclosing FUN_DECL, so walk one step.
+		uint owner = n.parent;
+		if (owner != ast::NO_PARENT && owner < ast.node_count) {
+			AstNode* o = &ast.nodes[owner];
+			if ((o.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		}
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		// Skip primary-ctor val/var (could be part of a public API contract,
+		// even if dubious — the whole property emerges as a separate
+		// PROPERTY_DECL node when scanned, so this PARAM-side skip avoids
+		// a duplicate warning).
+		if (n.kind == PARAM && (n.mod_flags & (ast::MOD_FINAL | ast::MOD_VAR)) != 0) continue;
+		// Skip destructuring wrapper — the inner components carry the type.
+		if (n.kind == PROPERTY_DECL && n.name == "(destructuring)") continue;
+		String label = n.kind == PARAM ? "Parameter" : "Property";
+		emit_unit_typed_decl_diag(diagnostics, n, label);
+	}
+}
+
+// ── Short-circuit Nothing rhs hint ──────────────────────────────
+//
+// `b && error("...")` and `b || error("...")` are unusual: the rhs
+// only runs when the lhs gates it (true for &&, false for ||). The
+// existing AST-sibling pass deliberately treats these BINARY_EXPRs
+// as conditional and does not flag the next stmt as unreachable.
+// But this pattern is rare in well-formed code — usually the author
+// meant a guard expression like `require(b)` / `check(b)` or an
+// elvis `?:` short-circuit return.
+//
+// We surface a Hint at the operator so the editor can underline it
+// without the noise of a Warning, leaving the choice to the author.
+fn void add_shortcircuit_nothing_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
+	if (!config::shortcircuit_nothing_diagnostic_enabled()) return;
+	if (type_info == null) return;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		String op = n.extra_text;
+		if (op != "&&" && op != "||") continue;
+		// Find the rhs: BINARY_EXPR has children [lhs, rhs] in source order
+		// but children may be lower-indexed — scan and pick the second.
+		uint lhs_idx = ast::NO_PARENT;
+		uint rhs_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+			if (lhs_idx == ast::NO_PARENT) {
+				lhs_idx = c;
+			} else if (rhs_idx == ast::NO_PARENT) {
+				rhs_idx = c;
+				break;
+			}
+		}
+		if (rhs_idx == ast::NO_PARENT) continue;
+		if (!type_info.has_type[rhs_idx]) continue;
+		if (type_info.node_types[rhs_idx].kind != types::TypeKind.NOTHING) continue;
+
+		// Range covers the operator + rhs (use the whole BINARY_EXPR span
+		// minus the lhs — easier: just use the rhs span, since that's the
+		// surprising part).
+		AstNode* rhs = &ast.nodes[rhs_idx];
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)rhs.start_line);
+		start.set("character", (int)rhs.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)rhs.end_line);
+		end_pos.set("character", (int)rhs.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("Right-hand side of '%s' has type Nothing — diverges only when left-hand side is %s",
+			op, op == "&&" ? "true" : "false");
+		diag.set("message", msg.str_view());
+
+		diagnostics.push(diag);
+	}
+}
+
+// ─── 'forEach' on iterable can be replaced with 'for' loop ──────────
+//
+// Rationale: a for-loop is the idiomatic Kotlin form for unconditional
+// iteration with side effects. `forEach` on Iterable adds a lambda
+// allocation (unless inlined by the platform) and obscures `break` /
+// `continue` / non-local return. Suggest a rewrite when the lambda body
+// does not rely on lambda-specific control-flow semantics.
+//
+// Pattern:
+//   <recv>.forEach { <body> }
+//   <recv>.forEach(label@ { <body> })  — also matched (label preserved)
+//
+// Suppressed when the lambda body contains:
+//   - return / continue / break (semantics differ from a for loop's
+//     equivalent — `return` from a forEach lambda is a non-local return
+//     to the enclosing function; `continue` / `break` are illegal but
+//     a code author may type them and mean labeled @forEach)
+//
+// Severity: Hint (4). Cosmetic suggestion only — not a quickfix.
+fn bool subtree_has_kind(ParseResult* ast, uint root, NodeKind kind) {
+	if (root >= ast.node_count) return false;
+	uint root_lo = ast.nodes[root].start_offset;
+	uint root_hi = ast.nodes[root].end_offset;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != kind) continue;
+		if (n.start_offset < root_lo) continue;
+		if (n.end_offset > root_hi) continue;
+		return true;
+	}
+	return false;
+}
+
+fn void add_foreach_loop_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != "forEach") continue;
+
+		// Callee must be a DOT_EXPR (`recv.forEach` / `recv?.forEach`) –
+		// require a receiver so the suggestion makes sense for collections.
+		uint callee_idx = ast::NO_PARENT;
+		uint trailing_va_idx = ast::NO_PARENT;
+		uint other_arg_count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			AstNode* ch = &ast.nodes[c];
+			if (ch.kind == ANNOTATION_ENTRY) continue;
+			if (ch.kind == VALUE_ARGUMENT) {
+				if (ch.extra_text == "trailing") {
+					trailing_va_idx = c;
+				} else {
+					other_arg_count++;
+				}
+			} else {
+				callee_idx = c;
+			}
+		}
+		if (callee_idx == ast::NO_PARENT) continue;
+		if (trailing_va_idx == ast::NO_PARENT) continue;
+		if (other_arg_count != 0) continue;
+		if (ast.nodes[callee_idx].kind != DOT_EXPR) continue;
+
+		// Trailing arg must wrap a single LAMBDA_EXPR (not an
+		// ANONYMOUS_FUN_EXPR — the latter has different return semantics).
+		uint lambda_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != trailing_va_idx) continue;
+			lambda_idx = c;
+			break;
+		}
+		if (lambda_idx == ast::NO_PARENT) continue;
+		if (ast.nodes[lambda_idx].kind != LAMBDA_EXPR) continue;
+
+		// Skip when the body uses non-local return / continue / break –
+		// rewriting changes semantics in those cases.
+		if (subtree_has_kind(ast, lambda_idx, RETURN_EXPR)) continue;
+		if (subtree_has_kind(ast, lambda_idx, CONTINUE_EXPR)) continue;
+		if (subtree_has_kind(ast, lambda_idx, BREAK_EXPR)) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		diag.set("message", "'forEach' can be replaced with a 'for' loop");
+		diagnostics.push(diag);
+	}
+}
+
+// ─── '==' / '!=' between unrelated types (always false / always true) ─
+//
+// Walks every BINARY_EXPR with operator '==' / '!=' (structural equality
+// in Kotlin spec §11.5). When both operands have known types and neither
+// is assignable to the other, the comparison can never succeed — emit a
+// Warning. The dual operator '!=' would always succeed; we still emit so
+// the author can spot the type mismatch.
+//
+// Conservative — skip when:
+//   - either operand has UNKNOWN / NOTHING type (insufficient info)
+//   - either operand is the null literal (covered by other checks)
+//   - either operand's type is `Any` / `Any?` (universal supertype)
+//   - the only difference is nullability (`String?` vs `String` related)
+//
+// Numeric tower comparisons (Int vs Long, Float vs Double) are
+// considered related via STDLIB_SUPERTYPES (Number ancestry) and so are
+// not flagged — Kotlin allows them at runtime via boxing equality.
+fn bool type_is_unrelated_for_equality(types::TypeRef a, types::TypeRef b) {
+	// Permissive when either side is unknown / nothing / null literal.
+	if (a.kind == types::TypeKind.UNKNOWN || b.kind == types::TypeKind.UNKNOWN) return false;
+	if (a.kind == types::TypeKind.NOTHING || b.kind == types::TypeKind.NOTHING) return false;
+	if (a.name == "Nothing" || b.name == "Nothing") return false;
+	// `Any` / `Any?` is the universal supertype – never unrelated.
+	if (a.name == "Any" || b.name == "Any") return false;
+	// Type parameters are erased at runtime – be permissive.
+	if (types::is_type_parameter(a.name) || types::is_type_parameter(b.name)) return false;
+	// FUNCTION / GENERIC / UNIT shapes are out of scope for now – noisy.
+	if (a.kind != types::TypeKind.SIMPLE) return false;
+	if (b.kind != types::TypeKind.SIMPLE) return false;
+
+	// Strip nullability for the relatedness check – the comparison itself
+	// is always nullable-tolerant in Kotlin.
+	types::TypeRef a_strip = a; a_strip.nullable = false;
+	types::TypeRef b_strip = b; b_strip.nullable = false;
+
+	if (types::is_assignable_to(a_strip, b_strip)) return false;
+	if (types::is_assignable_to(b_strip, a_strip)) return false;
+	return true;
+}
+
+fn bool node_is_null_literal(ParseResult* ast, uint idx) {
+	if (idx >= ast.node_count) return false;
+	AstNode* n = &ast.nodes[idx];
+	return n.kind == LITERAL_EXPR && n.extra_text == "null";
+}
+
+fn void add_unrelated_equality_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != BINARY_EXPR) continue;
+		String op = n.extra_text;
+		if (op != "==" && op != "!=") continue;
+
+		// Find lhs / rhs (children may be lower-indexed).
+		uint lhs_idx = ast::NO_PARENT;
+		uint rhs_idx = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+			if (lhs_idx == ast::NO_PARENT) {
+				lhs_idx = c;
+			} else if (rhs_idx == ast::NO_PARENT) {
+				rhs_idx = c;
+				break;
+			}
+		}
+		if (rhs_idx == ast::NO_PARENT) continue;
+
+		// Skip null comparisons – idiomatic, separate diagnostic territory.
+		if (node_is_null_literal(ast, lhs_idx)) continue;
+		if (node_is_null_literal(ast, rhs_idx)) continue;
+
+		if (!type_info.has_type[lhs_idx]) continue;
+		if (!type_info.has_type[rhs_idx]) continue;
+
+		types::TypeRef lt = type_info.node_types[lhs_idx];
+		types::TypeRef rt = type_info.node_types[rhs_idx];
+		if (!type_is_unrelated_for_equality(lt, rt)) continue;
+
+		String verdict = (op == "==") ? "false" : "true";
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		DString msg;
+		msg.tinit();
+		msg.appendf("Comparison of unrelated types '%s' and '%s' always yields %s",
+			lt.name, rt.name, verdict);
+		diag.set("message", msg.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ─── Diagnostic: redundant `when` with only `else` arm ───────────
+//
+// `when { else -> X }` (subject-less or subject-form) is exactly `X`.
+// Hint that the wrapping `when` provides nothing.
+//
+// Skips:
+//   - `when` with multiple entries (real use)
+//   - `when` with a single non-else entry (the cond is doing work)
+//   - empty `when {}` (caught by parser elsewhere)
+//
+// Emits Hint at the WHEN_EXPR span.
+fn void add_redundant_when_else_only_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_EXPR) continue;
+
+		// Walk direct children, count entries, check if exactly one is else.
+		uint entry_count = 0;
+		uint else_count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			entry_count++;
+			if (ast.nodes[c].extra_text == "else") else_count++;
+		}
+		if (entry_count != 1) continue;
+		if (else_count != 1) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		diag.set("message", "Redundant 'when' — only an 'else' branch; the body is the value");
+		diagnostics.push(diag);
+	}
+}
+
+// ── Missing override diagnostic ────────────────────────────────────
+//
+// Emit a Warning when a function declared inside CLASS_DECL/INTERFACE_DECL/
+// OBJECT_DECL has no `override` modifier but matches a member function in
+// a direct supertype by name + parameter arity.
+//
+// Limitations (documented for future improvement):
+//   - Direct supertypes only (no transitive walk via Mid : Base)
+//   - Match by name + arity only (no parameter-type equality)
+//   - Skips supertype member if final / private / static
+//   - Skips top-level functions and constructor bodies
+//   - Skips funs without a name
+//   - Skips operator/infix overloads (could be unrelated)
+
+fn void add_missing_override_diagnostics(Object* diagnostics, ParseResult* ast,
+		WorkspaceIndex* workspace) {
+	if (workspace == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* fn_node = &ast.nodes[i];
+		if (fn_node.kind != FUN_DECL) continue;
+		if (fn_node.name.len == 0) continue;
+		if ((fn_node.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		// Skip operators — they can be defined freshly without overriding
+		if ((fn_node.mod_flags & ast::MOD_OPERATOR) != 0) continue;
+
+		// Find enclosing class/interface/object via parent walk
+		uint enclosing_idx = ast::NO_PARENT;
+		uint cursor = fn_node.parent;
+		while (cursor != ast::NO_PARENT) {
+			NodeKind ck = ast.nodes[cursor].kind;
+			if (ck == CLASS_DECL || ck == INTERFACE_DECL || ck == OBJECT_DECL) {
+				enclosing_idx = cursor;
+				break;
+			}
+			// Stop at file root or nested function (other fun's local fn doesn't override)
+			if (ck == FILE) break;
+			if (ck == FUN_DECL) break;
+			cursor = ast.nodes[cursor].parent;
+		}
+		if (enclosing_idx == ast::NO_PARENT) continue;
+
+		AstNode* class_node = &ast.nodes[enclosing_idx];
+		if (class_node.name.len == 0) continue;
+
+		// Count own params
+		uint own_param_count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == PARAM) own_param_count++;
+		}
+
+		// Look up enclosing class symbol → direct supertypes
+		String[symbols::MAX_SUPERTYPES] super_names;
+		usz super_count = 0;
+		if (try indices = workspace.lookup_by_name(class_node.name)) {
+			for (usz j = 0; j < indices.len() && super_count == 0; j++) {
+				WorkspaceSymbol* sym = workspace.get_symbol(indices.get(j));
+				if (sym.name != class_node.name) continue;
+				for (usz k = 0; k < sym.supertype_count; k++) {
+					if (super_count >= symbols::MAX_SUPERTYPES) break;
+					super_names[super_count++] = sym.supertypes[k];
+				}
+			}
+		}
+		if (super_count == 0) continue;
+
+		// For each supertype, check member cache
+		bool matched = false;
+		for (usz s = 0; s < super_count && !matched; s++) {
+			String super_name = super_names[s];
+			if (super_name.len == 0) continue;
+			List{MemberDecl}* members = workspace.lookup_members(super_name) ?? null;
+			if (members == null) continue;
+			for (usz m = 0; m < members.len(); m++) {
+				MemberDecl* md = &(*members)[m];
+				if (md.node_kind != FUN_DECL) continue;
+				if (md.name != fn_node.name) continue;
+				if (md.param_count != (usz)own_param_count) continue;
+				// Skip non-overridable supertype members
+				if ((md.mod_flags & ast::MOD_PRIVATE) != 0) continue;
+				if ((md.mod_flags & ast::MOD_FINAL) != 0) continue;
+				matched = true;
+				break;
+			}
+		}
+		if (!matched) continue;
+
+		// Emit warning at the fun name location
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)fn_node.name_line);
+		start.set("character", (int)fn_node.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)fn_node.name_line);
+		end_pos.set("character", (int)(fn_node.name_col + fn_node.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+		DString message;
+		message.tinit();
+		message.appendf("Function '%s' overrides supertype member but lacks 'override'", fn_node.name);
+		diag.set("message", message.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ── Can-be-const diagnostic ────────────────────────────────────────
+//
+// Emit Hint when a `val` could be `const val`. Kotlin spec §16.30:
+// `const` is allowed on top-level or `object` members with primitive /
+// String type and compile-time-constant initializer.
+//
+// Heuristic:
+//   - PROPERTY_DECL with `val` (no MOD_VAR), no MOD_CONST, no MOD_LATEINIT
+//   - No custom getter, not delegated
+//   - Parent is FILE (top-level) OR OBJECT_DECL (object member)
+//     (NOT CLASS_DECL — `const` not allowed inside class)
+//     (NOT COMPANION_OBJECT_DECL is allowed — it's an OBJECT_DECL nested in CLASS_DECL,
+//      check that the COMPANION_OBJECT_DECL itself is the parent)
+//   - Initializer must be:
+//     * LITERAL_EXPR (number, true, false; `null` excluded)
+//     * STRING_TEMPLATE_EXPR with no children (pure string literal)
+//
+// Limitations (deferred): no constant-folding (e.g. `1 + 2`, ref to other const val).
+
+fn bool is_compile_time_constant(ParseResult* ast, uint init_idx) {
+	AstNode* init = &ast.nodes[init_idx];
+	if (init.kind == LITERAL_EXPR) {
+		// Exclude null
+		if (init.extra_text == "null") return false;
+		return true;
+	}
+	if (init.kind == STRING_TEMPLATE_EXPR) {
+		// Pure literal — no template parts
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent == init_idx) return false;
+		}
+		return true;
+	}
+	return false;
+}
+
+fn uint find_property_initializer_for_const(ParseResult* ast, uint prop_idx) {
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != prop_idx) continue;
+		NodeKind ck = ast.nodes[c].kind;
+		if (ck == FUN_DECL) continue;       // get()/set() accessors
+		if (ck == PARAM) continue;
+		if (ck == TYPE_REF) continue;
+		if (ck == TYPE_PARAM) continue;
+		return c;
+	}
+	return ast::NO_PARENT;
+}
+
+fn void add_can_be_const_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if (n.name.len == 0) continue;
+		if ((n.mod_flags & ast::MOD_VAR) != 0) continue;
+		if ((n.mod_flags & ast::MOD_CONST) != 0) continue;
+		if ((n.mod_flags & ast::MOD_LATEINIT) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+
+		// Parent must be FILE or OBJECT_DECL
+		if (n.parent == ast::NO_PARENT) continue;
+		AstNode* parent = &ast.nodes[n.parent];
+		if (parent.kind != FILE && parent.kind != OBJECT_DECL
+			&& parent.kind != COMPANION_OBJECT_DECL) continue;
+
+		// Custom getter or delegate disqualifies
+		bool has_getter = false;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == FUN_DECL && ast.nodes[c].name == "get") {
+				has_getter = true;
+				break;
+			}
+		}
+		if (has_getter) continue;
+
+		// Find initializer
+		uint init_idx = find_property_initializer_for_const(ast, i);
+		if (init_idx == ast::NO_PARENT) continue;
+		if (!is_compile_time_constant(ast, init_idx)) continue;
+
+		// Emit Hint at name range
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.name_line);
+		start.set("character", (int)n.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.name_line);
+		end_pos.set("character", (int)(n.name_col + n.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		DString message;
+		message.tinit();
+		message.appendf("Property '%s' could be 'const'", n.name);
+		diag.set("message", message.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant explicit return type on functions ────────────────────
+//
+// Hint when a FUN_DECL has explicit return type that matches the inferred
+// type of its expression body. Covers `fun foo(): Int = 42` only; block
+// bodies (`fun foo(): Int { return 42 }`) are deferred.
+//
+// Skip rules (mirror IntelliJ heuristic):
+//   - No body / abstract → can't infer
+//   - override / open → explicit type may be required for ABI clarity
+//   - Body is BLOCK → defer (multi-return analysis)
+//   - Inferred type is UNKNOWN/Nothing → not safe to remove
+//   - Returns Unit → covered by separate Unit-typed-decl diagnostic
+
+fn uint find_fun_expression_body(ParseResult* ast, uint fun_idx) {
+	// Expression body = lone non-{PARAM,TYPE_REF,TYPE_PARAM,FUN_DECL} child
+	// that is not a BLOCK.
+	uint body_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != fun_idx) continue;
+		NodeKind ck = n.kind;
+		if (ck == PARAM || ck == TYPE_REF || ck == TYPE_PARAM) continue;
+		if (ck == FUN_DECL) continue; // get/set accessors (rare on funs)
+		if (ck == BLOCK) return ast::NO_PARENT; // block body — caller defers
+		body_idx = c;
+	}
+	return body_idx;
+}
+
+fn void add_redundant_return_type_diagnostics(Object* diagnostics, ParseResult* ast,
+		types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name.len == 0) continue;
+		if (n.type_text.len == 0) continue;
+		if ((n.mod_flags & ast::MOD_ABSTRACT) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OPEN) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXTERNAL) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXPECT) != 0) continue;
+
+		uint body_idx = find_fun_expression_body(ast, i);
+		if (body_idx == ast::NO_PARENT) continue;
+		if (!type_info.has_type[body_idx]) continue;
+
+		types::TypeRef declared = types::parse_type_text(n.type_text);
+		types::TypeRef body_t = type_info.node_types[body_idx];
+
+		if (body_t.kind == types::TypeKind.UNKNOWN) continue;
+		// Skip Nothing — caller likely wants the explicit annotation
+		if (body_t.kind == types::TypeKind.NOTHING) continue;
+		// Skip Unit — covered by separate diag
+		if (body_t.kind == types::TypeKind.UNIT) continue;
+		if (declared.name == "Unit") continue;
+
+		if (!typerefs_equivalent_for_redundancy(&declared, &body_t)) continue;
+
+		Object* diag = make_diagnostic(n.name_line, n.name_col,
+			n.name_line, n.name_col + n.name_len, 4, // Hint
+			"Explicitly given return type is redundant");
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+		diagnostics.push(diag);
+	}
+}
+
+// ── Arithmetic operator type mismatch ──────────────────────────────
+//
+// Kotlin spec §11.7-11.8 (operator overloading): `a + b` desugars to
+// `a.plus(b)`. If left operand is a non-numeric / non-String type
+// without an `operator fun plus(...)` (or minus/times/div/rem) the
+// expression is a type error.
+//
+// Conservative: emit only when BOTH operands have known (non-UNKNOWN)
+// types AND
+//   - left is not in numeric tower (Int/Long/Short/Byte/Float/Double/Char/Number)
+//   - left is not String (String + Any always works per Kotlin)
+//   - no operator method found on left (in-file ext, in-file class,
+//     workspace, dep)
+// Skip when type_info missing or types unknown.
+//
+// Range covers the operator token's position-to-end-of-rhs span by
+// using the BINARY_EXPR's own range.
+
+fn bool is_numeric_arith_type(types::TypeRef tr) {
+	if (tr.kind != types::TypeKind.SIMPLE) return false;
+	if (tr.nullable) return false; // nullable arithmetic always errors anyway, separate diag
+	String n = tr.name;
+	return n == "Int" || n == "Long" || n == "Short" || n == "Byte"
+		|| n == "Float" || n == "Double" || n == "Char" || n == "Number"
+		|| n == "UInt" || n == "ULong" || n == "UShort" || n == "UByte";
+}
+
+fn void add_arithmetic_op_mismatch_diagnostics(Object* diagnostics, ParseResult* ast,
+	types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		String op = node.extra_text;
+		if (op != "+" && op != "-" && op != "*" && op != "/" && op != "%") continue;
+
+		// Find first two children
+		uint lhs_idx = uint.max;
+		uint rhs_idx = uint.max;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent != i) continue;
+			if (lhs_idx == uint.max) {
+				lhs_idx = j;
+			} else if (rhs_idx == uint.max) {
+				rhs_idx = j;
+				break;
+			}
+		}
+		if (lhs_idx == uint.max || rhs_idx == uint.max) continue;
+		if (!type_info.has_type[lhs_idx] || !type_info.has_type[rhs_idx]) continue;
+
+		types::TypeRef lt = type_info.node_types[lhs_idx];
+		types::TypeRef rt = type_info.node_types[rhs_idx];
+		if (lt.kind == types::TypeKind.UNKNOWN || rt.kind == types::TypeKind.UNKNOWN) continue;
+
+		// Skip nullable receivers — they have a separate diag path
+		if (lt.nullable) continue;
+
+		// String "+" handled by Kotlin spec §11.7.1 (toString concat)
+		if (op == "+" && lt.name == "String") continue;
+		// Right-side String concat: `Any + String` doesn't auto-promote in
+		// Kotlin (only `String + Any` does); so still check for plus method.
+
+		// Numeric tower — both sides numeric-compatible: skip.
+		if (is_numeric_arith_type(lt) && is_numeric_arith_type(rt)) continue;
+
+		// Look up operator method on left receiver.
+		String method = types::binary_op_method(op);
+		if (method.len == 0) continue;
+		types::TypeRef looked_up = types::resolve_member_type(lt, method);
+		if (looked_up.kind == types::TypeKind.UNKNOWN) {
+			looked_up = types::lookup_member_anywhere(ast, type_info, lt, method);
+		}
+		if (looked_up.kind != types::TypeKind.UNKNOWN) continue;
+
+		// Skip when left is a type parameter (T) — too permissive to know
+		if (types::is_type_parameter(lt.name)) continue;
+		// Skip Any / Unit / Nothing — not meaningful arithmetic targets but
+		// covered by other diagnostics
+		if (lt.name == "Any" || lt.name == "Unit" || lt.name == "Nothing") continue;
+
+		String lt_text = types::format_type(&lt);
+		String rt_text = types::format_type(&rt);
+		String msg = string::tformat("Operator '%s' is not defined for types '%s' and '%s'",
+			op, lt_text, rt_text);
+
+		Object* diag = make_diagnostic(
+			node.start_line, node.start_col,
+			node.end_line, node.end_col,
+			2, msg);
+		diagnostics.push(diag);
+	}
 }

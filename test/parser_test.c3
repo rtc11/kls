@@ -2,6 +2,7 @@ module kls::test::parser_test;
 
 import kls::kotlin::parser;
 import kls::kotlin::ast;
+import std::io;
 
 // ── Helper ──────────────────────────────────────────────────────────
 
@@ -13,8 +14,11 @@ fn ParseResult* do_parse(String src) {
 }
 
 fn void free_result(ParseResult* r) {
-	// Free heap-copied multi-annotation strings (contain spaces)
+	// Free heap-copied multi-annotation strings (contain spaces).
+	// ANNOTATION_ENTRY nodes also store argument text in annotation_text,
+	// but that's a zero-copy source slice -- skip those.
 	for (uint i = 0; i < r.node_count; i++) {
+		if (r.nodes[i].kind == ANNOTATION_ENTRY) continue;
 		String ann = r.nodes[i].annotation_text;
 		if (ann.len > 0) {
 			bool has_space = false;
@@ -3899,6 +3903,400 @@ fn void parse_annotation_on_class_member_fun() @test {
 	};
 }
 
+// ── ANNOTATION_ENTRY AST node ──────────────────────────────────────
+
+fn void annotation_entry_attached_as_child() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Test fun myTest() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		AstNode*? ann = ast::find_annotation(r, fun, "Test");
+		assert(@ok(ann), "expected to find @Test child");
+		AstNode* a = ann!!;
+		assert(a.kind == ANNOTATION_ENTRY, "expected ANNOTATION_ENTRY kind");
+		assert(a.name == "Test", "expected name 'Test', got '%s'", a.name);
+		assert(a.annotation_target() == "", "expected empty target, got '%s'", a.annotation_target());
+	};
+}
+
+fn void annotation_entry_dotted_path() @test {
+	@pool() {
+		ParseResult* r = do_parse("@org.junit.Test fun t() {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, fun, "Test")!!;
+		assert(a.name == "Test", "simple name should be last segment");
+		assert(a.extra_text == "org.junit.Test", "extra_text should be full dotted path, got '%s'", a.extra_text);
+	};
+}
+
+fn void annotation_entry_with_use_site_target() @test {
+	@pool() {
+		ParseResult* r = do_parse("@get:JvmName(\"foo\") val x = 1"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* prop = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, prop, "JvmName")!!;
+		assert(a.annotation_target() == "get", "expected target 'get', got '%s'", a.annotation_target());
+		assert(a.annotation_text == "(\"foo\")", "expected args slice '(\"foo\")', got '%s'", a.annotation_text);
+	};
+}
+
+fn void annotation_entry_args_text_captured() @test {
+	@pool() {
+		ParseResult* r = do_parse("@JvmName(\"hello\") fun f() {}"); defer free_result(r);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, fun, "JvmName")!!;
+		assert(a.annotation_text == "(\"hello\")", "expected '(\"hello\")', got '%s'", a.annotation_text);
+	};
+}
+
+fn void annotation_entry_no_args_empty_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Deprecated fun old() {}"); defer free_result(r);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, fun, "Deprecated")!!;
+		assert(a.annotation_text == "", "expected empty args text, got '%s'", a.annotation_text);
+	};
+}
+
+fn void annotation_entries_multiple_on_one_decl() @test {
+	@pool() {
+		ParseResult* r = do_parse("@Test @Ignore fun t() {}"); defer free_result(r);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode*? a1 = ast::find_annotation(r, fun, "Test");
+		AstNode*? a2 = ast::find_annotation(r, fun, "Ignore");
+		assert(@ok(a1), "expected @Test entry");
+		assert(@ok(a2), "expected @Ignore entry");
+		uint count = ast::count_children_of_kind(r, fun, ANNOTATION_ENTRY);
+		assert(count == 2, "expected 2 ANNOTATION_ENTRY children, got %d", count);
+	};
+}
+
+fn void annotation_entry_on_class() @test {
+	@pool() {
+		ParseResult* r = do_parse("@RunWith(JUnit4::class) class MyTests {}"); defer free_result(r);
+		AstNode* cls = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, cls, "RunWith")!!;
+		assert(a.kind == ANNOTATION_ENTRY, "expected ANNOTATION_ENTRY");
+		assert(a.annotation_text == "(JUnit4::class)", "expected args '(JUnit4::class)', got '%s'", a.annotation_text);
+	};
+}
+
+fn void file_annotation_attached_to_file_node() @test {
+	@pool() {
+		String src = `@file:JvmName("Foo")
+package com.example
+fun main() {}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* f = file_node(r);
+		AstNode* a = ast::find_annotation(r, f, "JvmName")!!;
+		assert(a.annotation_target() == "file", "expected target 'file', got '%s'", a.annotation_target());
+		assert(a.annotation_text == "(\"Foo\")", "expected args '(\"Foo\")', got '%s'", a.annotation_text);
+	};
+}
+
+fn void annotation_entries_on_property() @test {
+	@pool() {
+		ParseResult* r = do_parse("@JvmField val x = 1"); defer free_result(r);
+		AstNode* prop = child(r, file_node(r), 0);
+		AstNode* a = ast::find_annotation(r, prop, "JvmField")!!;
+		assert(a.annotation_target() == "", "expected no target");
+	};
+}
+
+// ── VALUE_ARGUMENT nodes ───────────────────────────────────────────
+
+fn void value_argument_wraps_positional() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun t() { foo(1, 2, 3) }"); defer free_result(r);
+		// Find the CALL_EXPR
+		uint call_idx = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "foo") {
+				call_idx = i;
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected CALL_EXPR for foo");
+		uint argc = ast::count_call_args(r, call_idx);
+		assert(argc == 3, "expected 3 VALUE_ARGUMENT children, got %d", (int)argc);
+	};
+}
+
+fn void value_argument_named_arg_has_name() @test {
+	@pool() {
+		ParseResult* r = do_parse(`fun t() { foo(x = 1, y = 2) }`); defer free_result(r);
+		uint call_idx = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "foo") {
+				call_idx = i; found = true; break;
+			}
+		}
+		assert(found, "expected CALL_EXPR");
+		String[2] names;
+		usz vi = 0;
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent == call_idx && r.nodes[j].kind == VALUE_ARGUMENT) {
+				if (vi < 2) names[vi++] = r.nodes[j].name;
+			}
+		}
+		assert(vi == 2, "expected 2 args, got %d", (int)vi);
+		assert(names[0] == "x", "first arg name should be 'x', got '%s'", names[0]);
+		assert(names[1] == "y", "second arg name should be 'y', got '%s'", names[1]);
+	};
+}
+
+fn void value_argument_spread_marked() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun t() { foo(*xs) }"); defer free_result(r);
+		uint call_idx = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "foo") {
+				call_idx = i; found = true; break;
+			}
+		}
+		assert(found, "expected CALL_EXPR");
+		bool seen_spread = false;
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent == call_idx && r.nodes[j].kind == VALUE_ARGUMENT) {
+				assert(ast::arg_is_spread(&r.nodes[j]), "expected spread arg");
+				seen_spread = true;
+			}
+		}
+		assert(seen_spread, "no VALUE_ARGUMENT found");
+	};
+}
+
+fn void value_argument_expr_child_is_callee_arg() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun t() { foo(bar()) }"); defer free_result(r);
+		uint outer_call = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "foo") {
+				outer_call = i; found = true; break;
+			}
+		}
+		assert(found, "expected outer CALL_EXPR");
+		uint va_idx = 0;
+		bool va_found = false;
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent == outer_call && r.nodes[j].kind == VALUE_ARGUMENT) {
+				va_idx = j; va_found = true; break;
+			}
+		}
+		assert(va_found, "no VALUE_ARGUMENT");
+		AstNode* expr = ast::get_arg_expr(r, va_idx)!!;
+		assert(expr.kind == CALL_EXPR, "expected CALL_EXPR child, got %d", (int)expr.kind);
+		assert(expr.name == "bar", "expected 'bar', got '%s'", expr.name);
+	};
+}
+
+fn void value_argument_trailing_lambda_not_wrapped() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun t() { xs.filter { it > 0 } }"); defer free_result(r);
+		// CALL_EXPR for filter has trailing lambda as VALUE_ARGUMENT child
+		// (extra_text = "trailing"). Verify it's there and marked.
+		uint call_idx = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "filter") {
+				call_idx = i; found = true; break;
+			}
+		}
+		assert(found, "expected filter CALL_EXPR");
+		uint va_count = ast::count_call_args(r, call_idx);
+		assert(va_count == 1, "expected 1 VALUE_ARGUMENT (trailing lambda), got %d", (int)va_count);
+		bool seen_trailing_lambda = false;
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent != call_idx) continue;
+			if (r.nodes[j].kind != VALUE_ARGUMENT) continue;
+			assert(r.nodes[j].extra_text == "trailing",
+				"expected trailing marker, got '%s'", r.nodes[j].extra_text);
+			AstNode* expr = ast::get_arg_expr(r, j)!!;
+			assert(expr.kind == LAMBDA_EXPR, "expected LAMBDA_EXPR child");
+			seen_trailing_lambda = true;
+		}
+		assert(seen_trailing_lambda, "no trailing-lambda VALUE_ARGUMENT");
+	};
+}
+
+fn void value_argument_call_with_args_and_trailing_lambda() @test {
+	@pool() {
+		// foo(1, 2) { it } — both parenthesized args and trailing lambda
+		// should be VALUE_ARGUMENT children of the SAME CALL_EXPR (no double-wrap).
+		ParseResult* r = do_parse("fun t() { foo(1, 2) { it } }"); defer free_result(r);
+		// Find the outermost CALL_EXPR for foo
+		uint outer_call = uint.max;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind != CALL_EXPR) continue;
+			if (r.nodes[i].name != "foo") continue;
+			// Outermost has parent != CALL_EXPR
+			uint p = r.nodes[i].parent;
+			if (p == ast::NO_PARENT || r.nodes[p].kind != CALL_EXPR) {
+				outer_call = i;
+				break;
+			}
+		}
+		assert(outer_call != uint.max, "expected outer foo CALL_EXPR");
+		uint va_count = ast::count_call_args(r, outer_call);
+		assert(va_count == 3, "expected 3 VALUE_ARGUMENT (1, 2, lambda), got %d", (int)va_count);
+		// Last VALUE_ARGUMENT should have extra_text == "trailing"
+		uint last_va = uint.max;
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent != outer_call) continue;
+			if (r.nodes[j].kind != VALUE_ARGUMENT) continue;
+			last_va = j;
+		}
+		assert(last_va != uint.max, "no VALUE_ARGUMENT");
+		assert(r.nodes[last_va].extra_text == "trailing",
+			"expected last VA to be trailing, got '%s'", r.nodes[last_va].extra_text);
+		AstNode* lam = ast::get_arg_expr(r, last_va)!!;
+		assert(lam.kind == LAMBDA_EXPR, "expected LAMBDA_EXPR");
+	};
+}
+
+fn void value_argument_lambda_only_no_parens() @test {
+	@pool() {
+		// runBlocking { ... } — call with trailing lambda only, no parens.
+		ParseResult* r = do_parse("fun t() { runBlocking { 1 } }"); defer free_result(r);
+		uint call_idx = uint.max;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "runBlocking") {
+				call_idx = i; break;
+			}
+		}
+		assert(call_idx != uint.max, "expected runBlocking CALL_EXPR");
+		uint va_count = ast::count_call_args(r, call_idx);
+		assert(va_count == 1, "expected 1 VALUE_ARGUMENT (trailing lambda), got %d", (int)va_count);
+	};
+}
+
+fn void value_argument_paren_lambda_is_wrapped() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun t() { foo({ it }) }"); defer free_result(r);
+		uint call_idx = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "foo") {
+				call_idx = i; found = true; break;
+			}
+		}
+		assert(found, "expected foo CALL_EXPR");
+		uint va_count = ast::count_call_args(r, call_idx);
+		assert(va_count == 1, "expected 1 VALUE_ARGUMENT (parenthesized lambda wrapped), got %d", (int)va_count);
+		// The wrapped expression should be a LAMBDA_EXPR
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent == call_idx && r.nodes[j].kind == VALUE_ARGUMENT) {
+				AstNode* expr = ast::get_arg_expr(r, j)!!;
+				assert(expr.kind == LAMBDA_EXPR, "expected LAMBDA_EXPR child of VALUE_ARGUMENT, got %d", (int)expr.kind);
+				break;
+			}
+		}
+	};
+}
+
+// ── ANONYMOUS_FUN_EXPR nodes ───────────────────────────────────────
+
+fn void anonymous_fun_expr_basic() @test {
+	@pool() {
+		ParseResult* r = do_parse("val f = fun(x: Int): Int { return x + 1 }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == ANONYMOUS_FUN_EXPR) { found = true; break; }
+		}
+		assert(found, "expected ANONYMOUS_FUN_EXPR node");
+	};
+}
+
+fn void anonymous_fun_expr_has_param() @test {
+	@pool() {
+		ParseResult* r = do_parse("val f = fun(x: Int): Int { return x }"); defer free_result(r);
+		uint anon_idx = 0;
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == ANONYMOUS_FUN_EXPR) { anon_idx = i; found = true; break; }
+		}
+		assert(found, "expected ANONYMOUS_FUN_EXPR");
+		AstNode* anon = &r.nodes[anon_idx];
+		uint pcount = ast::count_children_of_kind(r, anon, PARAM);
+		assert(pcount == 1, "expected 1 PARAM child, got %d", (int)pcount);
+		AstNode* p = ast::find_child(r, anon, PARAM)!!;
+		assert(p.name == "x", "expected param 'x', got '%s'", p.name);
+		assert(p.type_text == "Int", "expected type 'Int', got '%s'", p.type_text);
+	};
+}
+
+fn void anonymous_fun_expr_has_return_type() @test {
+	@pool() {
+		ParseResult* r = do_parse("val f = fun(): String { return \"hi\" }"); defer free_result(r);
+		bool ok = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == ANONYMOUS_FUN_EXPR) {
+				assert(r.nodes[i].type_text == "String", "expected return type 'String', got '%s'", r.nodes[i].type_text);
+				ok = true;
+				break;
+			}
+		}
+		assert(ok, "expected ANONYMOUS_FUN_EXPR");
+	};
+}
+
+fn void anonymous_fun_expr_expression_body() @test {
+	@pool() {
+		ParseResult* r = do_parse("val f = fun(x: Int) = x + 1"); defer free_result(r);
+		bool ok = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == ANONYMOUS_FUN_EXPR) { ok = true; break; }
+		}
+		assert(ok, "expected ANONYMOUS_FUN_EXPR for expression-body form");
+	};
+}
+
+fn void anonymous_fun_expr_no_params_no_return() @test {
+	@pool() {
+		ParseResult* r = do_parse("val f = fun() { println(\"hi\") }"); defer free_result(r);
+		bool ok = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == ANONYMOUS_FUN_EXPR) { ok = true; break; }
+		}
+		assert(ok, "expected ANONYMOUS_FUN_EXPR");
+	};
+}
+
+fn void anonymous_fun_expr_in_call_argument() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun t() { foo(fun(x: Int): Int = x * 2) }"); defer free_result(r);
+		uint call_idx = 0;
+		bool found_call = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CALL_EXPR && r.nodes[i].name == "foo") {
+				call_idx = i; found_call = true; break;
+			}
+		}
+		assert(found_call, "expected foo CALL_EXPR");
+		uint va_count = ast::count_call_args(r, call_idx);
+		assert(va_count == 1, "expected 1 VALUE_ARGUMENT, got %d", (int)va_count);
+		// VALUE_ARGUMENT child should be ANONYMOUS_FUN_EXPR
+		bool wrapped = false;
+		for (uint j = 0; j < r.node_count; j++) {
+			if (r.nodes[j].parent == call_idx && r.nodes[j].kind == VALUE_ARGUMENT) {
+				AstNode* expr = ast::get_arg_expr(r, j)!!;
+				assert(expr.kind == ANONYMOUS_FUN_EXPR, "expected ANONYMOUS_FUN_EXPR child, got %d", (int)expr.kind);
+				wrapped = true;
+				break;
+			}
+		}
+		assert(wrapped, "expected wrapped anonymous fun arg");
+	};
+}
+
 // ── TYPE_ARG nodes ─────────────────────────────────────────────────
 
 fn void parse_type_args_in_supertype() @test {
@@ -4246,5 +4644,328 @@ class Config {
 			if (n.name == "StreamsConfig") sc_count++;
 		}
 		assert(sc_count >= 2, "expected >=2 DOT_EXPRs with name='StreamsConfig', got %d", sc_count);
+	};
+}
+
+// ── PARAM default value capture ────────────────────────────────────
+
+fn void param_default_simple_literal() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(x: Int = 42) {}"); defer free_result(r);
+		AstNode* p = null;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM && r.nodes[i].name == "x") {
+				p = &r.nodes[i]; break;
+			}
+		}
+		assert(p != null, "expected PARAM x");
+		assert(ast::param_has_default(p), "expected default value");
+		assert(ast::param_default_text(p) == "42",
+			"expected '42', got '%s'", ast::param_default_text(p));
+	};
+}
+
+fn void param_default_string_literal() @test {
+	@pool() {
+		ParseResult* r = do_parse(`fun f(name: String = "hi") {}`); defer free_result(r);
+		AstNode* p = null;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM && r.nodes[i].name == "name") {
+				p = &r.nodes[i]; break;
+			}
+		}
+		assert(p != null, "expected PARAM name");
+		assert(ast::param_default_text(p) == `"hi"`,
+			"expected '\"hi\"', got '%s'", ast::param_default_text(p));
+	};
+}
+
+fn void param_default_call_expr() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(xs: List<Int> = listOf(1, 2)) {}"); defer free_result(r);
+		AstNode* p = null;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM && r.nodes[i].name == "xs") {
+				p = &r.nodes[i]; break;
+			}
+		}
+		assert(p != null, "expected PARAM xs");
+		String dt = ast::param_default_text(p);
+		assert(dt == "listOf(1, 2)",
+			"expected 'listOf(1, 2)', got '%s'", dt);
+	};
+}
+
+fn void param_no_default_text_empty() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(x: Int) {}"); defer free_result(r);
+		AstNode* p = null;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM && r.nodes[i].name == "x") {
+				p = &r.nodes[i]; break;
+			}
+		}
+		assert(p != null, "expected PARAM x");
+		assert(!ast::param_has_default(p), "expected no default");
+		assert(ast::param_default_text(p).len == 0, "expected empty default text");
+	};
+}
+
+fn void param_default_multiple_params() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(a: Int = 1, b: String, c: Int = 3) {}"); defer free_result(r);
+		String[3] defaults;
+		usz idx = 0;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == PARAM && idx < 3) {
+				defaults[idx++] = ast::param_default_text(&r.nodes[i]);
+			}
+		}
+		assert(defaults[0] == "1", "first default expected '1', got '%s'", defaults[0]);
+		assert(defaults[1].len == 0, "middle param has no default, got '%s'", defaults[1]);
+		assert(defaults[2] == "3", "third default expected '3', got '%s'", defaults[2]);
+	};
+}
+
+// ── Labeled return / break / continue + labeled lambdas (Kotlin spec §16.32) ──
+
+fn void return_label_stored_in_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { return@foo }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == RETURN_EXPR) {
+				assert(r.nodes[i].extra_text == "foo",
+					"expected RETURN_EXPR.extra_text='foo', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected RETURN_EXPR node");
+	};
+}
+
+fn void break_label_stored_in_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { while (true) { break@outer } }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == BREAK_EXPR) {
+				assert(r.nodes[i].extra_text == "outer",
+					"expected BREAK_EXPR.extra_text='outer', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected BREAK_EXPR node");
+	};
+}
+
+fn void continue_label_stored_in_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { while (true) { continue@loop } }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == CONTINUE_EXPR) {
+				assert(r.nodes[i].extra_text == "loop",
+					"expected CONTINUE_EXPR.extra_text='loop', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected CONTINUE_EXPR node");
+	};
+}
+
+fn void labeled_lambda_label_stored_in_extra_text() @test {
+	@pool() {
+		// `name@ { ... }` -- label name stored on the LAMBDA_EXPR
+		ParseResult* r = do_parse("fun f() { val x = block@ { 42 } }"); defer free_result(r);
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == LAMBDA_EXPR) {
+				assert(r.nodes[i].extra_text == "block",
+					"expected LAMBDA_EXPR.extra_text='block', got '%s'", r.nodes[i].extra_text);
+				found = true;
+			}
+		}
+		assert(found, "expected LAMBDA_EXPR node");
+	};
+}
+
+fn void unlabeled_return_has_empty_extra_text() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f() { return }"); defer free_result(r);
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == RETURN_EXPR) {
+				assert(r.nodes[i].extra_text.len == 0,
+					"expected empty extra_text for unlabeled return, got '%s'", r.nodes[i].extra_text);
+			}
+		}
+	};
+}
+
+// ── User-defined infix calls (Kotlin spec §17.5) ─────────────────
+
+fn void same_file_infix_recognized_in_pratt() @test {
+	@pool() {
+		// `combine` is declared `infix fun` in this file -- the Pratt loop
+		// must recognize `a combine b` as a binary infix call and produce
+		// a BINARY_EXPR wrapping it (not two separate expression statements).
+		ParseResult* r = do_parse(
+			"infix fun Int.combine(other: Int): Int = this + other\nfun main() { val z = 1 combine 2 }"
+		); defer free_result(r);
+
+		bool found_combine_binary = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == BINARY_EXPR && r.nodes[i].extra_text == "combine") {
+				found_combine_binary = true;
+				break;
+			}
+		}
+		assert(found_combine_binary,
+			"expected BINARY_EXPR with extra_text='combine' for `1 combine 2`");
+	};
+}
+
+fn void unknown_infix_not_recognized() @test {
+	@pool() {
+		// `bogus` is not defined as `infix fun` in this file -- must NOT
+		// be treated as infix (would otherwise consume `2` as RHS).
+		ParseResult* r = do_parse(
+			"fun main() { val z = 1 }\nfun bogus(): Int = 0"
+		); defer free_result(r);
+
+		// No BINARY_EXPR with extra_text="bogus" should appear.
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == BINARY_EXPR) {
+				assert(r.nodes[i].extra_text != "bogus",
+					"unexpected BINARY_EXPR with extra_text='bogus' (not infix)");
+			}
+		}
+	};
+}
+
+// ── when (val x = expr) subject binding (Kotlin spec §17.6) ─────────
+
+fn void when_subject_binding_creates_property_decl() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f(): Int { return when (val x = compute()) { 1 -> x; else -> 0 } }"
+		); defer free_result(r);
+		// Find WHEN_EXPR, then look for PROPERTY_DECL child named "x"
+		bool found_when = false;
+		bool found_binding = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHEN_EXPR) {
+				found_when = true;
+				for (uint j = 0; j < r.node_count; j++) {
+					if (r.nodes[j].parent == i && r.nodes[j].kind == PROPERTY_DECL) {
+						assert(r.nodes[j].name == "x",
+							"expected PROPERTY_DECL name='x', got '%s'", r.nodes[j].name);
+						found_binding = true;
+					}
+				}
+			}
+		}
+		assert(found_when, "expected WHEN_EXPR");
+		assert(found_binding, "expected PROPERTY_DECL child of WHEN_EXPR named 'x'");
+	};
+}
+
+// ── Property accessor modifiers (Kotlin spec §14.3) ─────────────────
+
+fn void property_accessor_private_set() @test {
+	@pool() {
+		// `var x: Int = 0\n  private set` -- accessor with visibility modifier
+		// only (no body). Must parse without consuming next decl.
+		ParseResult* r = do_parse(
+			"class C {\n  var x: Int = 0\n    private set\n  fun next() {}\n}"
+		); defer free_result(r);
+
+		// Find FUN_DECL named "set" with MOD_PRIVATE flag.
+		bool found_set = false;
+		bool found_next = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "set") {
+				assert((r.nodes[i].mod_flags & ast::MOD_PRIVATE) != 0,
+					"expected MOD_PRIVATE on accessor 'set'");
+				found_set = true;
+			}
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "next") {
+				found_next = true;
+			}
+		}
+		assert(found_set, "expected FUN_DECL accessor 'set'");
+		assert(found_next, "expected FUN_DECL 'next' (parser must not over-consume accessor mods)");
+	};
+}
+
+fn void property_accessor_annotation() @test {
+	@pool() {
+		// `@JvmName("x") get` -- annotation before accessor.
+		ParseResult* r = do_parse(
+			"class C {\n  val y: Int\n    @JvmName(\"getY\") get() = 1\n}"
+		); defer free_result(r);
+
+		bool found_get = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FUN_DECL && r.nodes[i].name == "get") {
+				assert(r.nodes[i].annotation_text == "JvmName",
+					"expected annotation_text='JvmName', got '%s'", r.nodes[i].annotation_text);
+				found_get = true;
+			}
+		}
+		assert(found_get, "expected FUN_DECL accessor 'get' with @JvmName");
+	};
+}
+
+// ── Labeled loops (Kotlin spec §17.13) ──────────────────────────────
+
+fn void labeled_for_loop() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f() { outer@ for (i in 1..10) { break@outer } }"
+		); defer free_result(r);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == FOR_STMT && r.nodes[i].extra_text == "outer") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected FOR_STMT with extra_text='outer'");
+	};
+}
+
+fn void labeled_while_loop() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f() { loop@ while (true) { continue@loop } }"
+		); defer free_result(r);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == WHILE_STMT && r.nodes[i].extra_text == "loop") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected WHILE_STMT with extra_text='loop'");
+	};
+}
+
+fn void labeled_do_while_loop() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+			"fun f() { block@ do { break@block } while (false) }"
+		); defer free_result(r);
+
+		bool found = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == DO_WHILE_STMT && r.nodes[i].extra_text == "block") {
+				found = true;
+				break;
+			}
+		}
+		assert(found, "expected DO_WHILE_STMT with extra_text='block'");
 	};
 }

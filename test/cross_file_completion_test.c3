@@ -1087,3 +1087,109 @@ fn void dot_completion_class_ref_no_scope_functions_from_type_tables() @test {
 		}
 	};
 }
+
+// ── Object expression body completion ─────────────────────────────
+
+fn void dot_completion_object_expr_body_member() @test {
+	// `val o = object : Greeter { val extra: Int = 42 ...}` — body decl
+	// `extra` should appear as completion for `o.<>` even though it's
+	// not in the supertype.
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String content =
+`interface Greeter { fun greet(): String }
+fun main() {
+    val o = object : Greeter {
+        override fun greet(): String = "hi"
+        val extra: Int = 42
+    }
+    o.
+}`;
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		// Cursor after "o." on line 6, col 6
+		Object* params = make_params("file:///main.kt", 6, 6);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_extra = false;
+		int extra_kind = 0;
+		String extra_detail = "";
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "extra") {
+				found_extra = true;
+				extra_kind = item.get_int("kind") ?? 0;
+				extra_detail = item.get_string("detail") ?? "";
+				break;
+			}
+		}
+		assert(found_extra, "expected 'extra' from object body");
+		assert(extra_kind == completion::COMPLETION_KIND_PROPERTY,
+			"'extra' should be Property kind (10), got %d (detail='%s')", extra_kind, extra_detail);
+		assert(extra_detail == "Int", "'extra' detail should be 'Int', got '%s'", extra_detail);
+	};
+}
+
+fn void dot_completion_object_expr_anonymous_member() @test {
+	// Pure-anonymous object (no supertype) — receiver type UNKNOWN but
+	// body decls still must surface.
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		String content =
+`fun main() {
+    val o = object {
+        val name: String = "anon"
+        fun describe(): Int = 1
+    }
+    o.
+}`;
+		store.open("file:///main.kt", "kotlin", 1, content);
+
+		Object* params = make_params("file:///main.kt", 5, 6);
+		Object* result = completion::handle_completion(&store, &ws, params)!!;
+		assert(result != null, "expected completion result");
+		Object* items = result.get("items")!!;
+
+		bool found_name = false;
+		int name_kind = 0;
+		String name_detail = "";
+		bool found_describe = false;
+		int describe_kind = 0;
+		for (usz i = 0; i < items.get_len(); i++) {
+			Object* item = items.get_at(i);
+			String label = item.get_string("label")!!;
+			if (label == "name") {
+				found_name = true;
+				name_kind = item.get_int("kind") ?? 0;
+				name_detail = item.get_string("detail") ?? "";
+			}
+			if (label == "describe") {
+				found_describe = true;
+				describe_kind = item.get_int("kind") ?? 0;
+			}
+		}
+		assert(found_name, "expected 'name' from anon object body");
+		assert(name_kind == completion::COMPLETION_KIND_PROPERTY,
+			"'name' should be Property kind (10), got %d (detail='%s')", name_kind, name_detail);
+		assert(name_detail == "String", "'name' detail should be 'String', got '%s'", name_detail);
+		assert(found_describe, "expected 'describe' from anon object body");
+		assert(describe_kind == completion::COMPLETION_KIND_METHOD,
+			"'describe' should be Method kind (2), got %d", describe_kind);
+	};
+}
+

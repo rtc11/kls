@@ -25,8 +25,7 @@ fn void free_result(ParseResult* r) {
 
 fn TypeInfo* do_resolve(ParseResult* pr) {
 	TypeInfo* ti = mem::new(TypeInfo);
-	types::resolve_types(pr, ti);
-	return ti;
+	types::resolve_types(pr, ti);	return ti;
 }
 
 // Find a declaration node by name
@@ -82,7 +81,7 @@ fn void dep_name_via_explicit_import() @test {
 		String src = `import io.ktor.http.HttpStatusCode
 			val status: HttpStatusCode = HttpStatusCode`;
 		ParseResult* pr = do_parse(src); defer free_result(pr);
-		TypeInfo* ti = do_resolve(pr); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the val declaration — should resolve to HttpStatusCode
 		uint decl_idx = find_decl(pr, "status");
@@ -109,7 +108,7 @@ fn void dep_name_via_star_import() @test {
 		String src = `import io.ktor.http.*
 			val status: HttpStatusCode = HttpStatusCode`;
 		ParseResult* pr = do_parse(src); defer free_result(pr);
-		TypeInfo* ti = do_resolve(pr); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint decl_idx = find_decl(pr, "status");
 		assert(decl_idx > 0, "should find status decl");
@@ -135,7 +134,7 @@ fn void dep_name_no_import_stays_unknown() @test {
 		// No import — should NOT resolve
 		String src = `val status: HttpStatusCode = HttpStatusCode`;
 		ParseResult* pr = do_parse(src); defer free_result(pr);
-		TypeInfo* ti = do_resolve(pr); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// The type annotation resolves via parse_type_text, but the NAME_EXPR
 		// on the RHS should be UNKNOWN since no import matches
@@ -192,6 +191,27 @@ fn void parse_empty_type() @test {
 	};
 }
 
+fn void parse_definitely_non_nullable_type() @test {
+	@pool() {
+		// Kotlin spec §9.4.4: `T & Any` is the definitely non-nullable type.
+		TypeRef t = types::parse_type_text("T & Any");
+		assert(t.is_dnn, "expected is_dnn=true for `T & Any`");
+		assert(!t.nullable, "DNN type must not be nullable");
+		assert(t.name == "T", "expected name 'T', got '%s'", t.name);
+		String s = types::format_type(&t);
+		assert(s == "T & Any", "expected formatted 'T & Any', got '%s'", s);
+	};
+}
+
+fn void parse_dnn_overrides_nullable() @test {
+	@pool() {
+		// `T? & Any` is the canonical promotion of nullable `T?` to non-null.
+		TypeRef t = types::parse_type_text("T? & Any");
+		assert(t.is_dnn, "expected is_dnn=true");
+		assert(!t.nullable, "DNN must force nullable=false even when input was nullable");
+	};
+}
+
 // ── Type formatting tests ───────────────────────────────────────────
 
 fn void format_simple_type() @test {
@@ -231,7 +251,7 @@ fn void format_unit_type() @test {
 fn void infer_int_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 42"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -243,7 +263,7 @@ fn void infer_int_literal() @test {
 fn void infer_long_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 42L"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -255,7 +275,7 @@ fn void infer_long_literal() @test {
 fn void infer_double_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 3.14"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -267,7 +287,7 @@ fn void infer_double_literal() @test {
 fn void infer_float_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 3.14f"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -279,7 +299,7 @@ fn void infer_float_literal() @test {
 fn void infer_string_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse(`val x = "hello"`); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -291,7 +311,7 @@ fn void infer_string_literal() @test {
 fn void infer_boolean_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = true"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -303,7 +323,7 @@ fn void infer_boolean_literal() @test {
 fn void infer_null_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = null"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -315,7 +335,7 @@ fn void infer_null_literal() @test {
 fn void infer_char_literal() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 'a'"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -329,7 +349,7 @@ fn void infer_char_literal() @test {
 fn void explicit_type_annotation() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: Int = 42"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -340,7 +360,7 @@ fn void explicit_type_annotation() @test {
 fn void explicit_nullable_annotation() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: String? = null"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -352,7 +372,7 @@ fn void explicit_nullable_annotation() @test {
 fn void explicit_generic_annotation() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: List<Int> = listOf(1)"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -364,7 +384,7 @@ fn void explicit_generic_annotation() @test {
 fn void fun_return_type() @test {
 	@pool() {
 		ParseResult* r = do_parse("fun greet(): String { return \"hi\" }"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "greet");
 		assert(idx > 0, "expected to find 'greet'");
 		assert(ti.has_type[idx], "expected type for 'greet'");
@@ -375,7 +395,7 @@ fn void fun_return_type() @test {
 fn void fun_param_type() @test {
 	@pool() {
 		ParseResult* r = do_parse("fun greet(name: String) {}"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		// Find the PARAM node
 		uint idx = 0;
 		for (uint i = 0; i < r.node_count; i++) {
@@ -395,7 +415,7 @@ fn void fun_param_type() @test {
 fn void resolve_empty_source() @test {
 	@pool() {
 		ParseResult* r = do_parse(""); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		// Should not crash
 		assert(true);
 	};
@@ -404,7 +424,7 @@ fn void resolve_empty_source() @test {
 fn void resolve_class_no_type() @test {
 	@pool() {
 		ParseResult* r = do_parse("class Foo"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "Foo");
 		// Classes don't get TypeInfo entries (they ARE types)
 		// Just verify no crash
@@ -415,7 +435,7 @@ fn void resolve_class_no_type() @test {
 fn void resolve_var_with_initializer() @test {
 	@pool() {
 		ParseResult* r = do_parse("var x = 100"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		assert(idx > 0, "expected to find 'x'");
 		assert(ti.has_type[idx], "expected type for 'x'");
@@ -433,7 +453,7 @@ fn void resolve_multiple_properties() @test {
 			val b = "hi"
 			val c = true`
 		); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint ai = find_decl(r, "a");
 		uint bi = find_decl(r, "b");
@@ -454,7 +474,7 @@ fn void resolve_multiple_properties() @test {
 fn void hover_shows_inferred_type_for_val() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x = 42"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		AstNode* node = &r.nodes[idx];
 
@@ -475,7 +495,7 @@ fn void hover_shows_inferred_type_for_val() @test {
 fn void hover_shows_explicit_type_for_val() @test {
 	@pool() {
 		ParseResult* r = do_parse("val x: String = \"hi\""); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		AstNode* node = &r.nodes[idx];
 
@@ -499,7 +519,7 @@ fn void hover_no_type_without_initializer() @test {
 		// In real Kotlin this would be a compile error, but we just verify
 		// our type system doesn't crash
 		ParseResult* r = do_parse("val x"); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 		uint idx = find_decl(r, "x");
 		if (idx > 0) {
 			// Type should be unknown
@@ -762,7 +782,7 @@ fn void stdlib_lookup_by_receiver_empty() @test {
 // Helper: resolve types and find the first expression node of given kind
 fn TypeRef resolve_and_get_expr(ParseResult* pr, NodeKind kind, String name = "") {
 	TypeInfo* ti = mem::new(TypeInfo);
-	defer mem::free(ti);
+	defer { types::free_type_info(ti); mem::free(ti); };
 	types::resolve_types(pr, ti);
 	for (uint i = 0; i < pr.node_count; i++) {
 		if (pr.nodes[i].kind == kind) {
@@ -777,7 +797,7 @@ fn TypeRef resolve_and_get_expr(ParseResult* pr, NodeKind kind, String name = ""
 // Helper: resolve and get type of a named declaration
 fn TypeRef resolve_and_get_decl(ParseResult* pr, String name) {
 	TypeInfo* ti = mem::new(TypeInfo);
-	defer mem::free(ti);
+	defer { types::free_type_info(ti); mem::free(ti); };
 	types::resolve_types(pr, ti);
 	for (uint i = 0; i < pr.node_count; i++) {
 		if (ast::is_declaration(pr.nodes[i].kind) && pr.nodes[i].name == name) {
@@ -1060,7 +1080,7 @@ fn void smart_cast_simple_is_check() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Check the NAME_EXPR 'x' nodes and their resolved types
 		bool found_narrowed_x = false;
@@ -1096,7 +1116,7 @@ fn void smart_cast_and_conjunction() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1592,7 +1612,7 @@ fn void smart_cast_null_check_not_equals() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1614,7 +1634,7 @@ fn void smart_cast_null_check_equals_else() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1633,7 +1653,7 @@ fn void smart_cast_null_check_early_return() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1654,7 +1674,7 @@ fn void smart_cast_null_check_early_return_block() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1673,7 +1693,7 @@ fn void smart_cast_null_check_early_throw() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1701,7 +1721,7 @@ fn void smart_cast_null_check_early_return_in_lambda_with_label() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1721,7 +1741,7 @@ fn void smart_cast_null_check_conjunction() @test {
 				}
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1738,7 +1758,7 @@ fn void smart_cast_no_null_check_no_narrowing() @test {
 				val y = x
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "y");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1758,7 +1778,7 @@ fn void generic_list_first_returns_element_type() @test {
 				val first = names.first()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "first");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1778,7 +1798,7 @@ fn void generic_list_firstOrNull_returns_nullable_element() @test {
 				val maybe = items.firstOrNull()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "maybe");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1798,7 +1818,7 @@ fn void generic_list_filter_preserves_type_args() @test {
 				val filtered = names.filter()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "filtered");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1820,7 +1840,7 @@ fn void generic_list_sorted_preserves_type_args() @test {
 				val sorted = nums.sorted()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "sorted");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1841,7 +1861,7 @@ fn void generic_chain_filter_first() @test {
 				val result = names.filter().first()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "result");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1859,7 +1879,7 @@ fn void generic_set_preserves_type_args() @test {
 				val unique = items.toSet()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "unique");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1880,7 +1900,7 @@ fn void generic_map_keys_returns_set_of_key_type() @test {
 				val keys = m.keys
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "keys");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1901,7 +1921,7 @@ fn void generic_map_values_returns_collection_of_value_type() @test {
 				val vals = m.values
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "vals");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1922,7 +1942,7 @@ fn void generic_map_get_returns_nullable_value_type() @test {
 				val v = m.get()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "v");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1942,7 +1962,7 @@ fn void generic_map_filter_preserves_kv() @test {
 				val filtered = m.filter()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "filtered");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1964,7 +1984,7 @@ fn void generic_also_preserves_type_args() @test {
 				val same = items.also()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "same");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -1985,7 +2005,7 @@ fn void generic_index_returns_element_type() @test {
 				val item = items[0]
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "item");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2003,7 +2023,7 @@ fn void generic_listof_infer_type_arg() @test {
 				val first = names.first()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "first");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2021,7 +2041,7 @@ fn void generic_sequence_preserves_type_args() @test {
 				val seq = items.asSequence()
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint idx = find_decl(r, "seq");
 		if (idx > 0 && ti.has_type[idx]) {
@@ -2044,7 +2064,7 @@ fn void lambda_it_let_has_receiver_type() @test {
 				name.let { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the NAME_EXPR for "it"
 		for (uint i = 0; i < r.node_count; i++) {
@@ -2067,7 +2087,7 @@ fn void lambda_it_also_has_receiver_type() @test {
 				x.also { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2089,7 +2109,7 @@ fn void lambda_it_filter_has_element_type() @test {
 				items.filter { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2111,7 +2131,7 @@ fn void lambda_it_forEach_has_element_type() @test {
 				nums.forEach { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2133,7 +2153,7 @@ fn void lambda_it_map_has_element_type() @test {
 				names.map { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2160,7 +2180,7 @@ fn void lambda_it_takeIf_has_receiver_type() @test {
 				items.takeIf { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2183,7 +2203,7 @@ fn void lambda_it_explicit_param_no_inference() @test {
 				items.filter { x -> it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// When lambda has explicit params, `it` should NOT be resolved
 		for (uint i = 0; i < r.node_count; i++) {
@@ -2208,7 +2228,7 @@ fn void lambda_it_string_forEach_returns_char() @test {
 				s.forEach { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2230,7 +2250,7 @@ fn void lambda_it_let_generic_receiver() @test {
 				items.let { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2257,7 +2277,7 @@ fn void lambda_it_inferred_list_filter() @test {
 				names.filter { it }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		for (uint i = 0; i < r.node_count; i++) {
 			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "it") {
@@ -2282,7 +2302,7 @@ fn void destructuring_pair_component_types() @test {
 				val (a, b) = pair
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint a_idx = find_decl(r, "a");
 		assert(a_idx > 0, "expected to find decl 'a'");
@@ -2306,7 +2326,7 @@ fn void destructuring_triple_component_types() @test {
 				val (x, y, z) = t
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(r, "x");
 		assert(x_idx > 0, "expected to find decl 'x'");
@@ -2336,7 +2356,7 @@ fn void destructuring_explicit_types_override() @test {
 				val (a: String, b: Int) = pair
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// When explicit types are given, they should be used (Phase 1)
 		uint a_idx = find_decl(r, "a");
@@ -2361,7 +2381,7 @@ fn void destructuring_for_map_iteration() @test {
 				for ((k, v) in map) { }
 			}`;
 		ParseResult* r = do_parse(src); defer free_result(r);
-		TypeInfo* ti = do_resolve(r); defer mem::free(ti);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find PARAM nodes inside FOR_STMT
 		for (uint i = 0; i < r.node_count; i++) {
@@ -2475,7 +2495,7 @@ fun main() {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint a_idx = find_decl(pr, "a");
 		assert(a_idx != 0, "should find 'a'");
@@ -2503,7 +2523,7 @@ fun main() {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint r_idx = find_decl(pr, "r");
 		assert(r_idx != 0, "should find 'r'");
@@ -2527,7 +2547,7 @@ fun main() {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint a_idx = find_decl(pr, "a");
 		assert(a_idx != 0, "should find 'a'");
@@ -2567,7 +2587,7 @@ fn void cross_file_constructor_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint u_idx = find_decl(pr, "u");
 		assert(u_idx != 0, "should find 'u'");
@@ -2596,7 +2616,7 @@ fn void cross_file_dot_member_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint u_idx = find_decl(pr, "u");
 		assert(u_idx != 0, "should find 'u'");
@@ -2630,7 +2650,7 @@ fn void cross_file_method_return_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint g_idx = find_decl(pr, "g");
 		assert(g_idx != 0, "should find 'g'");
@@ -2654,7 +2674,7 @@ fn void cross_file_no_workspace_returns_unknown() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint u_idx = find_decl(pr, "u");
 		assert(u_idx != 0, "should find 'u'");
@@ -2677,7 +2697,7 @@ fn void map_index_returns_value_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "v");
 		assert(v_idx != 0, "should find 'v'");
@@ -2700,7 +2720,7 @@ fn void list_index_returns_element_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -2724,7 +2744,7 @@ fn void to_infix_produces_typed_pair() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint p_idx = find_decl(pr, "p");
 		assert(p_idx != 0, "should find 'p'");
@@ -2754,7 +2774,7 @@ fn void mapof_infers_type_args_from_to() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint m_idx = find_decl(pr, "m");
 		assert(m_idx != 0, "should find 'm'");
@@ -2782,7 +2802,7 @@ fn void try_catch_expr_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(pr, "x");
 		assert(x_idx != 0, "should find 'x'");
@@ -2802,7 +2822,7 @@ fn void try_catch_mixed_types() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(pr, "x");
 		assert(x_idx != 0, "should find 'x'");
@@ -2813,7 +2833,200 @@ fn void try_catch_mixed_types() @test {
 	};
 }
 
+fn void catch_param_typed_from_annotation() @test {
+	// `catch (e: IllegalStateException)` — `e.message` should resolve.
+	// Exception param's PARAM has type_text; name lookup inside catch body
+	// must produce TypeRef from that annotation.
+	@pool() {
+		String src = `fun f() {
+	try {
+		error("x")
+	} catch (e: IllegalStateException) {
+		val m = e.message
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint m_idx = find_decl(pr, "m");
+		String t = m_idx > 0 && ti.has_type[m_idx] ? types::format_type(&ti.node_types[m_idx]) : "<no>";
+		// Probe: also check `e` PARAM has a type
+		uint e_idx = find_node(pr, PARAM, "e");
+		String et = e_idx != 0 && ti.has_type[e_idx] ? types::format_type(&ti.node_types[e_idx]) : "<no>";
+		assert(e_idx != 0 && et == "IllegalStateException", "e: IllegalStateException, got '%s'", et);
+		assert(m_idx != 0 && t == "String?", "m: String? (e.message), got '%s'", t);
+	};
+}
+
 // ── Phase 2: Lambda body type inference ─────────────────────────────
+
+fn void infix_extension_fun_call_resolves_return_type() @test {
+	// `a plus b` where plus is `infix fun Int.plus2(other: Int): String`
+	// should be typed via extension-fn return type, not stdlib Int.plus.
+	@pool() {
+		String src = `infix fun Int.combine(other: Int): String = ""
+fun f() {
+	val r = 1 combine 2
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && t == "String", "r: String (infix ext combine), got '%s'", t);
+	};
+}
+
+fn void infix_member_fun_call_resolves_return_type() @test {
+	// Member infix on user class.
+	@pool() {
+		String src = `class M { infix fun glue(s: String): Int = 0 }
+fun f() {
+	val m = M()
+	val r = m glue "x"
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && t == "Int", "r: Int (member infix glue), got '%s'", t);
+	};
+}
+
+fn void member_elvis_return_narrows() @test {
+	// `b.x ?: return; b.x.length` — after elvis-return, `b.x` is non-null.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	b.x ?: return 0
+	val n = b.x.length
+	return n
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed to String), got '%s'", t);
+	};
+}
+
+fn void member_requireNotNull_narrows() @test {
+	// `requireNotNull(b.x); b.x.length` — after stdlib contract,
+	// `b.x` is non-null in the trailing scope.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	requireNotNull(b.x)
+	val n = b.x.length
+	return n
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed by requireNotNull), got '%s'", t);
+	};
+}
+
+fn void member_not_null_check_narrows_in_branch() @test {
+	// `if (b.x != null) b.x.length` — b.x is non-null in then branch.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	if (b.x != null) {
+		val n = b.x.length
+		return n
+	}
+	return 0
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed in if), got '%s'", t);
+	};
+}
+
+fn void member_bang_bang_narrows() @test {
+	// `b.x!!; b.x.length` — !! narrows b.x to non-null.
+	@pool() {
+		String src = `class B { val x: String? = null }
+fun f(b: B): Int {
+	b.x!!
+	val n = b.x.length
+	return n
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (b.x narrowed by !!), got '%s'", t);
+	};
+}
+
+fn void this_member_elvis_narrows() @test {
+	// `this.x ?: return; this.x.length` — `this.x` non-null after.
+	@pool() {
+		String src = `class B {
+	val x: String? = null
+	fun f(): Int {
+		this.x ?: return 0
+		val n = this.x.length
+		return n
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (this.x narrowed by elvis-return), got '%s'", t);
+	};
+}
+
+fn void bare_member_elvis_narrows_in_class() @test {
+	// `x ?: return; x.length` inside class body where `x: String?` is member.
+	@pool() {
+		String src = `class B {
+	val x: String? = null
+	fun f(): Int {
+		x ?: return 0
+		val n = x.length
+		return n
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (bare member x narrowed via elvis), got '%s'", t);
+	};
+}
+
 
 fn void map_infers_return_type_from_lambda() @test {
 	@pool() {
@@ -2826,7 +3039,7 @@ fn void map_infers_return_type_from_lambda() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "lengths");
 		assert(v_idx != 0, "should find 'lengths'");
@@ -2852,7 +3065,7 @@ fn void map_chain_preserves_types() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "result");
 		assert(v_idx != 0, "should find 'result'");
@@ -2877,7 +3090,7 @@ fn void let_returns_lambda_body_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "len");
 		assert(v_idx != 0, "should find 'len'");
@@ -2897,7 +3110,7 @@ fn void run_returns_lambda_body_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint x_idx = find_decl(pr, "x");
 		assert(x_idx != 0, "should find 'x'");
@@ -2918,7 +3131,7 @@ fn void associate_infers_map_type_from_lambda() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint m_idx = find_decl(pr, "m");
 		assert(m_idx != 0, "should find 'm'");
@@ -2945,7 +3158,7 @@ fn void groupby_infers_map_type_from_lambda() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "grouped");
 		assert(v_idx != 0, "should find 'grouped'");
@@ -2970,7 +3183,7 @@ fn void mapof_chain_index_resolves() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint v_idx = find_decl(pr, "v");
 		assert(v_idx != 0, "should find 'v'");
@@ -2997,7 +3210,7 @@ fn void when_subject_smart_cast_is_type() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -3021,7 +3234,7 @@ fn void when_subject_smart_cast_is_int() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint n_idx = find_decl(pr, "n");
 		assert(n_idx != 0, "should find 'n'");
@@ -3044,7 +3257,7 @@ fn void extension_function_workspace_resolution() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint r_idx = find_decl(pr, "r");
 		assert(r_idx != 0, "should find 'r'");
@@ -3066,7 +3279,7 @@ fn void smart_cast_null_check_simple() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -3090,7 +3303,7 @@ fn void smart_cast_null_check_and_conjunction() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve(pr);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		uint s_idx = find_decl(pr, "s");
 		assert(s_idx != 0, "should find 's'");
@@ -3331,7 +3544,7 @@ fn void dot_call_on_unresolvable_receiver_returns_unknown() @test {
 		ParseResult* pr = do_parse(src);
 		defer free_result(pr);
 		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
-		defer mem::free(ti);
+		defer { types::free_type_info(ti); mem::free(ti); };
 
 		// Find the DOT_EXPR for record.timestamp()
 		for (uint i = 0; i < pr.node_count; i++) {
@@ -3605,5 +3818,2787 @@ fn void substitute_non_placeholder_unchanged() @test {
 
 		TypeRef subst = types::substitute_type_params(result, receiver);
 		assert(subst.name == "String", "non-placeholder should be unchanged");
+	};
+}
+
+// ── !is else-branch narrowing (Kotlin spec §11.3) ─────────────────
+
+fn void smart_cast_not_is_else_branch() @test {
+	@pool() {
+		String src =
+			`fun test(x: Any) {
+				if (x !is String) {
+					val a = 0
+				} else {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		// Find the `val y = x` declaration; expect y resolved to String
+		// because in the else branch, `x` is narrowed via `!is`.
+		uint y_idx = find_decl(r, "y");
+		assert(y_idx > 0, "expected to find decl 'y'");
+		assert(ti.has_type[y_idx], "expected y to have a resolved type");
+		String t = types::format_type(&ti.node_types[y_idx]);
+		assert(t == "String", "!is else-branch should narrow x to String, got '%s'", t);
+	};
+}
+
+// ── when (val x = expr) smart-cast subject (Kotlin spec §17.6) ─────
+
+fn void when_subject_binding_smart_cast_is() @test {
+	@pool() {
+		// `val x` bound in when-subject; inside `is String` arm, x: String.
+		String src =
+			`fun test(): Int = when (val x = compute()) {
+				is String -> x.length
+				else -> 0
+			}
+			fun compute(): Any = "hi"`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		// Look for at least one NAME_EXPR 'x' narrowed to String.
+		bool found_narrowed = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "x" && ti.has_type[i]) {
+				if (ti.node_types[i].name == "String") found_narrowed = true;
+			}
+		}
+		assert(found_narrowed, "expected NAME_EXPR 'x' narrowed to String in `is String` arm");
+	};
+}
+
+// ── Stability gate (Kotlin spec §11.3, locals only) ────────────────
+
+fn void smart_cast_var_captured_by_lambda_is_unstable() @test {
+	@pool() {
+		// `var` captured by a nested lambda is not stable: the null check
+		// outside the lambda must NOT narrow x inside the lambda body.
+		String src =
+			`fun test(x: String?) {
+				if (x == null) { return }
+				run {
+					val y = x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		// Parameters are stable, so `x` IS smart-cast in this case.
+		// (This test documents that PARAM is treated as val.)
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "PARAM is stable; expected String inside lambda, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_local_var_captured_by_lambda_is_unstable() @test {
+	@pool() {
+		// Local var captured by a nested lambda: outer null guard must
+		// NOT narrow the var inside the lambda (other code may reassign
+		// between guard and lambda invocation).
+		String src =
+			`fun test(s: String?) {
+				var hashKey: String? = s
+				if (hashKey == null) { return }
+				run {
+					val y = hashKey
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String?", "captured local var is unstable; expected String?, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_local_val_captured_by_lambda_is_stable() @test {
+	@pool() {
+		// Local val is always stable, even when captured by a lambda.
+		String src =
+			`fun test(s: String?) {
+				val hashKey: String? = s
+				if (hashKey == null) { return }
+				run {
+					val y = hashKey
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "captured local val is stable; expected String, got '%s'", t);
+		}
+	};
+}
+
+fn void smart_cast_local_var_same_function_is_stable() @test {
+	@pool() {
+		// Local var used in the same function as the check (no lambda
+		// boundary) is stable.
+		String src =
+			`fun test(s: String?) {
+				var hashKey: String? = s
+				if (hashKey == null) { return }
+				val y = hashKey
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "y");
+		if (idx > 0 && ti.has_type[idx]) {
+			String t = types::format_type(&ti.node_types[idx]);
+			assert(t == "String", "local var in same function is stable; expected String, got '%s'", t);
+		}
+	};
+}
+
+// ── Property smart cast (member + top-level val) ───────────────────
+
+fn void smart_cast_top_level_val_simple() @test {
+	@pool() {
+		// Top-level `val` with no custom getter is stable. Bare-name access
+		// after a null check should narrow.
+		String src =
+			`val name: String? = "hi"
+			fun test() {
+				if (name != null) {
+					val s = name
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "top-level val should narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_top_level_var_unstable() @test {
+	@pool() {
+		// Top-level `var` is never stable.
+		String src =
+			`var name: String? = "hi"
+			fun test() {
+				if (name != null) {
+					val s = name
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "top-level var must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_top_level_val_with_custom_getter_unstable() @test {
+	@pool() {
+		// `val` with a custom getter is unstable — getter could return
+		// different values across two reads.
+		String src =
+			`val rnd: String?
+				get() = if (System.currentTimeMillis() % 2L == 0L) "x" else null
+			fun test() {
+				if (rnd != null) {
+					val s = rnd
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "val with custom getter must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_open_val_unstable() @test {
+	@pool() {
+		// `open val` may be overridden with a custom getter — unstable.
+		String src =
+			`open val name: String? = "hi"
+			fun test() {
+				if (name != null) {
+					val s = name
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "open val must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void smart_cast_top_level_val_is_check_narrows() @test {
+	@pool() {
+		// Type-check on top-level val.
+		String src =
+			`val v: Any = "hi"
+			fun test() {
+				if (v is String) {
+					val s = v
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "top-level val should narrow on `is`; got '%s'", t);
+	};
+}
+
+// ── In-file class member resolution ────────────────────────────────
+
+fn void in_file_member_property_dot_resolves_type() @test {
+	@pool() {
+		// `b.x` where Box has `val x: String` — DOT_EXPR should resolve to String.
+		String src =
+			`class Box { val x: String = "hi" }
+			fun test(b: Box) {
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "in-file member-prop access resolves to String; got '%s'", t);
+	};
+}
+
+fn void in_file_member_property_nullable_dot_resolves_type() @test {
+	@pool() {
+		String src =
+			`class Box { val x: String? = null }
+			fun test(b: Box) {
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "nullable member resolves to String?; got '%s'", t);
+	};
+}
+
+fn void in_file_primary_ctor_val_member_resolves_type() @test {
+	@pool() {
+		// Primary-ctor `val x: T` is a member.
+		String src =
+			`class Box(val x: Int)
+			fun test(b: Box) {
+				val n = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "primary-ctor val member resolves; got '%s'", t);
+	};
+}
+
+fn void in_file_primary_ctor_var_member_resolves_type() @test {
+	@pool() {
+		String src =
+			`class Box(var x: String)
+			fun test(b: Box) {
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "primary-ctor var member resolves; got '%s'", t);
+	};
+}
+
+fn void in_file_primary_ctor_plain_param_is_not_member() @test {
+	@pool() {
+		// Plain ctor params (no val/var) are NOT members — `b.x` must not resolve.
+		String src =
+			`class Box(x: Int)
+			fun test(b: Box) {
+				val n = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0, "found decl");
+		// Resolution should fail (UNKNOWN) — the plain param isn't a member.
+		assert(ti.node_types[idx].kind == types::TypeKind.UNKNOWN,
+			"plain ctor param must not be exposed as member; got kind=%d name='%s'",
+			(int)ti.node_types[idx].kind, ti.node_types[idx].name);
+	};
+}
+
+fn void in_file_member_function_dot_resolves_type() @test {
+	@pool() {
+		// `b.f()` where Box.f returns Int — DOT_EXPR should be Int.
+		String src =
+			`class Box { fun f(): Int = 42 }
+			fun test(b: Box) {
+				val n = b.f()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "in-file member fn resolves; got '%s'", t);
+	};
+}
+
+// ── Member-property smart cast ─────────────────────────────────────
+
+fn void member_prop_smart_cast_null_check_narrows() @test {
+	@pool() {
+		// `if (b.x != null) { val s = b.x }` — `b.x` should narrow String? -> String.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "member-prop smart cast on val ctor param; got '%s'", t);
+	};
+}
+
+fn void member_prop_smart_cast_is_check_narrows() @test {
+	@pool() {
+		// `if (b.x is String) { val s = b.x }` — narrows to String.
+		String src =
+			`class Box(val x: Any)
+			fun test(b: Box) {
+				if (b.x is String) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "member-prop is-check narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_var_does_not_narrow() @test {
+	@pool() {
+		// Primary-ctor `var x` is unstable — must NOT narrow.
+		String src =
+			`class Box(var x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "ctor-var member must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_open_val_does_not_narrow() @test {
+	@pool() {
+		// `open val x` may be overridden with a custom getter — unstable.
+		String src =
+			`open class Box { open val x: String? = null }
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "open val member must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_val_with_custom_getter_does_not_narrow() @test {
+	@pool() {
+		String src =
+			`class Box {
+				val x: String?
+					get() = if (System.currentTimeMillis() % 2L == 0L) "x" else null
+			}
+			fun test(b: Box) {
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "val-with-custom-getter member must NOT narrow; got '%s'", t);
+	};
+}
+
+fn void member_prop_var_receiver_narrows_in_straight_line() @test {
+	@pool() {
+		// Receiver `b` is a local `var`, but in straight-line flow with no
+		// reassignment between check and use, Kotlin narrows `b.x`.
+		// The fact-kill on `b = ...` (kill_receiver) handles invalidation.
+		String src =
+			`class Box(val x: String?)
+			fun test() {
+				var b: Box = Box("hi")
+				if (b.x != null) {
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "var-receiver member narrows in straight line; got '%s'", t);
+	};
+}
+
+fn void member_prop_kill_on_receiver_reassignment() @test {
+	@pool() {
+		// Reassignment to receiver between check and use must invalidate.
+		// `b.x` should NOT narrow on the second use.
+		String src =
+			`class Box(val x: String?)
+			fun test() {
+				var b: Box = Box("hi")
+				if (b.x != null) {
+					b = Box(null)
+					val s = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String?", "kill on receiver reassignment; got '%s'", t);
+	};
+}
+
+fn void member_prop_kill_after_receiver_reassignment() @test {
+	@pool() {
+		// Even with a stable val member, a `b = ...` reassignment between
+		// the check and the use must invalidate the fact (we kill all `b.*`
+		// facts). But here `b` is a `val`, so reassignment is impossible —
+		// instead test that the smart cast still works through normal flow.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				if (b.x != null) {
+					val a = b.x
+					val c = b.x
+				}
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(r, "a");
+		uint c_idx = find_decl(r, "c");
+		assert(a_idx > 0 && ti.has_type[a_idx], "found a");
+		assert(c_idx > 0 && ti.has_type[c_idx], "found c");
+		String ta = types::format_type(&ti.node_types[a_idx]);
+		String tc = types::format_type(&ti.node_types[c_idx]);
+		assert(ta == "String", "first use narrows; got '%s'", ta);
+		assert(tc == "String", "second use also narrows; got '%s'", tc);
+	};
+}
+
+fn void member_prop_bang_bang_narrows() @test {
+	@pool() {
+		// `b.x!!` should also produce a non-null fact for subsequent uses.
+		String src =
+			`class Box(val x: String?)
+			fun test(b: Box) {
+				b.x!!
+				val s = b.x
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "b.x!! should narrow subsequent b.x; got '%s'", t);
+	};
+}
+
+// ── Operator-call resolution (binary) ─────────────────────────────
+
+fn void user_operator_plus_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Vec(val x: Int, val y: Int) {
+				operator fun plus(o: Vec): Vec = Vec(x + o.x, y + o.y)
+			}
+			fun test(a: Vec, b: Vec) {
+				val s = a + b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Vec", "a + b should resolve via Vec.plus; got '%s'", t);
+	};
+}
+
+fn void user_operator_minus_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Money(val cents: Int) {
+				operator fun minus(o: Money): Money = Money(cents - o.cents)
+			}
+			fun test(a: Money, b: Money) {
+				val d = a - b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "d");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Money", "a - b should resolve via Money.minus; got '%s'", t);
+	};
+}
+
+fn void user_operator_times_returns_different_type() @test {
+	@pool() {
+		// User operator that returns a DIFFERENT type than the left operand
+		// — proves we're consulting the operator method, not just returning
+		// left_type as the legacy fallback.
+		String src =
+			`class Foo {
+				operator fun times(other: Foo): Bar = Bar()
+			}
+			class Bar
+			fun test(a: Foo, b: Foo) {
+				val r = a * b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Bar", "a * b should resolve via Foo.times → Bar; got '%s'", t);
+	};
+}
+
+fn void user_operator_rangeTo_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class DateRange
+			class Day {
+				operator fun rangeTo(other: Day): DateRange = DateRange()
+			}
+			fun test(a: Day, b: Day) {
+				val r = a..b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "DateRange", "a..b should resolve via Day.rangeTo → DateRange; got '%s'", t);
+	};
+}
+
+fn void int_range_still_resolves_via_stdlib() @test {
+	@pool() {
+		// Regression: stdlib Int.rangeTo → IntRange must still work
+		// after removing the hardcoded `..` short-circuit.
+		String src =
+			`fun test() {
+				val r = 1..10
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "IntRange", "1..10 should resolve to IntRange; got '%s'", t);
+	};
+}
+
+fn void int_arithmetic_still_works() @test {
+	@pool() {
+		// Regression: stdlib Int.plus/minus/times must still work
+		String src =
+			`fun test() {
+				val s = 1 + 2
+				val d = 5 - 3
+				val p = 4 * 6
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint si = find_decl(r, "s");
+		uint di = find_decl(r, "d");
+		uint pi = find_decl(r, "p");
+		String ts = types::format_type(&ti.node_types[si]);
+		String td = types::format_type(&ti.node_types[di]);
+		String tp = types::format_type(&ti.node_types[pi]);
+		assert(ts == "Int", "1 + 2 → Int, got '%s'", ts);
+		assert(td == "Int", "5 - 3 → Int, got '%s'", td);
+		assert(tp == "Int", "4 * 6 → Int, got '%s'", tp);
+	};
+}
+
+fn void user_operator_div_via_data_class() @test {
+	@pool() {
+		String src =
+			`data class Ratio(val num: Int, val den: Int) {
+				operator fun div(other: Ratio): Ratio = Ratio(num * other.den, den * other.num)
+			}
+			fun test(a: Ratio, b: Ratio) {
+				val q = a / b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "q");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Ratio", "a / b on data class should resolve via div; got '%s'", t);
+	};
+}
+
+// ── Operator-call resolution (index) ──────────────────────────────
+
+fn void user_operator_get_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class User
+			class Cache {
+				operator fun get(key: String): User = User()
+			}
+			fun test(c: Cache) {
+				val u = c["alice"]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "u");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "User", "c[\"alice\"] should resolve via Cache.get → User; got '%s'", t);
+	};
+}
+
+fn void user_operator_get_nullable_return() @test {
+	@pool() {
+		String src =
+			`class Session
+			class Sessions {
+				operator fun get(id: Int): Session? = null
+			}
+			fun test(s: Sessions) {
+				val sess = s[42]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "sess");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Session?", "s[42] should resolve via Sessions.get → Session?; got '%s'", t);
+	};
+}
+
+fn void list_index_still_resolves_via_stdlib() @test {
+	@pool() {
+		// Regression: List<T>[i] hardcoded path
+		String src =
+			`fun test(xs: List<String>) {
+				val s = xs[0]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "xs[0] → String; got '%s'", t);
+	};
+}
+
+fn void map_index_still_resolves_via_stdlib() @test {
+	@pool() {
+		// Regression: Map<K,V>[k] → V? hardcoded path
+		String src =
+			`fun test(m: Map<String, Int>) {
+				val v = m["key"]
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "v");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int?", "m[\"key\"] → Int?; got '%s'", t);
+	};
+}
+
+// ── Operator-call resolution (invoke) ─────────────────────────────
+
+fn void user_operator_invoke_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Greeting
+			class Greeter {
+				operator fun invoke(name: String): Greeting = Greeting()
+			}
+			fun test(g: Greeter) {
+				val msg = g("Bob")
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "msg");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Greeting", "g(\"Bob\") should resolve via Greeter.invoke → Greeting; got '%s'", t);
+	};
+}
+
+fn void user_operator_invoke_returns_primitive() @test {
+	@pool() {
+		String src =
+			`class Counter {
+				operator fun invoke(): Int = 42
+			}
+			fun test(c: Counter) {
+				val n = c()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "c() should resolve via Counter.invoke → Int; got '%s'", t);
+	};
+}
+
+// ── Operator-call resolution (unary) ──────────────────────────────
+
+fn void user_operator_unary_minus_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Vec(val x: Int, val y: Int) {
+				operator fun unaryMinus(): Vec = Vec(-x, -y)
+			}
+			fun test(v: Vec) {
+				val n = -v
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Vec", "-v should resolve via Vec.unaryMinus → Vec; got '%s'", t);
+	};
+}
+
+fn void user_operator_inc_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Counter(val n: Int) {
+				operator fun inc(): Counter = Counter(n + 1)
+			}
+			fun test(c: Counter) {
+				val r = ++c
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Counter", "++c should resolve via Counter.inc → Counter; got '%s'", t);
+	};
+}
+
+fn void user_operator_postfix_inc_returns_user_type() @test {
+	@pool() {
+		String src =
+			`class Counter(val n: Int) {
+				operator fun inc(): Counter = Counter(n + 1)
+			}
+			fun test(c: Counter) {
+				val r = c++
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Counter", "c++ should resolve via Counter.inc → Counter; got '%s'", t);
+	};
+}
+
+fn void int_unary_minus_still_works() @test {
+	@pool() {
+		// Regression: -Int → Int via stdlib
+		String src =
+			`fun test() {
+				val n = -42
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "-42 → Int; got '%s'", t);
+	};
+}
+
+fn void boolean_not_still_works() @test {
+	@pool() {
+		// Regression: !Boolean → Boolean
+		String src =
+			`fun test(b: Boolean) {
+				val n = !b
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "n");
+		assert(idx > 0 && ti.has_type[idx], "found decl");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Boolean", "!b → Boolean; got '%s'", t);
+	};
+}
+
+// ── Lambda value type inference (Kotlin spec §17.6) ─────────────────
+
+fn void lambda_value_var_has_function_type() @test {
+	@pool() {
+		String src = `fun f() {
+				val add = { a: Int, b: Int -> a + b }
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "add");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		assert(ti.node_types[idx].kind == FUNCTION, "expected FUNCTION kind");
+		assert(ti.node_types[idx].param_type_count == 2, "expected 2 params, got %d", ti.node_types[idx].param_type_count);
+		assert(ti.node_types[idx].return_type_name == "Int",
+			"expected return Int, got '%s'", ti.node_types[idx].return_type_name);
+	};
+}
+
+fn void lambda_value_call_returns_body_type() @test {
+	@pool() {
+		String src = `fun f() {
+				val add = { a: Int, b: Int -> a + b }
+				val r = add(1, 2)
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "expected r: Int from lambda call, got '%s'", t);
+	};
+}
+
+fn void lambda_value_no_params_returns_string() @test {
+	@pool() {
+		String src = `fun f() {
+				val greet = { "hello" }
+				val s = greet()
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "s");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "expected s: String, got '%s'", t);
+	};
+}
+
+// ── Callable reference type (Kotlin spec §16.30.5) ──────────────────
+
+fn void callable_ref_to_top_level_fun_has_function_type() @test {
+	@pool() {
+		String src = `fun greet(name: String): Int = 42
+			fun main() {
+				val f = ::greet
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "f");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		assert(ti.node_types[idx].kind == FUNCTION, "expected FUNCTION kind, got %d", (int)ti.node_types[idx].kind);
+		assert(ti.node_types[idx].param_type_count == 1, "expected 1 param, got %d", ti.node_types[idx].param_type_count);
+		assert(ti.node_types[idx].return_type_name == "Int",
+			"expected return Int, got '%s'", ti.node_types[idx].return_type_name);
+	};
+}
+
+fn void callable_ref_call_returns_referenced_fun_return_type() @test {
+	@pool() {
+		String src = `fun greet(name: String): Int = 42
+			fun main() {
+				val f = ::greet
+				val r = f("world")
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "r");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Int", "expected r: Int from callable-ref call, got '%s'", t);
+	};
+}
+
+fn void callable_ref_to_unit_fun() @test {
+	@pool() {
+		String src = `fun log() {}
+			fun main() {
+				val f = ::log
+			}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "f");
+		assert(idx > 0 && ti.has_type[idx], "found decl with type");
+		assert(ti.node_types[idx].kind == FUNCTION, "expected FUNCTION kind");
+		assert(ti.node_types[idx].param_type_count == 0, "expected 0 params");
+		assert(ti.node_types[idx].return_type_name == "Unit",
+			"expected return Unit, got '%s'", ti.node_types[idx].return_type_name);
+	};
+}
+
+// ── User iterator() for-loops (Kotlin spec §15.5) ───────────────────
+
+// ── User componentN() destructuring (Kotlin spec §11.7) ─────────────
+
+fn void destructure_user_class_with_componentN() @test {
+	@pool() {
+		String src = `class Point {
+			operator fun component1(): Int = 0
+			operator fun component2(): String = ""
+		}
+		fun f(p: Point) {
+			val (a, b) = p
+			val x = a
+			val y = b
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(r, "a");
+		uint b_idx = find_decl(r, "b");
+		uint x_idx = find_decl(r, "x");
+		uint y_idx = find_decl(r, "y");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int from componentN, got '%s'", types::format_type(&ti.node_types[a_idx]));
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String",
+			"b: String from componentN");
+		assert(x_idx > 0 && ti.has_type[x_idx]
+			&& types::format_type(&ti.node_types[x_idx]) == "Int",
+			"x: Int (downstream propagation), got '%s'",
+			x_idx > 0 && ti.has_type[x_idx] ? types::format_type(&ti.node_types[x_idx]) : "<no>");
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "String",
+			"y: String (downstream propagation)");
+	};
+}
+
+fn void destructure_user_class_three_components() @test {
+	@pool() {
+		String src = `class Trio {
+			operator fun component1(): Int = 0
+			operator fun component2(): Long = 0L
+			operator fun component3(): Boolean = true
+		}
+		fun f(t: Trio) {
+			val (i, l, b) = t
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint i_idx = find_decl(r, "i");
+		uint l_idx = find_decl(r, "l");
+		uint b_idx = find_decl(r, "b");
+		assert(types::format_type(&ti.node_types[i_idx]) == "Int", "i: Int");
+		assert(types::format_type(&ti.node_types[l_idx]) == "Long", "l: Long");
+		assert(types::format_type(&ti.node_types[b_idx]) == "Boolean", "b: Boolean");
+	};
+}
+
+fn void destructure_in_for_loop_user_componentN() @test {
+	@pool() {
+		String src = `class Pair2 {
+			operator fun component1(): Int = 0
+			operator fun component2(): String = ""
+		}
+		class Pair2List {
+			operator fun iterator(): Pair2Iter = Pair2Iter()
+		}
+		class Pair2Iter {
+			operator fun hasNext(): Boolean = true
+			operator fun next(): Pair2 = Pair2()
+		}
+		fun f(items: Pair2List) {
+			for ((a, b) in items) {
+				val x = a
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_node(r, PARAM, "a");
+		uint b_idx = find_node(r, PARAM, "b");
+		uint x_idx = find_decl(r, "x");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int from componentN, got '%s'", types::format_type(&ti.node_types[a_idx]));
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String", "b: String");
+		assert(x_idx > 0 && ti.has_type[x_idx]
+			&& types::format_type(&ti.node_types[x_idx]) == "Int", "x: Int");
+	};
+}
+
+fn void for_in_list_infers_element_type() @test {
+	@pool() {
+		String src = `fun f() {
+			for (x in listOf(1, 2, 3)) {
+				val y = x
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_node(r, PARAM, "x");
+		uint y_idx = find_decl(r, "y");
+		assert(x_idx > 0 && ti.has_type[x_idx], "x should have type");
+		assert(y_idx > 0 && ti.has_type[y_idx], "y should have type");
+		assert(types::format_type(&ti.node_types[x_idx]) == "Int", "x: Int");
+		assert(types::format_type(&ti.node_types[y_idx]) == "Int", "y: Int");
+	};
+}
+
+fn void for_in_user_iterator() @test {
+	@pool() {
+		String src = `class Range {
+			operator fun iterator(): RangeIter = RangeIter()
+		}
+		class RangeIter {
+			operator fun hasNext(): Boolean = true
+			operator fun next(): Int = 0
+		}
+		fun f(r: Range) {
+			for (x in r) {
+				val y = x
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_node(r, PARAM, "x");
+		uint y_idx = find_decl(r, "y");
+		assert(x_idx > 0 && ti.has_type[x_idx], "x should have type");
+		assert(y_idx > 0 && ti.has_type[y_idx], "y should have type");
+		assert(types::format_type(&ti.node_types[x_idx]) == "Int",
+			"x: Int from user iterator/next, got '%s'", types::format_type(&ti.node_types[x_idx]));
+		assert(types::format_type(&ti.node_types[y_idx]) == "Int", "y: Int");
+	};
+}
+
+fn void for_in_user_iterator_string() @test {
+	@pool() {
+		String src = `class Names {
+			operator fun iterator(): NameIter = NameIter()
+		}
+		class NameIter {
+			operator fun hasNext(): Boolean = true
+			operator fun next(): String = ""
+		}
+		fun f(n: Names) {
+			for (name in n) {
+				val s = name
+			}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint name_idx = find_node(r, PARAM, "name");
+		uint s_idx = find_decl(r, "s");
+		assert(name_idx > 0 && ti.has_type[name_idx], "name should have type");
+		String t = types::format_type(&ti.node_types[name_idx]);
+		assert(t == "String", "expected name: String, got '%s'", t);
+		assert(s_idx > 0 && ti.has_type[s_idx]
+			&& types::format_type(&ti.node_types[s_idx]) == "String", "s: String");
+	};
+}
+
+fn void for_in_explicit_param_type_preserved() @test {
+	@pool() {
+		String src = `fun f() {
+			for (x: Long in listOf(1, 2, 3)) {}
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_node(r, PARAM, "x");
+		assert(x_idx > 0 && ti.has_type[x_idx], "x should have type");
+		String t = types::format_type(&ti.node_types[x_idx]);
+		assert(t == "Long", "explicit annotation Long should win over inferred Int, got '%s'", t);
+	};
+}
+
+// ── by lazy delegation (Kotlin spec §11.16) ─────────────────────────
+
+fn void by_lazy_int_literal() @test {
+	@pool() {
+		String src = `fun f() {
+			val x by lazy { 42 }
+			val y = x
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint x_idx = find_decl(r, "x");
+		uint y_idx = find_decl(r, "y");
+		String tx = x_idx > 0 && ti.has_type[x_idx] ? types::format_type(&ti.node_types[x_idx]) : "<no type>";
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no type>";
+		assert(tx == "Int", "expected x: Int from lazy { 42 }, got '%s'", tx);
+		assert(ty == "Int", "expected y: Int (y = x), got '%s'", ty);
+	};
+}
+
+fn void by_lazy_string() @test {
+	@pool() {
+		String src = `fun f() {
+			val name by lazy { "hello" }
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "name");
+		assert(idx > 0 && ti.has_type[idx], "name should have type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "String", "expected name: String from lazy { \"hello\" }, got '%s'", t);
+	};
+}
+
+fn void by_lazy_top_level() @test {
+	@pool() {
+		String src = `val cached by lazy { compute() }
+			fun compute(): Long = 99L`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "cached");
+		assert(idx > 0 && ti.has_type[idx], "cached should have type");
+		String t = types::format_type(&ti.node_types[idx]);
+		assert(t == "Long", "expected cached: Long from lazy { compute() }, got '%s'", t);
+	};
+}
+
+fn void val_assignment_lazy_call_not_delegated() @test {
+	@pool() {
+		// Without `by`, this is just a regular assignment of a Lazy<T> value.
+		// We don't have a real Lazy type modeled, so the property type comes
+		// from whatever resolve_known_call/scope returns for `lazy(...)` —
+		// currently UNKNOWN. The point of this test is to confirm `=` does
+		// NOT trigger the delegate-unwrap path (no spurious Int).
+		String src = `fun f() {
+			val x = lazy { 42 }
+		}`;
+		ParseResult* r = do_parse(src); defer free_result(r);
+		TypeInfo* ti = do_resolve(r); defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint idx = find_decl(r, "x");
+		String t = idx > 0 && ti.has_type[idx] ? types::format_type(&ti.node_types[idx]) : "<no type>";
+		assert(t != "Int", "expected x to NOT be Int (only delegated `by lazy` unwraps), got '%s'", t);
+	};
+}
+
+// ── Stdlib Result<T> inference (Kotlin spec stdlib) ─────────────────
+
+fn void result_success_factory_and_getOrNull() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = Result.success(42)
+			val v = r.getOrNull()
+			val w = r.getOrThrow()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		uint v_idx = find_decl(pr, "v");
+		uint w_idx = find_decl(pr, "w");
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Result<Int>",
+			"r: Result<Int>, got '%s'",
+			r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int?",
+			"v: Int?, got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+		assert(w_idx > 0 && ti.has_type[w_idx]
+			&& types::format_type(&ti.node_types[w_idx]) == "Int",
+			"w: Int (getOrThrow), got '%s'",
+			w_idx > 0 && ti.has_type[w_idx] ? types::format_type(&ti.node_types[w_idx]) : "<no>");
+	};
+}
+
+fn void result_isSuccess_isFailure_exceptionOrNull() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = Result.success(42)
+			val ok = r.isSuccess
+			val bad = r.isFailure
+			val ex = r.exceptionOrNull()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint ok_idx = find_decl(pr, "ok");
+		uint bad_idx = find_decl(pr, "bad");
+		uint ex_idx = find_decl(pr, "ex");
+		assert(ok_idx > 0 && ti.has_type[ok_idx]
+			&& types::format_type(&ti.node_types[ok_idx]) == "Boolean", "ok: Boolean");
+		assert(bad_idx > 0 && ti.has_type[bad_idx]
+			&& types::format_type(&ti.node_types[bad_idx]) == "Boolean", "bad: Boolean");
+		assert(ex_idx > 0 && ti.has_type[ex_idx]
+			&& types::format_type(&ti.node_types[ex_idx]) == "Throwable?",
+			"ex: Throwable?, got '%s'",
+			ex_idx > 0 && ti.has_type[ex_idx] ? types::format_type(&ti.node_types[ex_idx]) : "<no>");
+	};
+}
+
+fn void run_catching_returns_Result_T() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = runCatching { 42 }
+			val v = r.getOrNull()
+			val w = r.getOrElse { 0 }
+			val x = r.getOrThrow()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		uint v_idx = find_decl(pr, "v");
+		uint w_idx = find_decl(pr, "w");
+		uint x_idx = find_decl(pr, "x");
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Result<Int>",
+			"r: Result<Int>, got '%s'",
+			r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int?", "v: Int?");
+		assert(w_idx > 0 && ti.has_type[w_idx]
+			&& types::format_type(&ti.node_types[w_idx]) == "Int", "w: Int");
+		assert(x_idx > 0 && ti.has_type[x_idx]
+			&& types::format_type(&ti.node_types[x_idx]) == "Int", "x: Int");
+	};
+}
+
+fn void result_onSuccess_returns_self() @test {
+	@pool() {
+		String src = `fun f() {
+			val r = Result.success(42)
+			val s = r.onSuccess { }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint s_idx = find_decl(pr, "s");
+		assert(s_idx > 0 && ti.has_type[s_idx]
+			&& types::format_type(&ti.node_types[s_idx]) == "Result<Int>",
+			"s: Result<Int> (chained), got '%s'",
+			s_idx > 0 && ti.has_type[s_idx] ? types::format_type(&ti.node_types[s_idx]) : "<no>");
+	};
+}
+
+// ── User generic function type-param inference (Kotlin spec §11.1.7) ──
+
+fn void user_generic_fun_substitutes_T_from_arg() @test {
+	@pool() {
+		String src = `fun <T> identity(x: T): T = x
+		fun f() {
+			val a = identity(42)
+			val b = identity("hi")
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint a_idx = find_decl(pr, "a");
+		uint b_idx = find_decl(pr, "b");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int (T=Int), got '%s'",
+			a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String",
+			"b: String (T=String), got '%s'",
+			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_fun_two_type_params() @test {
+	@pool() {
+		String src = `fun <K, V> pair(k: K, v: V): K = k
+		fun f() {
+			val a = pair(1, "x")
+			val b = pair("hello", 42)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint a_idx = find_decl(pr, "a");
+		uint b_idx = find_decl(pr, "b");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int (K=Int), got '%s'",
+			a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String", "b: String (K=String)");
+	};
+}
+
+fn void user_generic_fun_no_substitution_for_concrete_param() @test {
+	@pool() {
+		String src = `fun <T> takeIntReturnT(i: Int, t: T): T = t
+		fun f() {
+			val r = takeIntReturnT(42, "hi")
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (T inferred from 2nd arg)");
+	};
+}
+
+fn void user_generic_class_constructor_infers_T() @test {
+	@pool() {
+		String src = `class Box<T>(val value: T)
+		fun f() {
+			val b = Box(42)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint b_idx = find_decl(pr, "b");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "Box<Int>",
+			"b: Box<Int>, got '%s'",
+			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_class_fun_member_substitutes_T() @test {
+	@pool() {
+		String src = `class Box<T>(val value: T) {
+			fun get(): T = value
+		}
+		fun f() {
+			val b = Box(42)
+			val v = b.get()
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int",
+			"v: Int (T=Int via b.get()), got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_class_val_property_substitutes_T() @test {
+	@pool() {
+		String src = `class Box<T>(val value: T)
+		fun f() {
+			val b = Box("hi")
+			val v = b.value
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "String",
+			"v: String (T=String via b.value), got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_class_two_type_params() @test {
+	@pool() {
+		String src = `class Pair<A, B>(val first: A, val second: B)
+		fun f() {
+			val p = Pair(1, "x")
+			val a = p.first
+			val b = p.second
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint a_idx = find_decl(pr, "a");
+		uint b_idx = find_decl(pr, "b");
+		assert(a_idx > 0 && ti.has_type[a_idx]
+			&& types::format_type(&ti.node_types[a_idx]) == "Int",
+			"a: Int, got '%s'",
+			a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>");
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "String",
+			"b: String, got '%s'",
+			b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>");
+	};
+}
+
+// ── Nested type-param unification (Kotlin spec §11.1.7) ────────────
+
+fn void user_generic_fn_nested_list_param() @test {
+	@pool() {
+		String src = `fun <T> first(xs: List<T>): T = xs[0]
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val v = first(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint v_idx = find_decl(pr, "v");
+		assert(v_idx > 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int",
+			"v: Int (T inferred from List<Int>), got '%s'",
+			v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_fn_nested_pair_param_swapped_return() @test {
+	@pool() {
+		String src = `fun <A, B> swap(p: Pair<A, B>): Pair<B, A> = Pair(p.second, p.first)
+		fun f() {
+			val p: Pair<Int, String> = Pair(1, "hi")
+			val q = swap(p)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint q_idx = find_decl(pr, "q");
+		assert(q_idx > 0 && ti.has_type[q_idx]
+			&& types::format_type(&ti.node_types[q_idx]) == "Pair<String, Int>",
+			"q: Pair<String, Int>, got '%s'",
+			q_idx > 0 && ti.has_type[q_idx] ? types::format_type(&ti.node_types[q_idx]) : "<no>");
+	};
+}
+
+fn void user_generic_fn_nested_map_param() @test {
+	@pool() {
+		String src = `fun <K, V> firstKey(m: Map<K, V>): K = m.keys.first()
+		fun f() {
+			val m: Map<String, Int> = mapOf("a" to 1)
+			val k = firstKey(m)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint k_idx = find_decl(pr, "k");
+		assert(k_idx > 0 && ti.has_type[k_idx]
+			&& types::format_type(&ti.node_types[k_idx]) == "String",
+			"k: String, got '%s'",
+			k_idx > 0 && ti.has_type[k_idx] ? types::format_type(&ti.node_types[k_idx]) : "<no>");
+	};
+}
+
+// ── Class type-param nested unification probes (Kotlin spec §11.1.7) ───
+
+fn void user_generic_class_nested_list() @test {
+	@pool() {
+		String src = `class Bag<T>(val items: List<T>)
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val b = Bag(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint b_idx = find_decl(pr, "b");
+		String tb = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx > 0 && ti.has_type[b_idx]
+			&& types::format_type(&ti.node_types[b_idx]) == "Bag<Int>",
+			"b: Bag<Int> (T inferred from List<Int>), got '%s'", tb);
+	};
+}
+
+fn void user_generic_class_nested_map() @test {
+	@pool() {
+		String src = `class Cache<K, V>(val store: Map<K, V>)
+		fun f() {
+			val m: Map<String, Int> = mapOf("a" to 1)
+			val c = Cache(m)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint c_idx = find_decl(pr, "c");
+		String tc = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx > 0 && ti.has_type[c_idx]
+			&& types::format_type(&ti.node_types[c_idx]) == "Cache<String, Int>",
+			"c: Cache<String, Int>, got '%s'", tc);
+	};
+}
+
+fn void user_generic_fn_supertype_iterable() @test {
+	@pool() {
+		String src = `fun <T> sum(xs: Iterable<T>): T = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val r = sum(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (T inferred via List <: Iterable), got '%s'", tr);
+	};
+}
+
+fn void user_generic_fn_supertype_collection() @test {
+	@pool() {
+		String src = `fun <T> first(xs: Collection<T>): T = TODO()
+		fun f() {
+			val xs: Set<String> = setOf("a", "b")
+			val r = first(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (T inferred via Set <: Collection), got '%s'", tr);
+	};
+}
+
+fn void user_generic_class_supertype() @test {
+	@pool() {
+		String src = `class Wrap<T>(val items: Iterable<T>)
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val w = Wrap(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint w_idx = find_decl(pr, "w");
+		String tw = w_idx > 0 && ti.has_type[w_idx] ? types::format_type(&ti.node_types[w_idx]) : "<no>";
+		assert(w_idx > 0 && ti.has_type[w_idx]
+			&& types::format_type(&ti.node_types[w_idx]) == "Wrap<Int>",
+			"w: Wrap<Int> (List <: Iterable), got '%s'", tw);
+	};
+}
+
+fn void user_generic_fn_supertype_mutable_to_immutable() @test {
+	@pool() {
+		String src = `fun <T> sz(xs: List<T>): T = TODO()
+		fun f() {
+			val xs: MutableList<String> = mutableListOf("a")
+			val r = sz(xs)
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (T via MutableList <: List), got '%s'", tr);
+	};
+}
+
+fn void user_generic_fn_fntype_R_from_typed_lambda() @test {
+	@pool() {
+		String src = `fun <T, R> mp(xs: List<T>, f: (T) -> R): List<R> = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val ys = mp(xs) { x: Int -> "v" }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint y_idx = find_decl(pr, "ys");
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no>";
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "List<String>",
+			"ys: List<String> (R from typed lambda body), got '%s'", ty);
+	};
+}
+
+fn void user_generic_fn_fntype_R_only_from_lambda() @test {
+	@pool() {
+		String src = `fun <R> wrap(f: () -> R): R = TODO()
+		fun f() {
+			val r = wrap { 42 }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (R from lambda body of () -> R), got '%s'", tr);
+	};
+}
+
+fn void user_generic_fn_T_via_other_arg_with_lambda() @test {
+	@pool() {
+		String src = `fun <T> apply2(x: T, f: (T) -> T): T = TODO()
+		fun f() {
+			val r = apply2(10) { it + 1 }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx > 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (T bound from x), got '%s'", tr);
+	};
+}
+
+fn void implicit_it_lambda_R_from_body() @test {
+	@pool() {
+		String src = `fun <T, R> mp(xs: List<T>, f: (T) -> R): List<R> = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val ys = mp(xs) { it.toString() }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint y_idx = find_decl(pr, "ys");
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no>";
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "List<String>",
+			"ys: List<String> (it.toString from implicit it: Int), got '%s'", ty);
+	};
+}
+
+fn void implicit_it_lambda_forwarded_unchanged() @test {
+	@pool() {
+		String src = `fun <T, R> mp(xs: List<T>, f: (T) -> R): List<R> = TODO()
+		fun f() {
+			val xs: List<Int> = listOf(1, 2)
+			val ys = mp(xs) { it }
+		}`;
+		ParseResult* pr = do_parse(src); defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr); defer { types::free_type_info(ti); mem::free(ti); };
+		uint y_idx = find_decl(pr, "ys");
+		String ty = y_idx > 0 && ti.has_type[y_idx] ? types::format_type(&ti.node_types[y_idx]) : "<no>";
+		assert(y_idx > 0 && ti.has_type[y_idx]
+			&& types::format_type(&ti.node_types[y_idx]) == "List<Int>",
+			"ys: List<Int> (it: Int forwarded), got '%s'", ty);
+	};
+}
+
+fn void cross_file_generic_class_nested_member() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///bag.kt", "class Bag<T>(val items: List<T>)");
+
+		String src = `fun main() {
+			val xs: List<Int> = listOf(1, 2)
+			val b = Bag(xs)
+			val its = b.items
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		uint its_idx = find_decl(pr, "its");
+		String tb = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		String tits = its_idx > 0 && ti.has_type[its_idx] ? types::format_type(&ti.node_types[its_idx]) : "<no>";
+		assert(its_idx != 0 && ti.has_type[its_idx]
+			&& types::format_type(&ti.node_types[its_idx]) == "List<Int>",
+			"its: List<Int> (xfile member with substituted T), got '%s' (b='%s')", tits, tb);
+	};
+}
+
+fn void cross_file_generic_class_top_level_T() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///box.kt", "class Box<T>(val v: T)");
+
+		String src = `fun main() {
+			val b = Box(42)
+			val v = b.v
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint v_idx = find_decl(pr, "v");
+		String tv = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && ti.has_type[v_idx]
+			&& types::format_type(&ti.node_types[v_idx]) == "Int",
+			"v: Int (xfile T from val v: T), got '%s'", tv);
+	};
+}
+
+fn void cross_file_generic_class_two_tps() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///pair.kt", "class P<A, B>(val a: A, val b: B)");
+
+		String src = `fun main() {
+			val p = P("hi", 7)
+			val xa = p.a
+			val xb = p.b
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint xa_idx = find_decl(pr, "xa");
+		uint xb_idx = find_decl(pr, "xb");
+		String txa = xa_idx > 0 && ti.has_type[xa_idx] ? types::format_type(&ti.node_types[xa_idx]) : "<no>";
+		String txb = xb_idx > 0 && ti.has_type[xb_idx] ? types::format_type(&ti.node_types[xb_idx]) : "<no>";
+		assert(xa_idx != 0 && ti.has_type[xa_idx]
+			&& types::format_type(&ti.node_types[xa_idx]) == "String",
+			"xa: String, got '%s'", txa);
+		assert(xb_idx != 0 && ti.has_type[xb_idx]
+			&& types::format_type(&ti.node_types[xb_idx]) == "Int",
+			"xb: Int, got '%s'", txb);
+	};
+}
+
+fn void cross_file_generic_fn_return_T() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <T> first(xs: List<T>): T = xs[0]");
+
+		String src = `fun main() {
+			val xs: List<Int> = listOf(1, 2)
+			val r = first(xs)
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (xfile T from List<T>), got '%s'", tr);
+	};
+}
+
+fn void cross_file_generic_fn_top_level_T() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <T> id(x: T): T = x");
+
+		String src = `fun main() {
+			val r = id("hi")
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "String",
+			"r: String (xfile id(x: T): T), got '%s'", tr);
+	};
+}
+
+fn void cross_file_ext_fn_class_tp_from_receiver() @test {
+	// Extension fn references receiver's class TP in return type.
+	// fun <U> List<U>.firstOr(d: U): U — TP "U" comes from fn's own decl
+	// but is bound to receiver List<U>. With receiver List<Int>, U=Int.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <U> List<U>.firstOr(d: U): U = d");
+
+		String src = `fun main() {
+			val xs: List<Int> = listOf(1, 2)
+			val r = xs.firstOr(0)
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (xfile ext fn TP from receiver), got '%s'", tr);
+	};
+}
+
+fn void cross_file_ext_fn_arg_only_tp() @test {
+	// Extension fn's TP determined ONLY by call arg, not receiver.
+	// fun <T> String.wrap(x: T): T — receiver is String (no TP), arg gives T.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+
+		ws.index_file("file:///util.kt", "fun <T> String.wrap(x: T): T = x");
+
+		String src = `fun main() {
+			val s = "hi"
+			val r = s.wrap(42)
+		}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String tr = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx]
+			&& types::format_type(&ti.node_types[r_idx]) == "Int",
+			"r: Int (xfile ext fn arg-only TP), got '%s'", tr);
+	};
+}
+
+// ── Audit probes (Kotlin 1.9 spec gaps) ────────────────────────────
+
+fn void probe_typealias_resolves_to_aliased_type() @test {
+	// Kotlin spec §9.5: typealias should make `Name` refer to the aliased type.
+	@pool() {
+		String src = `typealias UserId = Int
+fun main() {
+	val id: UserId = 42
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint id_idx = find_decl(pr, "id");
+		String t = id_idx > 0 && ti.has_type[id_idx] ? types::format_type(&ti.node_types[id_idx]) : "<no>";
+		// Either "Int" (resolved) or "UserId" (alias preserved) is reasonable;
+		// but format must not be "<no>" / UNKNOWN.
+		assert(id_idx != 0 && ti.has_type[id_idx] && (t == "Int" || t == "UserId"),
+			"id: Int or UserId, got '%s'", t);
+	};
+}
+
+fn void probe_class_delegation_inherits_member() @test {
+	// `class A(b: B) : I by b` should expose I's members on A instances.
+	@pool() {
+		String src = `interface Greeter { fun greet(): String }
+class Impl : Greeter { override fun greet(): String = "hi" }
+class Wrapper(g: Greeter) : Greeter by g
+fun main() {
+	val w = Wrapper(Impl())
+	val r = w.greet()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx] && t == "String",
+			"r: String (class delegation by), got '%s'", t);
+	};
+}
+
+fn void probe_value_class_unwraps_to_underlying() @test {
+	// Kotlin spec §9.10: `value class Wrapped(val v: Int)` — `Wrapped(1).v` is Int.
+	@pool() {
+		String src = `@JvmInline value class Wrapped(val v: Int)
+fun main() {
+	val w = Wrapped(42)
+	val r = w.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx] && t == "Int",
+			"r: Int (value class member access), got '%s'", t);
+	};
+}
+
+fn void probe_inline_fn_lambda_return_type() @test {
+	// Inline fn with reified-or-not should still resolve lambda return.
+	@pool() {
+		String src = `inline fun <T> run(block: () -> T): T = block()
+fun main() {
+	val r = run { 42 }
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && ti.has_type[r_idx] && t == "Int",
+			"r: Int (inline fn lambda return), got '%s'", t);
+	};
+}
+
+fn void probe_when_with_subject_simple_branches() @test {
+	// Simplest: when (x) { 1 -> "a"; 2 -> "b"; else -> "c" } should be String.
+	@pool() {
+		String src = `fun f(x: Int): String {
+	val a = when (x) {
+		1 -> "a"
+		2 -> "b"
+		else -> "c"
+	}
+	return a
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String t = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && ti.has_type[a_idx] && t == "String",
+			"a: String (when-with-subject literal branches), got '%s'", t);
+	};
+}
+
+fn void when_with_subject_smart_cast_is_branch() @test {
+	// `when (x) { is A -> x.aField }` — inside is-branch x narrowed to A
+	// across all sealed-class subclass arms (Kotlin spec §11.1.4 + §11.3).
+	// Requires:
+	//   - parser: break statement at newline before bare `is`/`!is` so
+	//     bodies don't absorb the next entry's condition (in_when_body).
+	//   - cfg: descend into PROPERTY_DECL initializer / RETURN_EXPR value
+	//     when it's a control-flow expression so WHEN_ENTRY conditions
+	//     get COND nodes and bodies see narrowed in_state.
+	@pool() {
+		String src = `sealed class Shape
+class Circle(val radius: Int) : Shape()
+class Square(val side: Int) : Shape()
+fun area(s: Shape): Int {
+	val a = when (s) {
+		is Circle -> s.radius
+		is Square -> s.side
+	}
+	return a
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String t = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && ti.has_type[a_idx] && t == "Int",
+			"a: Int (sealed when smart-cast), got '%s'", t);
+	};
+}
+
+fn void when_with_subject_return_value_smart_cast() @test {
+	// `return when (x) { is T -> x.member }` — same narrowing inside
+	// RETURN_EXPR-as-control-flow-value.
+	@pool() {
+		String src = `sealed class Shape
+class Circle(val radius: Int) : Shape()
+class Square(val side: Int) : Shape()
+fun area(s: Shape): Int = when (s) {
+	is Circle -> s.radius
+	is Square -> s.side
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		// Locate the body WHEN_EXPR; verify both entries' bodies resolve.
+		uint when_idx = 0;
+		for (uint i = 0; i < pr.node_count; i++) {
+			if (pr.nodes[i].kind == WHEN_EXPR) { when_idx = i; break; }
+		}
+		assert(when_idx > 0, "expected WHEN_EXPR in fun body");
+
+		uint resolved = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != when_idx) continue;
+			if (pr.nodes[j].kind != WHEN_ENTRY) continue;
+			// Last child is body — find DOT_EXPR child of entry.
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				if (pr.nodes[k].kind != DOT_EXPR) continue;
+				if (ti.has_type[k] && ti.node_types[k].name == "Int") resolved++;
+			}
+		}
+		assert(resolved == 2, "both entry bodies should resolve s.member to Int, got %d", resolved);
+	};
+}
+
+fn void probe_companion_object_member_via_class() @test {
+	// `class Foo { companion object { fun create(): Foo = Foo() } }; Foo.create()`
+	@pool() {
+		String src = `class Foo {
+	companion object {
+		fun create(): Foo = Foo()
+	}
+}
+fun main() {
+	val f = Foo.create()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint f_idx = find_decl(pr, "f");
+		String t = f_idx > 0 && ti.has_type[f_idx] ? types::format_type(&ti.node_types[f_idx]) : "<no>";
+		assert(f_idx != 0 && ti.has_type[f_idx] && t == "Foo",
+			"f: Foo (companion factory), got '%s'", t);
+	};
+}
+
+fn void object_expr_supertype_member_resolves() @test {
+	// `val g = object : Greeter { ... }; g.greet()` — Kotlin spec §11.2.7.
+	// Object expression's static type approximated as first non-Any
+	// supertype; member lookup then walks the supertype chain.
+	@pool() {
+		String src = `interface Greeter { fun greet(): String }
+fun main() {
+	val g = object : Greeter { override fun greet(): String = "hi" }
+	val r = g.greet()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint g_idx = find_decl(pr, "g");
+		String gt = g_idx > 0 && ti.has_type[g_idx] ? types::format_type(&ti.node_types[g_idx]) : "<no>";
+		assert(g_idx != 0 && gt == "Greeter", "g should be Greeter, got '%s'", gt);
+
+		uint r_idx = find_decl(pr, "r");
+		String rt = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && rt == "String", "r should be String, got '%s'", rt);
+	};
+}
+
+fn void object_expr_class_supertype_member() @test {
+	// `object : Base()` (open class supertype) — same supertype walk.
+	@pool() {
+		String src = `open class Base { fun ping(): Int = 1 }
+fun main() {
+	val o = object : Base() {}
+	val n = o.ping()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint o_idx = find_decl(pr, "o");
+		String ot = o_idx > 0 && ti.has_type[o_idx] ? types::format_type(&ti.node_types[o_idx]) : "<no>";
+		assert(o_idx != 0 && ot == "Base", "o should be Base, got '%s'", ot);
+
+		uint n_idx = find_decl(pr, "n");
+		String nt = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && nt == "Int", "n should be Int, got '%s'", nt);
+	};
+}
+
+fn void enum_entry_resolves_to_enum_class() @test {
+	// `enum class Color { RED }; val c = Color.RED` — entry is instance
+	// of enum class. Kotlin spec §11.2.6 + §16.30.
+	@pool() {
+		String src = `enum class Color { RED, GREEN, BLUE }
+fun main() {
+	val c = Color.RED
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint c_idx = find_decl(pr, "c");
+		String t = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx != 0 && t == "Color", "c should be Color, got '%s'", t);
+	};
+}
+
+fn void enum_synthetic_name_and_ordinal() @test {
+	// Every enum entry has synthetic .name: String and .ordinal: Int.
+	@pool() {
+		String src = `enum class Color { RED, GREEN, BLUE }
+fun main() {
+	val c = Color.RED
+	val n = c.name
+	val o = c.ordinal
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String nt = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && nt == "String", "n should be String, got '%s'", nt);
+
+		uint o_idx = find_decl(pr, "o");
+		String ot = o_idx > 0 && ti.has_type[o_idx] ? types::format_type(&ti.node_types[o_idx]) : "<no>";
+		assert(o_idx != 0 && ot == "Int", "o should be Int, got '%s'", ot);
+	};
+}
+
+fn void enum_static_values_and_valueOf() @test {
+	// Class-ref-only synthetic statics: values(): Array<E>, valueOf(s): E.
+	@pool() {
+		String src = `enum class Color { RED, GREEN, BLUE }
+fun main() {
+	val a = Color.values()
+	val v = Color.valueOf("RED")
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String at = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && at == "Array<Color>", "a should be Array<Color>, got '%s'", at);
+
+		uint v_idx = find_decl(pr, "v");
+		String vt = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && vt == "Color", "v should be Color, got '%s'", vt);
+	};
+}
+
+fn void data_class_copy_returns_self() @test {
+	// `data class Foo(val x: Int); Foo(1).copy(x = 2)` returns Foo
+	// (Kotlin spec §11.2.4).
+	@pool() {
+		String src = `data class Foo(val x: Int)
+fun main() {
+	val a = Foo(1)
+	val b = a.copy(x = 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		String t = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx != 0 && t == "Foo", "b should be Foo, got '%s'", t);
+	};
+}
+
+fn void data_class_copy_no_args() @test {
+	// `a.copy()` with no args returns same type (uses defaults).
+	@pool() {
+		String src = `data class Pair(val a: Int, val b: String)
+fun main() {
+	val p = Pair(1, "x")
+	val q = p.copy()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint q_idx = find_decl(pr, "q");
+		String t = q_idx > 0 && ti.has_type[q_idx] ? types::format_type(&ti.node_types[q_idx]) : "<no>";
+		assert(q_idx != 0 && t == "Pair", "q should be Pair, got '%s'", t);
+	};
+}
+
+fn void data_class_copy_generic_substitutes_type_args() @test {
+	// `data class Box<T>(val v: T); Box(1).copy()` returns Box<Int>.
+	@pool() {
+		String src = `data class Box<T>(val v: T)
+fun main() {
+	val b: Box<Int> = Box(1)
+	val c = b.copy()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint c_idx = find_decl(pr, "c");
+		String t = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx != 0 && t == "Box", "c should be Box (or Box<Int>), got '%s'", t);
+	};
+}
+
+fn void typealias_member_access_via_alias() @test {
+	// `typealias S = String; (s: S).length` resolves to Int via alias unwrap
+	// (Kotlin spec §11.1.5).
+	@pool() {
+		String src = `typealias S = String
+fun main() {
+	val s: S = "hi"
+	val n = s.length
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (typealias String->length), got '%s'", t);
+	};
+}
+
+fn void typealias_chained_unwrap() @test {
+	// Chain of aliases: S2 -> S -> String. 16-step cycle guard kicks in
+	// only on actual cycles, so 2-step chain unwraps fully.
+	@pool() {
+		String src = `typealias S = String
+typealias S2 = S
+fun main() {
+	val x: S2 = "hi"
+	val n = x.length
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (chained alias), got '%s'", t);
+	};
+}
+
+fn void typealias_to_user_class_member() @test {
+	// `typealias B = Box; B().v` member access goes through user class.
+	@pool() {
+		String src = `class Box { val v: Int = 1 }
+typealias B = Box
+fun main() {
+	val b: B = Box()
+	val n = b.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (alias to user class), got '%s'", t);
+	};
+}
+
+// ── Cross-file enum + data class ──────────────────────────────────
+
+fn void cross_file_enum_entry_resolves_to_class() @test {
+	// `Color.RED` cross-file: receiver is enum class-ref, member is entry.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///color.kt", "enum class Color { RED, GREEN, BLUE }");
+
+		String src = `fun main() {
+	val c = Color.RED
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint c_idx = find_decl(pr, "c");
+		String t = c_idx > 0 && ti.has_type[c_idx] ? types::format_type(&ti.node_types[c_idx]) : "<no>";
+		assert(c_idx != 0 && t == "Color", "c should be Color, got '%s'", t);
+	};
+}
+
+fn void cross_file_enum_synthetic_name_ordinal() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///color.kt", "enum class Color { RED, GREEN, BLUE }");
+
+		String src = `fun main() {
+	val c = Color.RED
+	val n = c.name
+	val o = c.ordinal
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String nt = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && nt == "String", "n: String, got '%s'", nt);
+
+		uint o_idx = find_decl(pr, "o");
+		String ot = o_idx > 0 && ti.has_type[o_idx] ? types::format_type(&ti.node_types[o_idx]) : "<no>";
+		assert(o_idx != 0 && ot == "Int", "o: Int, got '%s'", ot);
+	};
+}
+
+fn void cross_file_enum_static_values_valueOf() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///color.kt", "enum class Color { RED, GREEN, BLUE }");
+
+		String src = `fun main() {
+	val a = Color.values()
+	val v = Color.valueOf("RED")
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint a_idx = find_decl(pr, "a");
+		String at = a_idx > 0 && ti.has_type[a_idx] ? types::format_type(&ti.node_types[a_idx]) : "<no>";
+		assert(a_idx != 0 && at == "Array<Color>", "a: Array<Color>, got '%s'", at);
+
+		uint v_idx = find_decl(pr, "v");
+		String vt = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && vt == "Color", "v: Color, got '%s'", vt);
+	};
+}
+
+fn void cross_file_data_class_copy_returns_self() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///foo.kt", "data class Foo(val x: Int)");
+
+		String src = `fun main() {
+	val a = Foo(1)
+	val b = a.copy(x = 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		String t = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx != 0 && t == "Foo", "b: Foo, got '%s'", t);
+	};
+}
+
+fn void cross_file_generic_data_class_copy_substitutes() @test {
+	// `data class Box<T>(val v: T)` cross-file; `Box(1).copy(v=2)`
+	// should return Box<Int>, not bare Box.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///box.kt", "data class Box<T>(val v: T)");
+
+		String src = `fun main() {
+	val a = Box(1)
+	val b = a.copy(v = 2)
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint b_idx = find_decl(pr, "b");
+		String t = b_idx > 0 && ti.has_type[b_idx] ? types::format_type(&ti.node_types[b_idx]) : "<no>";
+		assert(b_idx != 0 && t == "Box<Int>", "b: Box<Int>, got '%s'", t);
+	};
+}
+
+// ── Cross-file typealias ──────────────────────────────────────────
+
+fn void cross_file_typealias_simple() @test {
+	// `typealias S = String` in another file. `s.length` cross-file.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///alias.kt", "typealias S = String");
+
+		String src = `fun main() {
+	val s: S = ""
+	val n = s.length
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (cross-file alias), got '%s'", t);
+	};
+}
+
+fn void cross_file_typealias_to_user_class() @test {
+	// alias to user class in same other file
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///models.kt", "class Foo(val x: Int)\ntypealias F = Foo");
+
+		String src = `fun main() {
+	val f: F = Foo(1)
+	val n = f.x
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (cross-file alias to user class), got '%s'", t);
+	};
+}
+
+fn void cross_file_nested_generic_property_chain() @test {
+	// Box<T> from another file. Box(Box(42)).v.v should give Int via
+	// nested TP substitution along chained .v access (Kotlin spec §9.1).
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///box.kt", "class Box<T>(val v: T)");
+
+		String src = `fun main() {
+	val nested = Box(Box(42))
+	val inner = nested.v
+	val n = inner.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint nested_idx = find_decl(pr, "nested");
+		uint inner_idx = find_decl(pr, "inner");
+		uint n_idx = find_decl(pr, "n");
+		String nt = nested_idx > 0 && ti.has_type[nested_idx] ? types::format_type(&ti.node_types[nested_idx]) : "<no>";
+		String it = inner_idx > 0 && ti.has_type[inner_idx] ? types::format_type(&ti.node_types[inner_idx]) : "<no>";
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(nested_idx != 0 && nt == "Box<Box<Int>>", "nested: Box<Box<Int>>, got '%s'", nt);
+		assert(inner_idx != 0 && it == "Box<Int>", "inner: Box<Int>, got '%s'", it);
+		assert(n_idx != 0 && t == "Int", "n: Int (nested .v.v substitution), got '%s'", t);
+	};
+}
+
+// ── Multi-condition when arms (LUB) ───────────────────────────────
+
+fn void when_multi_condition_same_type_narrows() @test {
+	// `when (x) { is String, is String -> ... }` — all conds same type.
+	// Subject narrows to String inside the arm body.
+	@pool() {
+		String src = `fun f(x: Any?): Int {
+	when (x) {
+		is String, is String -> {
+			val n = x.length
+			return n
+		}
+		else -> return 0
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (x narrowed to String), got '%s'", t);
+	};
+}
+
+fn void when_multi_condition_different_types_no_narrow() @test {
+	// `when (x) { is Int, is String -> ... }` — different types,
+	// no common supertype known. Subject stays Any?, x.length not resolved.
+	@pool() {
+		String src = `fun f(x: Any?): String {
+	when (x) {
+		is Int, is String -> {
+			val n = x.length
+			return "ok"
+		}
+		else -> return "no"
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		// x is NOT narrowed → x.length is unknown
+		assert(n_idx != 0, "should find 'n'");
+		String t = ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(t != "Int", "x should NOT narrow to String when conditions disagree, got n='%s'", t);
+	};
+}
+
+fn void when_multi_condition_first_cond_wrongly_applied() @test {
+	// Bug probe: when (x) { is String, is Int -> ... } — current code
+	// only reads first condition. If first is `is String`, we incorrectly
+	// narrow x to String inside arm even when the match came from Int.
+	// `x.length` resolves to Int even though it shouldn't.
+	@pool() {
+		String src = `fun f(x: Any?): Int {
+	when (x) {
+		is String, is Int -> {
+			val n = x.length
+			return n
+		}
+		else -> return 0
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		// Correct behavior: x is NOT narrowed → x.length unknown → n is UNKNOWN.
+		assert(n_idx != 0, "should find 'n'");
+		assert(t != "Int", "BUG: x wrongly narrowed to String from first cond, got n='%s'", t);
+	};
+}
+
+// ── Generic typealias TP substitution ─────────────────────────────
+
+fn void typealias_generic_single_tp() @test {
+	// `typealias Box<T> = Pair<T, T>; val b: Box<Int>` — alias TP T
+	// must substitute from use-site type args.
+	@pool() {
+		String src = `class Pair<A, B>(val first: A, val second: B)
+typealias Box<T> = Pair<T, T>
+fun main() {
+	val b: Box<Int> = Pair(1, 2)
+	val f = b.first
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint f_idx = find_decl(pr, "f");
+		String t = f_idx > 0 && ti.has_type[f_idx] ? types::format_type(&ti.node_types[f_idx]) : "<no>";
+		assert(f_idx != 0 && t == "Int", "f: Int (Box<Int>.first → T=Int → A=Int), got '%s'", t);
+	};
+}
+
+fn void typealias_generic_partial_subst() @test {
+	// `typealias StringMap<V> = Map<String, V>` — only V is alias TP;
+	// String is fixed. Use site StringMap<Int> binds V=Int.
+	@pool() {
+		String src = `class Map<K, V>(val k: K, val v: V)
+typealias StringMap<V> = Map<String, V>
+fun main() {
+	val m: StringMap<Int> = Map("a", 1)
+	val k = m.k
+	val v = m.v
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint k_idx = find_decl(pr, "k");
+		String kt = k_idx > 0 && ti.has_type[k_idx] ? types::format_type(&ti.node_types[k_idx]) : "<no>";
+		assert(k_idx != 0 && kt == "String", "k: String (fixed in alias), got '%s'", kt);
+
+		uint v_idx = find_decl(pr, "v");
+		String vt = v_idx > 0 && ti.has_type[v_idx] ? types::format_type(&ti.node_types[v_idx]) : "<no>";
+		assert(v_idx != 0 && vt == "Int", "v: Int (V→Int via use site), got '%s'", vt);
+	};
+}
+
+// ── Anonymous object body members ─────────────────────────────────
+
+fn void object_expr_body_property() @test {
+	// `val o = object { val x: Int = 1 }; o.x` — body property must
+	// be accessible (Kotlin spec §16.6 anonymous object).
+	@pool() {
+		String src = `fun main() {
+	val o = object { val x: Int = 1 }
+	val n = o.x
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint n_idx = find_decl(pr, "n");
+		String t = n_idx > 0 && ti.has_type[n_idx] ? types::format_type(&ti.node_types[n_idx]) : "<no>";
+		assert(n_idx != 0 && t == "Int", "n: Int (object body x), got '%s'", t);
+	};
+}
+
+fn void object_expr_body_function() @test {
+	// `val o = object { fun greet(): String = "hi" }; o.greet()`
+	@pool() {
+		String src = `fun main() {
+	val o = object { fun greet(): String = "hi" }
+	val s = o.greet()
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint s_idx = find_decl(pr, "s");
+		String t = s_idx > 0 && ti.has_type[s_idx] ? types::format_type(&ti.node_types[s_idx]) : "<no>";
+		assert(s_idx != 0 && t == "String", "s: String (object body greet), got '%s'", t);
+	};
+}
+
+fn void object_expr_body_with_supertype() @test {
+	// Body member shadows / extends supertype — own body decl wins.
+	@pool() {
+		String src = `interface Greeter { fun greet(): String }
+fun main() {
+	val o = object : Greeter {
+		override fun greet(): String = "hi"
+		val extra: Int = 42
+	}
+	val e = o.extra
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve(pr);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint e_idx = find_decl(pr, "e");
+		String t = e_idx > 0 && ti.has_type[e_idx] ? types::format_type(&ti.node_types[e_idx]) : "<no>";
+		assert(e_idx != 0 && t == "Int", "e: Int (own body 'extra' beyond supertype), got '%s'", t);
+	};
+}
+
+// ── Multi-condition when LUB across distinct user types ────────────
+
+fn void when_multi_condition_lub_user_types() @test {
+	// is Cat, is Dog where both extend Animal → narrow to Animal (LUB).
+	// Then x.speak() resolves to String via Animal's open method.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///animals.kt",
+			"open class Animal { open fun speak(): String = \"\" }\n"
+			"class Cat : Animal()\n"
+			"class Dog : Animal()");
+
+		String src = `fun f(x: Any): String {
+	when (x) {
+		is Cat, is Dog -> {
+			val r = x.speak()
+			return r
+		}
+		else -> return "other"
+	}
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint r_idx = find_decl(pr, "r");
+		String t = r_idx > 0 && ti.has_type[r_idx] ? types::format_type(&ti.node_types[r_idx]) : "<no>";
+		assert(r_idx != 0 && t == "String", "r: String (LUB Animal → speak()), got '%s'", t);
 	};
 }

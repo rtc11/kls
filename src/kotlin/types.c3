@@ -3,7 +3,10 @@ module kls::kotlin::types;
 import kls::kotlin::ast;
 import kls::kotlin::token;
 import kls::kotlin::lexer;
+import kls::kotlin::cfg;
+import kls::kotlin::flow;
 import std::core::string;
+import std::collections::list;
 import kls::workspace;
 import kls::kotlin::symbols;
 import kls::deps::jar_index;
@@ -74,6 +77,7 @@ struct TypeRef {
 	bool nullable;
 	bool is_suspend;          // for function types: suspend (...) -> T
 	bool is_class_ref;        // true when this TypeRef refers to a class/object/interface itself (e.g. `UUID` in `UUID.randomUUID()`), not an instance value
+	bool is_dnn;              // definitely non-nullable: `T & Any` (Kotlin spec §9.4.4)
 
 	// For GENERIC: simple type argument names
 	usz type_arg_count;
@@ -104,12 +108,29 @@ const TypeRef TYPE_SHORT   = { .kind = SIMPLE, .name = "Short" };
 const TypeRef TYPE_ANY     = { .kind = SIMPLE, .name = "Any" };
 
 const TypeRef TYPE_NOTHING_NULLABLE = { .kind = SIMPLE, .name = "Nothing", .nullable = true };
+const TypeRef TYPE_STRING_NULLABLE  = { .kind = SIMPLE, .name = "String",  .nullable = true };
 
 // ── Per-file type info cache ───────────────────────────────────────
+
+const usz MAX_FUNCTIONS_PER_FILE = 512;
+
+struct FunctionFlow {
+	uint func_ast_idx;
+	cfg::Cfg* cfg;
+	flow::FlowAnalysis* fa;
+}
 
 struct TypeInfo {
 	TypeRef[ast::MAX_NODES] node_types;  // parallel to ParseResult.nodes
 	bool[ast::MAX_NODES] has_type;       // whether node_types[i] is populated
+
+	// Per-function flow analysis. enclosing_func[i] = AST idx of function
+	// containing node i (NO_PARENT for top-level). func_flow_idx[func] =
+	// index into func_flows array (or uint.max).
+	uint[ast::MAX_NODES] enclosing_func;
+	FunctionFlow[MAX_FUNCTIONS_PER_FILE] func_flows;
+	uint func_flow_count;
+	uint[ast::MAX_NODES] func_flow_lookup; // ast func idx -> func_flows index
 }
 
 // ── Type text parser ───────────────────────────────────────────────
@@ -333,6 +354,17 @@ fn TypeRef TypeParser.parse_simple_or_generic_type(TypeParser* self) {
 		}
 	}
 
+	// Definitely non-nullable: T & Any (Kotlin spec §9.4.4).
+	// `&` after a type, followed by `Any`, marks the type as guaranteed
+	// non-nullable. Force `nullable = false` regardless of input.
+	if (self.eat(AMP)) {
+		if (self.at_identifier() && self.current.text == "Any") {
+			self.advance();
+			result.is_dnn = true;
+			result.nullable = false;
+		}
+	}
+
 	result.full_text = self.source;
 	return result;
 }
@@ -364,8 +396,8 @@ fn String format_type(TypeRef* t) {
 	if (t.kind == UNIT) return t.nullable ? "Unit?" : "Unit";
 	if (t.kind == NOTHING) return t.nullable ? "Nothing?" : "Nothing";
 
-	// Fast path: simple type without nullable — return name slice directly
-	if (t.kind == SIMPLE && !t.nullable && t.name.len > 0) return t.name;
+	// Fast path: simple type without nullable/DNN — return name slice directly
+	if (t.kind == SIMPLE && !t.nullable && !t.is_dnn && t.name.len > 0) return t.name;
 
 	DString ds;
 	ds.tinit();
@@ -418,6 +450,9 @@ fn void format_type_into(DString* ds, TypeRef* t) {
 
 	if (t.nullable) {
 		ds.appendf("?");
+	}
+	if (t.is_dnn) {
+		ds.appendf(" & Any");
 	}
 }
 
@@ -498,6 +533,8 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	for (uint i = 0; i < pr.node_count; i++) {
 		info.has_type[i] = false;
 	}
+	// Clear flow caches
+	clear_flow(info);
 
 	// Phase 1: Resolve explicit type annotations on declarations
 	resolve_declaration_types(pr, info);
@@ -530,6 +567,227 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 	// val (a, b) = pair -> a: Pair.component1, b: Pair.component2
 	// for ((k, v) in map) -> k: Map.Entry.component1, v: Map.Entry.component2
 	resolve_destructuring_types(pr, info);
+
+	// Phase 9: Build CFG + run flow analysis per function for smart casts.
+	// Done after type resolution so subsequent phases (re-runs) see flow
+	// facts via resolve_name_expr_type, which queries info.func_flows.
+	build_function_flows(pr, info);
+
+	// Phase 10: Final expression pass — now with smart-cast facts available.
+	// Clear cached types on NAME_EXPR / DOT_EXPR nodes so flow facts can
+	// override the originally-resolved types. Then propagate to initializers.
+	for (uint i = 0; i < pr.node_count; i++) {
+		NodeKind k = pr.nodes[i].kind;
+		if (k == NAME_EXPR || k == DOT_EXPR) {
+			info.has_type[i] = false;
+		}
+	}
+	resolve_expression_types(pr, info);
+	// Re-run initializer pass: declarations whose initializer is a smart-cast
+	// reference should pick up the narrowed type.
+	for (uint i = 0; i < pr.node_count; i++) {
+		NodeKind k = pr.nodes[i].kind;
+		if (k == PROPERTY_DECL && pr.nodes[i].type_text.len == 0) {
+			// Skip destructured component decls — their type comes from the
+			// destructuring parent, not an initializer.
+			uint parent = pr.nodes[i].parent;
+			if (parent != ast::NO_PARENT && parent < pr.node_count
+				&& pr.nodes[parent].kind == PROPERTY_DECL
+				&& pr.nodes[parent].name == "(destructuring)") continue;
+			info.has_type[i] = false;
+		}
+	}
+	resolve_initializer_types(pr, info);
+	// Re-apply destructuring component types after the initializer pass
+	// (in case re-resolved initializers changed the destructured value's type).
+	resolve_destructuring_types(pr, info);
+}
+
+// ── Flow analysis bookkeeping ─────────────────────────────────────
+
+fn void clear_flow(TypeInfo* info) {
+	for (uint i = 0; i < info.func_flow_count; i++) {
+		FunctionFlow* ff = &info.func_flows[i];
+		if (ff.cfg != null) {
+			ff.cfg.free();
+		}
+		if (ff.fa != null) {
+			ff.fa.free();
+		}
+		ff.cfg = null;
+		ff.fa = null;
+	}
+	info.func_flow_count = 0;
+	for (uint i = 0; i < ast::MAX_NODES; i++) {
+		info.enclosing_func[i] = ast::NO_PARENT;
+		info.func_flow_lookup[i] = uint.max;
+	}
+}
+
+/**
+ * Release heap allocations owned by TypeInfo (CFG + FlowAnalysis per function).
+ * Caller still owns the TypeInfo struct itself.
+ */
+fn void free_type_info(TypeInfo* info) {
+	if (info == null) return;
+	clear_flow(info);
+}
+
+/**
+ * Build a CFG + run flow analysis for every function-like declaration in
+ * the file. Records enclosing-function map for each AST node so callers
+ * (resolve_name_expr_type) can locate the analysis quickly.
+ */
+fn void build_function_flows(ParseResult* pr, TypeInfo* info) {
+	// Single pass in AST order. Parents (enclosing functions) appear
+	// before their nested lambdas, so when we hit a lambda we can look
+	// up the already-built flow of its enclosing function and seed the
+	// lambda's entry state from the enclosing flow at the lambda's
+	// lexical position. This propagates smart-cast facts (e.g. early
+	// return null guards) across lambda boundaries.
+	for (uint i = 0; i < pr.node_count; i++) {
+		NodeKind k = pr.nodes[i].kind;
+		bool is_func = k == FUN_DECL
+			|| k == CONSTRUCTOR_DECL
+			|| k == INIT_BLOCK
+			|| k == LAMBDA_EXPR
+			|| k == ANONYMOUS_FUN_EXPR;
+		if (!is_func) continue;
+		if (info.func_flow_count >= MAX_FUNCTIONS_PER_FILE) break;
+		uint slot = info.func_flow_count;
+		cfg::Cfg* c = cfg::build_cfg(pr, i);
+
+		// Find nearest enclosing function-like ancestor that already has
+		// a flow analysis. If found, seed our entry from its state at
+		// our lexical position.
+		flow::FlowAnalysis* fa;
+		uint parent = pr.nodes[i].parent;
+		uint enc_func = ast::NO_PARENT;
+		while (parent != ast::NO_PARENT && parent < pr.node_count) {
+			if (info.func_flow_lookup[parent] != uint.max) {
+				enc_func = parent;
+				break;
+			}
+			parent = pr.nodes[parent].parent;
+		}
+		if (enc_func != ast::NO_PARENT) {
+			uint enc_slot = info.func_flow_lookup[enc_func];
+			FunctionFlow* enc_ff = &info.func_flows[enc_slot];
+			flow::FlowState entry = enc_ff.fa.state_at(pr, enc_ff.cfg, i);
+			fa = flow::analyze_with_entry(pr, c, &entry);
+		} else {
+			fa = flow::analyze(pr, c);
+		}
+
+		info.func_flows[slot] = { .func_ast_idx = i, .cfg = c, .fa = fa };
+		info.func_flow_lookup[i] = slot;
+		info.func_flow_count++;
+	}
+
+	// Second pass: assign enclosing function to every AST node by walking
+	// up parents.
+	for (uint i = 0; i < pr.node_count; i++) {
+		info.enclosing_func[i] = compute_enclosing_func(pr, info, i);
+	}
+}
+
+fn uint compute_enclosing_func(ParseResult* pr, TypeInfo* info, uint idx) {
+	uint cur = idx;
+	while (cur != ast::NO_PARENT && cur < pr.node_count) {
+		if (info.func_flow_lookup[cur] != uint.max) return cur;
+		cur = pr.nodes[cur].parent;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Look up a smart-cast fact for `name` at AST node `use_idx`. Returns
+ * null if no flow analysis covers this node or no fact applies.
+ */
+fn flow::Fact* lookup_smart_cast_fact(ParseResult* pr, TypeInfo* info, uint use_idx, String name, String member_name = "") {
+	if (use_idx >= ast::MAX_NODES) return null;
+	uint func_idx = info.enclosing_func[use_idx];
+	if (func_idx == ast::NO_PARENT) return null;
+	uint slot = info.func_flow_lookup[func_idx];
+	if (slot == uint.max) return null;
+	FunctionFlow* ff = &info.func_flows[slot];
+	if (ff.fa == null) return null;
+	return ff.fa.fact_at(pr, ff.cfg, use_idx, name, member_name);
+}
+
+/**
+ * Stability gate for smart casts (Kotlin spec §11.3).
+ *
+ *   - PARAM                          → stable (effective val)
+ *   - PROPERTY_DECL local val        → stable
+ *   - PROPERTY_DECL local var        → stable iff use is in the SAME
+ *                                       function as the declaration
+ *                                       (i.e. not captured by a nested
+ *                                       lambda / anonymous function).
+ *   - PROPERTY_DECL member/top-level val → stable iff:
+ *                                       no custom getter AND not `open`
+ *                                       AND not `var`. (Conservative
+ *                                       approximation of spec §11.3:
+ *                                       declaration must be in the
+ *                                       same module — same file is a
+ *                                       reliable subset; top-level
+ *                                       cross-file access is reachable
+ *                                       only through workspace which
+ *                                       this gate doesn't see, so
+ *                                       only same-file uses currently
+ *                                       narrow.)
+ *   - PROPERTY_DECL member/top-level var → never stable (mutable, could
+ *                                          change between check & use,
+ *                                          delegated, etc.).
+ */
+fn bool is_stable_for_smart_cast(ParseResult* pr, TypeInfo* info, uint decl_idx, uint use_idx) {
+	if (decl_idx >= pr.node_count) return false;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.kind == PARAM) {
+		// Primary-ctor `var` params are members and behave like member vars
+		// (unstable). All other PARAM uses (function params, primary-ctor
+		// `val`, plain ctor params) are effective val and stable.
+		bool ctor_var = (decl.mod_flags & ast::MOD_VAR) != 0;
+		return !ctor_var;
+	}
+	if (decl.kind != PROPERTY_DECL) return false;
+
+	bool is_var = (decl.mod_flags & ast::MOD_VAR) != 0;
+
+	// Local case: declared inside a function-like scope.
+	uint decl_func = (decl_idx < ast::MAX_NODES) ? info.enclosing_func[decl_idx] : ast::NO_PARENT;
+	if (decl_func != ast::NO_PARENT) {
+		if (!is_var) return true;
+		uint use_func = (use_idx < ast::MAX_NODES) ? info.enclosing_func[use_idx] : ast::NO_PARENT;
+		return use_func == decl_func;
+	}
+
+	// Member/top-level property. var is never stable (mutable, possibly
+	// delegated, observable concurrently). val is stable only when:
+	//   1. no custom getter (a custom getter could return different
+	//      values across two reads even for `val`), and
+	//   2. not `open` (an override could supply a custom getter).
+	if (is_var) return false;
+	if ((decl.mod_flags & ast::MOD_OPEN) != 0) return false;
+	if (property_has_custom_getter(pr, decl_idx)) return false;
+	return true;
+}
+
+/**
+ * True if a PROPERTY_DECL has a `get()` accessor with a body. Parser
+ * shape: accessors are FUN_DECL children of the property whose `name`
+ * is literally "get" or "set".
+ */
+fn bool property_has_custom_getter(ParseResult* pr, uint prop_idx) {
+	if (prop_idx >= pr.node_count) return false;
+	AstNode* p = &pr.nodes[prop_idx];
+	if (p.child_count == 0) return false;
+	for (uint i = p.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != prop_idx) continue;
+		if (pr.nodes[i].kind != FUN_DECL) continue;
+		if (pr.nodes[i].name == "get") return true;
+	}
+	return false;
 }
 
 /**
@@ -685,6 +943,24 @@ fn void resolve_initializer_types(ParseResult* pr, TypeInfo* info) {
 			if (child.kind == PARAM || child.kind == TYPE_PARAM ||
 				child.kind == BLOCK || child.kind == TYPE_REF) continue;
 
+			// Property delegation: `val x by <expr>` (expr tagged with extra_text="delegate").
+			// Kotlin spec §11.16: property type = `getValue` operator return type.
+			// We special-case `lazy { ... }` (returns lambda body type) which is the
+			// overwhelmingly common case; other delegates fall through to the standard
+			// child-type inheritance below.
+			if (node.kind == PROPERTY_DECL && child.extra_text == "delegate") {
+				if (child.kind == CALL_EXPR && child.name == "lazy") {
+					TypeRef body = find_trailing_lambda_body_in_call(pr, info, j);
+					if (body.kind != UNKNOWN) {
+						inferred = body;
+						break;
+					}
+				}
+				// Future: other stdlib delegates (Delegates.notNull, observable, ...)
+				// or generic getValue operator lookup.
+				break;
+			}
+
 			// This is an expression child -- use its type
 			if (info.has_type[j]) {
 				inferred = info.node_types[j];
@@ -698,6 +974,26 @@ fn void resolve_initializer_types(ParseResult* pr, TypeInfo* info) {
 			info.has_type[i] = true;
 		}
 	}
+}
+
+/**
+ * Find the trailing LAMBDA_EXPR child of a CALL_EXPR and return its body type.
+ * Used by `by lazy { ... }` delegation.
+ */
+fn TypeRef find_trailing_lambda_body_in_call(ParseResult* pr, TypeInfo* info, uint call_idx) {
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind == LAMBDA_EXPR) {
+			return last_expr_type_in(pr, info, j, true);
+		}
+		if (pr.nodes[j].kind == VALUE_ARGUMENT && pr.nodes[j].extra_text == "trailing") {
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx != uint.max && pr.nodes[expr_idx].kind == LAMBDA_EXPR) {
+				return last_expr_type_in(pr, info, expr_idx, true);
+			}
+		}
+	}
+	return TYPE_UNKNOWN;
 }
 
 /**
@@ -743,13 +1039,12 @@ fn void resolve_destructuring_types(ParseResult* pr, TypeInfo* info) {
 		}
 
 		// Case 2: for ((k, v) in map) — FOR_STMT with multiple PARAM children
+		// Case 3: for (x in items) — FOR_STMT with single PARAM child
 		if (node.kind == FOR_STMT) {
-			// Count PARAM children to detect destructuring
 			uint param_count = ast::count_children_of_kind(pr, node, PARAM);
-			if (param_count < 2) continue;
+			if (param_count == 0) continue;
 
-			// Find the collection type: look for the expression after 'in'
-			// The collection expression is a non-PARAM, non-BLOCK child
+			// Find the collection type: first non-PARAM, non-BLOCK child
 			TypeRef collection_type = TYPE_UNKNOWN;
 			for (uint j = 0; j < pr.node_count; j++) {
 				AstNode* child = &pr.nodes[j];
@@ -763,14 +1058,45 @@ fn void resolve_destructuring_types(ParseResult* pr, TypeInfo* info) {
 
 			if (collection_type.kind == UNKNOWN) continue;
 
-			// Determine element type for the iteration
+			// Determine element type. Built-in collections handled directly;
+			// user types go through operator fun iterator() / next() lookup
+			// (Kotlin spec §15.5).
 			TypeRef element_type = get_iteration_element_type(collection_type);
+			if (element_type.kind == UNKNOWN) {
+				element_type = resolve_user_iterator_element_type(pr, info, collection_type);
+			}
 			if (element_type.kind == UNKNOWN) continue;
 
-			// Assign component types to the PARAM children
-			assign_component_types_for_params(pr, info, i, element_type);
+			if (param_count >= 2) {
+				// Destructuring loop: assign component types
+				assign_component_types_for_params(pr, info, i, element_type);
+			} else {
+				// Single-PARAM loop: assign element type to the PARAM child,
+				// unless it has an explicit annotation already.
+				for (uint j = 0; j < pr.node_count; j++) {
+					AstNode* child = &pr.nodes[j];
+					if (child.parent != i || child.kind != PARAM) continue;
+					if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
+						info.node_types[j] = element_type;
+						info.has_type[j] = true;
+					}
+					break;
+				}
+			}
 		}
 	}
+}
+
+/**
+ * Resolve element type via user-defined `operator fun iterator()` / `next()`
+ * (Kotlin spec §15.5). Looks up `iterator()` on the collection type, then
+ * `next()` on the returned iterator type. Returns its return type, or UNKNOWN.
+ */
+fn TypeRef resolve_user_iterator_element_type(ParseResult* pr, TypeInfo* info, TypeRef collection_type) {
+	TypeRef iter_type = lookup_member_anywhere(pr, info, collection_type, "iterator");
+	if (iter_type.kind == UNKNOWN) return TYPE_UNKNOWN;
+	TypeRef next_type = lookup_member_anywhere(pr, info, iter_type, "next");
+	return next_type;
 }
 
 /**
@@ -784,6 +1110,9 @@ fn void assign_component_types(ParseResult* pr, TypeInfo* info, uint parent_idx,
 		// Skip if child already has an explicit type annotation
 		if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
 			TypeRef comp_type = get_component_type(init_type, comp_index);
+			if (comp_type.kind == UNKNOWN) {
+				comp_type = lookup_componentN(pr, info, init_type, comp_index);
+			}
 			if (comp_type.kind != UNKNOWN) {
 				info.node_types[j] = comp_type;
 				info.has_type[j] = true;
@@ -804,6 +1133,9 @@ fn void assign_component_types_for_params(ParseResult* pr, TypeInfo* info, uint 
 		// Skip if child already has an explicit type annotation
 		if (!info.has_type[j] || info.node_types[j].kind == UNKNOWN) {
 			TypeRef comp_type = get_component_type(element_type, comp_index);
+			if (comp_type.kind == UNKNOWN) {
+				comp_type = lookup_componentN(pr, info, element_type, comp_index);
+			}
 			if (comp_type.kind != UNKNOWN) {
 				info.node_types[j] = comp_type;
 				info.has_type[j] = true;
@@ -811,6 +1143,26 @@ fn void assign_component_types_for_params(ParseResult* pr, TypeInfo* info, uint 
 		}
 		comp_index++;
 	}
+}
+
+/**
+ * Look up `operator fun componentN()` on a user-defined type for destructuring
+ * (Kotlin spec §11.7). N is 1-based per the operator name. Returns UNKNOWN if
+ * no matching operator exists. Used as fallback when built-in component-type
+ * mapping (Pair/Triple/Map.Entry) doesn't apply.
+ */
+fn TypeRef lookup_componentN(ParseResult* pr, TypeInfo* info, TypeRef source_type, uint comp_index) {
+	if (source_type.kind == UNKNOWN || source_type.name.len == 0) return TYPE_UNKNOWN;
+	String name;
+	switch (comp_index) {
+		case 0: name = "component1";
+		case 1: name = "component2";
+		case 2: name = "component3";
+		case 3: name = "component4";
+		case 4: name = "component5";
+		default: return TYPE_UNKNOWN;
+	}
+	return lookup_member_anywhere(pr, info, source_type, name);
 }
 
 /**
@@ -894,11 +1246,15 @@ fn void resolve_expression_types(ParseResult* pr, TypeInfo* info) {
 	// Multiple passes to propagate types through chains
 	for (int pass = 0; pass < 3; pass++) {
 		for (uint i = 0; i < pr.node_count; i++) {
-			// On later passes, retry GENERIC nodes with 0 type args
+			// On later passes, retry GENERIC nodes with 0 type args, and
+			// LAMBDA_EXPR nodes whose return type may have been Unit-by-default
+			// because the body expression hadn't been resolved yet.
 			bool is_retry = false;
 			if (info.has_type[i]) {
 				if (pass > 0 && info.node_types[i].kind == GENERIC &&
 				    info.node_types[i].type_arg_count == 0) {
+					is_retry = true;
+				} else if (pass > 0 && pr.nodes[i].kind == LAMBDA_EXPR) {
 					is_retry = true;
 				} else {
 					continue;
@@ -974,9 +1330,107 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 		case TRY_EXPR:
 			return resolve_try_expr_type(pr, info, idx, node);
 
+		case LAMBDA_EXPR:
+			return resolve_lambda_expr_type(pr, info, idx, node);
+
+		case CALLABLE_REF_EXPR:
+			return resolve_callable_ref_type(pr, info, idx, node);
+
+		case OBJECT_EXPR:
+			return resolve_object_expr_type(pr, info, idx, node);
+
 		default:
 			return TYPE_UNKNOWN;
 	}
+}
+
+/**
+ * Object expression: `object : SuperType { body }` (Kotlin spec §11.2.7).
+ *
+ * Per spec the static type is the intersection of all listed super types
+ * (plus declared body members). KLS approximates by picking the first
+ * non-Any supertype TYPE_REF child — sufficient for member resolution
+ * since `lookup_member_anywhere` already walks the supertype chain.
+ *
+ * If no supertype is given (`object { val x = 1 }`), the value has an
+ * anonymous type whose only members are body members — currently
+ * unresolvable to a named TypeRef, so we return UNKNOWN. Body-member
+ * access for anonymous types is a deferred follow-up.
+ */
+fn TypeRef resolve_object_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	for (uint c = node.children_start; c < pr.node_count; c++) {
+		if (pr.nodes[c].parent != idx) continue;
+		if (pr.nodes[c].kind != TYPE_REF) continue;
+		String tname = pr.nodes[c].name;
+		if (tname.len == 0) continue;
+		if (tname == "Any") continue;
+		TypeRef t = parse_type_text(tname);
+		return t;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Look up a member declared in an anonymous object body (Kotlin spec §16.6).
+ * Walks recv_idx → its declaration → if the declaration's initializer
+ * (or RHS) is an OBJECT_EXPR, scans that object's PROPERTY_DECL/FUN_DECL
+ * children for `member_name`. Returns the declared type or UNKNOWN.
+ *
+ * Body decls win over supertype members so this is invoked BEFORE the
+ * normal supertype/cascade resolution in resolve_dot_expr_type.
+ */
+fn TypeRef resolve_anon_object_member(ParseResult* pr, TypeInfo* info, uint recv_idx, String member_name) {
+	if (recv_idx >= pr.node_count) return TYPE_UNKNOWN;
+	if (member_name.len == 0) return TYPE_UNKNOWN;
+
+	// Locate the OBJECT_EXPR that backs the receiver.
+	uint obj_idx = ast::NO_PARENT;
+	AstNode* rn = &pr.nodes[recv_idx];
+	if (rn.kind == OBJECT_EXPR) {
+		obj_idx = recv_idx;
+	} else if (rn.kind == NAME_EXPR && rn.name.len > 0) {
+		// Find decl in scope chain (similar to resolve_name_expr_type but
+		// kept lightweight: linear scan + look at initializer expression).
+		String name = rn.name;
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* d = &pr.nodes[j];
+			if (d.kind != PROPERTY_DECL) continue;
+			if (d.name != name) continue;
+			// Find first child that is an expression — the initializer
+			// (skipping TYPE_REF / accessor children).
+			for (uint k = d.children_start; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				NodeKind kk = pr.nodes[k].kind;
+				if (kk == TYPE_REF) continue;
+				if (kk == OBJECT_EXPR) {
+					obj_idx = k;
+				}
+				break;
+			}
+			if (obj_idx != ast::NO_PARENT) break;
+		}
+	}
+	if (obj_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	// Scan OBJECT_EXPR direct children for matching PROPERTY_DECL / FUN_DECL.
+	for (uint k = pr.nodes[obj_idx].children_start; k < pr.node_count; k++) {
+		if (pr.nodes[k].parent != obj_idx) continue;
+		AstNode* m = &pr.nodes[k];
+		if (m.name != member_name) continue;
+		switch (m.kind) {
+			case PROPERTY_DECL:
+				if (m.type_text.len > 0) return parse_type_text(m.type_text);
+				// Fall back to inferred type if previously resolved
+				if (info.has_type[k]) return info.node_types[k];
+				return TYPE_UNKNOWN;
+			case FUN_DECL:
+				if (m.type_text.len > 0) return parse_type_text(m.type_text);
+				return TYPE_UNIT;
+			default:
+				continue;
+		}
+	}
+	return TYPE_UNKNOWN;
 }
 
 // ── Name expression resolution ─────────────────────────────────────
@@ -984,10 +1438,9 @@ fn TypeRef resolve_single_expression(ParseResult* pr, TypeInfo* info, uint idx, 
 fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
-	// Check for smart cast: if this NAME_EXPR is inside the then-branch
-	// of an `if (x is Type)`, narrow the type to Type.
-	TypeRef smart_cast = check_smart_cast(pr, info, idx, node.name);
-	if (smart_cast.kind != UNKNOWN) return smart_cast;
+	// Flow-sensitive smart cast (Phase D): check CFG-based facts. Stability
+	// gate (Phase E) is applied below once we have located the declaration.
+	flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, node.name);
 
 	// Special case: implicit lambda parameter `it`
 	if (node.name == "it") {
@@ -1005,15 +1458,70 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			if (!is_typed_declaration(candidate.kind)) continue;
 			if (candidate.name != node.name) continue;
 
+			// Stability gate: only apply smart-cast fact when the binding
+			// is stable. Local val + parameters are always stable. Local
+			// var is stable only when the use site is in the same function
+			// as the declaration (i.e. not captured by a nested lambda /
+			// anonymous function).
+			bool stable = is_stable_for_smart_cast(pr, info, j, idx);
+			flow::Fact* applied = stable ? fact : null;
+
+			if (applied != null && applied.narrowed.kind != UNKNOWN) {
+				return applied.narrowed;
+			}
+
 			if (info.has_type[j]) {
-				return info.node_types[j];
+				TypeRef base = info.node_types[j];
+				if (applied != null && applied.not_null && base.nullable) {
+					base.nullable = false;
+				}
+				return base;
 			}
 			return TYPE_UNKNOWN;
+		}
+
+		// Also look inside destructuring-wrapper PROPERTY_DECLs at this scope.
+		// `val (a, b) = expr` produces a PROPERTY_DECL named "(destructuring)"
+		// whose PROPERTY_DECL children are the destructured bindings. Their
+		// parent is the wrapper, not the enclosing BLOCK, so the direct-child
+		// scan above misses them. (Kotlin spec §11.7)
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* wrapper = &pr.nodes[j];
+			if (wrapper.parent != current) continue;
+			if (wrapper.kind != PROPERTY_DECL || wrapper.name != "(destructuring)") continue;
+			for (uint k = 0; k < pr.node_count; k++) {
+				AstNode* inner = &pr.nodes[k];
+				if (inner.parent != j) continue;
+				if (inner.kind != PROPERTY_DECL) continue;
+				if (inner.name != node.name) continue;
+				bool stable = is_stable_for_smart_cast(pr, info, k, idx);
+				flow::Fact* applied = stable ? fact : null;
+				if (applied != null && applied.narrowed.kind != UNKNOWN) {
+					return applied.narrowed;
+				}
+				if (info.has_type[k]) {
+					TypeRef base = info.node_types[k];
+					if (applied != null && applied.not_null && base.nullable) {
+						base.nullable = false;
+					}
+					return base;
+				}
+				return TYPE_UNKNOWN;
+			}
 		}
 
 		AstNode* scope = &pr.nodes[current];
 		if (current == 0 || scope.parent == ast::NO_PARENT) break;
 		current = scope.parent;
+	}
+
+	// Scope walk did not find the declaration (e.g. when-subject `val x`
+	// whose parent is WHEN_EXPR, not a recognized scope). If we have a
+	// flow fact carrying an explicit narrowed type, return it. We cannot
+	// apply the stability gate without a decl_idx; this matches K1
+	// behaviour for these edge cases.
+	if (fact != null && fact.narrowed.kind != UNKNOWN) {
+		return fact.narrowed;
 	}
 
 	// Lambda receiver: resolve as member of lambda's implicit `this` receiver
@@ -1038,6 +1546,13 @@ fn TypeRef resolve_name_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			if (dep_result.kind != UNKNOWN) return dep_result;
 		}
 	}
+
+	// Hardcoded stdlib class-ref fallback (Kotlin spec stdlib). Recognises
+	// well-known stdlib type names (Result, ...) as class-ref TypeRefs so
+	// `Result.success(x)` can resolve `Result` even when the workspace
+	// dep index is unavailable (tests, no kotlin-stdlib jar).
+	TypeRef stdlib_class = resolve_stdlib_class_name(node.name);
+	if (stdlib_class.kind != UNKNOWN) return stdlib_class;
 
 	return TYPE_UNKNOWN;
 }
@@ -1080,15 +1595,8 @@ fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx
 	}
 
 	// Walk up from the LAMBDA_EXPR to find the enclosing CALL_EXPR
-	// The lambda can be a direct child of a CALL_EXPR (trailing lambda),
-	// or nested further
-	uint call_idx = ast::NO_PARENT;
-	uint parent_of_lambda = pr.nodes[lambda_idx].parent;
-	if (parent_of_lambda != ast::NO_PARENT) {
-		if (pr.nodes[parent_of_lambda].kind == CALL_EXPR) {
-			call_idx = parent_of_lambda;
-		}
-	}
+	// (handles both direct child and VALUE_ARGUMENT-wrapped forms).
+	uint call_idx = ast::find_call_for_lambda(pr, lambda_idx);
 	if (call_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
 
 	String method_name = pr.nodes[call_idx].name;
@@ -1121,6 +1629,13 @@ fn TypeRef resolve_lambda_it_type(ParseResult* pr, TypeInfo* info, uint name_idx
 		if (receiver.name == "String") return TYPE_CHAR;
 		return TYPE_UNKNOWN;
 	}
+
+	// Case 3: User-defined function with FUNCTION-typed parameter.
+	// fun <T, R> mp(xs: List<T>, f: (T) -> R) → mp(xs) { it.toString() }
+	// Resolves `it` to the FUNCTION param's first param-slot type, with
+	// any TPs substituted from the call's other args (Kotlin spec §11.1.7).
+	TypeRef user_it = infer_implicit_it_from_user_call(pr, info, lambda_idx, call_idx);
+	if (user_it.kind != UNKNOWN) return user_it;
 
 	return TYPE_UNKNOWN;
 }
@@ -1157,14 +1672,8 @@ fn TypeRef resolve_lambda_receiver_member(ParseResult* pr, TypeInfo* info, uint 
 	}
 	if (lambda_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
 
-	// Find enclosing CALL_EXPR
-	uint call_idx = ast::NO_PARENT;
-	uint parent_of_lambda = pr.nodes[lambda_idx].parent;
-	if (parent_of_lambda != ast::NO_PARENT) {
-		if (pr.nodes[parent_of_lambda].kind == CALL_EXPR) {
-			call_idx = parent_of_lambda;
-		}
-	}
+	// Find enclosing CALL_EXPR (handles VALUE_ARGUMENT wrap).
+	uint call_idx = ast::find_call_for_lambda(pr, lambda_idx);
 	if (call_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
 
 	String method_name = pr.nodes[call_idx].name;
@@ -1395,380 +1904,22 @@ fn bool is_safe_call(ParseResult* pr, uint call_idx) {
 	return false;
 }
 
-/**
- * Check if a NAME_EXPR with the given name is inside the then-branch
- * of an `if (name is Type)` check, and if so, return the narrowed type.
- * Also handles null checks: `if (name != null)` narrows to non-nullable,
- * and `if (name == null)` narrows to non-nullable in the else branch.
- */
-fn TypeRef check_smart_cast(ParseResult* pr, TypeInfo* info, uint name_idx, String name) {
-	// Walk up the parent chain looking for an IF_EXPR
-	uint current = name_idx;
-	while (current != 0 && pr.nodes[current].parent != ast::NO_PARENT) {
-		uint parent_idx = pr.nodes[current].parent;
-		AstNode* parent = &pr.nodes[parent_idx];
-
-		if (parent.kind == IF_EXPR) {
-			// Determine which child of the IF_EXPR we're in:
-			// child 0 = condition, child 1 = then-branch, child 2 = else-branch
-			uint child_pos = 0;
-			for (uint j = 0; j < pr.node_count; j++) {
-				if (pr.nodes[j].parent == parent_idx) {
-					if (j == current) break;
-					child_pos++;
-				}
-			}
-
-			// We're in the then-branch (child 1) or a descendant of it
-			if (child_pos == 1) {
-				// Check condition (first child of IF_EXPR) for `x is Type`
-				TypeRef narrowed = find_is_check_in_condition(pr, parent_idx, name);
-				if (narrowed.kind != UNKNOWN) return narrowed;
-
-				// Check for null check: `x != null` -> narrow to non-nullable
-				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, true);
-				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
-			}
-
-			// We're in the else-branch (child 2)
-			if (child_pos == 2) {
-				// Check for `x == null` in condition -> else branch has non-nullable
-				TypeRef null_narrowed = find_null_check_in_condition(pr, info, parent_idx, name, false);
-				if (null_narrowed.kind != UNKNOWN) return null_narrowed;
-			}
-		}
-
-		// When subject smart cast: when (x) { is String -> x.length }
-		if (parent.kind == WHEN_ENTRY) {
-			// Parent of WHEN_ENTRY is WHEN_EXPR
-			uint when_idx = parent.parent;
-			if (when_idx < pr.node_count && pr.nodes[when_idx].kind == WHEN_EXPR) {
-				// Find subject of when (first child NAME_EXPR)
-				String subject_name = "";
-				for (uint j = 0; j < pr.node_count; j++) {
-					if (pr.nodes[j].parent != when_idx) continue;
-					if (pr.nodes[j].kind == NAME_EXPR) {
-						subject_name = pr.nodes[j].name;
-						break;
-					}
-					// Also handle PAREN_EXPR wrapping a NAME_EXPR
-					if (pr.nodes[j].kind == PAREN_EXPR) {
-						for (uint k = 0; k < pr.node_count; k++) {
-							if (pr.nodes[k].parent == j && pr.nodes[k].kind == NAME_EXPR) {
-								subject_name = pr.nodes[k].name;
-								break;
-							}
-						}
-						break;
-					}
-					break;
-				}
-
-				if (subject_name == name) {
-					// Check if this WHEN_ENTRY has an `is Type` condition
-					TypeRef narrowed = find_when_entry_type_check(pr, parent_idx, name);
-					if (narrowed.kind != UNKNOWN) return narrowed;
-				}
-			}
-		}
-
-		// Early-return null check smart cast:
-		// In a block (or lambda body) where a preceding statement is
-		// `if (name == null) return/throw ...`, `name` is non-null afterwards.
-		if (parent.kind == BLOCK || parent.kind == LAMBDA_EXPR) {
-			TypeRef early_return = check_early_return_null_guard(pr, info, parent_idx, current, name);
-			if (early_return.kind != UNKNOWN) return early_return;
-		}
-
-		current = parent_idx;
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Check for early-return null guard pattern in a block:
- *   if (name == null) return ...
- *   // name is now non-null
- *
- * `block_idx` is the enclosing BLOCK node.
- * `child_in_block_idx` is the direct child of the block that contains
- * (or is) the name reference.
- * Returns the non-nullable type of `name` if a matching guard precedes
- * `child_in_block_idx`; otherwise TYPE_UNKNOWN.
- */
-fn TypeRef check_early_return_null_guard(ParseResult* pr, TypeInfo* info, uint block_idx, uint child_in_block_idx, String name) {
-	uint ref_offset = pr.nodes[child_in_block_idx].start_offset;
-
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != block_idx) continue;
-		if (j == child_in_block_idx) continue;
-		// Only consider statements that come before the reference
-		if (pr.nodes[j].start_offset >= ref_offset) continue;
-		if (pr.nodes[j].kind != IF_EXPR) continue;
-
-		// IF_EXPR children: [0]=condition, [1]=then-branch, optional [2]=else-branch
-		uint cond_idx = ast::NO_PARENT;
-		uint then_idx = ast::NO_PARENT;
-		uint else_idx = ast::NO_PARENT;
-		uint child_pos = 0;
-		for (uint k = 0; k < pr.node_count; k++) {
-			if (pr.nodes[k].parent != j) continue;
-			if (child_pos == 0) {
-				cond_idx = k;
-			} else if (child_pos == 1) {
-				then_idx = k;
-			} else if (child_pos == 2) {
-				else_idx = k;
-			}
-			child_pos++;
-		}
-
-		if (cond_idx == ast::NO_PARENT || then_idx == ast::NO_PARENT) continue;
-		// Must have no else branch (or it would also need to exit) -- keep simple: no else
-		if (else_idx != ast::NO_PARENT) continue;
-
-		// Condition must be `name == null`
-		AstNode* cond = &pr.nodes[cond_idx];
-		if (cond.kind != BINARY_EXPR || cond.extra_text != "==") continue;
-		if (check_null_comparison(pr, info, cond_idx, name).kind == UNKNOWN) continue;
-
-		// Then-branch must definitely exit (return / throw, possibly inside a block)
-		if (!branch_definitely_exits(pr, then_idx)) continue;
-
-		// Found valid early-return guard: return non-nullable type
-		uint scope_idx = find_innermost_scope(pr, child_in_block_idx);
-		uint cur_scope = scope_idx;
-		while (true) {
-			for (uint k = 0; k < pr.node_count; k++) {
-				AstNode* candidate = &pr.nodes[k];
-				if (candidate.parent != cur_scope) continue;
-				if (!is_typed_declaration(candidate.kind)) continue;
-				if (candidate.name != name) continue;
-				if (info.has_type[k]) {
-					TypeRef result = info.node_types[k];
-					result.nullable = false;
-					return result;
-				}
-				return TYPE_UNKNOWN;
-			}
-			AstNode* sc = &pr.nodes[cur_scope];
-			if (cur_scope == 0 || sc.parent == ast::NO_PARENT) break;
-			cur_scope = sc.parent;
-		}
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Returns true if `branch_idx` is (or contains as its sole/first effective
- * statement) a RETURN_EXPR or THROW_EXPR -- i.e., control definitely leaves
- * the enclosing function.
- */
-fn bool branch_definitely_exits(ParseResult* pr, uint branch_idx) {
-	AstNode* node = &pr.nodes[branch_idx];
-	if (node.kind == RETURN_EXPR || node.kind == THROW_EXPR) return true;
-
-	// Block: any statement that is RETURN_EXPR or THROW_EXPR makes the block exit.
-	if (node.kind == BLOCK) {
-		for (uint k = 0; k < pr.node_count; k++) {
-			if (pr.nodes[k].parent != branch_idx) continue;
-			if (pr.nodes[k].kind == RETURN_EXPR || pr.nodes[k].kind == THROW_EXPR) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-/**
- * Search the condition (first child) of an IF_EXPR for a type check
- * `name is Type` and return the checked type.
- */
-fn TypeRef find_is_check_in_condition(ParseResult* pr, uint if_idx, String name) {
-	// Find the first child of the IF_EXPR (the condition)
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != if_idx) continue;
-
-		AstNode* cond = &pr.nodes[j];
-
-		// Direct is-check: x is Type
-		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "is") {
-			if (try checked = get_is_check_variable_name(pr, j)) {
-				if (checked == name && cond.type_text.len > 0) {
-					return parse_type_text(cond.type_text);
-				}
-			}
-		}
-
-		// Check for && conjunction: x is Type && ...
-		if (cond.kind == BINARY_EXPR && cond.extra_text == "&&") {
-			for (uint k = 0; k < pr.node_count; k++) {
-				if (pr.nodes[k].parent != j) continue;
-				if (pr.nodes[k].kind == TYPE_CHECK_EXPR && pr.nodes[k].extra_text == "is") {
-					if (try checked = get_is_check_variable_name(pr, k)) {
-						if (checked == name && pr.nodes[k].type_text.len > 0) {
-							return parse_type_text(pr.nodes[k].type_text);
-						}
-					}
-				}
-			}
-		}
-
-		break; // Only check first child (the condition)
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Get the variable name being checked in a TYPE_CHECK_EXPR.
- * Returns the name if the first child is a simple NAME_EXPR.
- */
-fn String? get_is_check_variable_name(ParseResult* pr, uint check_idx) {
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent == check_idx && pr.nodes[j].kind == NAME_EXPR) {
-			if (pr.nodes[j].name.len > 0) {
-				return pr.nodes[j].name;
-			}
-		}
-	}
-	return ast::NOT_FOUND~;
-}
-
-/**
- * Find an `is Type` condition in a WHEN_ENTRY node.
- * Scans the WHEN_ENTRY's children (conditions come before the body)
- * for a TYPE_CHECK_EXPR with extra_text "is".
- */
-fn TypeRef find_when_entry_type_check(ParseResult* pr, uint entry_idx, String name) {
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != entry_idx) continue;
-		AstNode* child = &pr.nodes[j];
-
-		// Direct `is Type` condition
-		if (child.kind == TYPE_CHECK_EXPR && child.extra_text == "is") {
-			if (child.type_text.len > 0) {
-				return parse_type_text(child.type_text);
-			}
-		}
-
-		// Comma-separated conditions: check each TYPE_CHECK_EXPR
-		// (conditions are direct children of WHEN_ENTRY before the body)
-	}
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Search the condition (first child) of an IF_EXPR for a null check
- * and return the variable's type with nullability stripped.
- *
- * When then_branch is true, looks for `name != null` (then-branch is non-nullable).
- * When then_branch is false, looks for `name == null` (else-branch is non-nullable).
- * Also handles && conjunctions (e.g. `x != null && y != null`).
- */
-fn TypeRef find_null_check_in_condition(ParseResult* pr, TypeInfo* info, uint if_idx, String name, bool then_branch) {
-	// The operator we're looking for depends on the branch:
-	// then-branch: x != null  (operator "!=")
-	// else-branch: x == null  (operator "==")
-	String target_op = then_branch ? "!=" : "==";
-
-	// Find the first child of the IF_EXPR (the condition)
-	for (uint j = 0; j < pr.node_count; j++) {
-		if (pr.nodes[j].parent != if_idx) continue;
-
-		AstNode* cond = &pr.nodes[j];
-
-		// Direct null check: x != null  or  x == null
-		if (cond.kind == BINARY_EXPR && cond.extra_text == target_op) {
-			TypeRef result = check_null_comparison(pr, info, j, name);
-			if (result.kind != UNKNOWN) return result;
-		}
-
-		// Check for && conjunction: x != null && ...
-		// (only meaningful in then-branch; in else-branch && doesn't narrow)
-		if (then_branch && cond.kind == BINARY_EXPR && cond.extra_text == "&&") {
-			for (uint k = 0; k < pr.node_count; k++) {
-				if (pr.nodes[k].parent != j) continue;
-				if (pr.nodes[k].kind == BINARY_EXPR && pr.nodes[k].extra_text == target_op) {
-					TypeRef result = check_null_comparison(pr, info, k, name);
-					if (result.kind != UNKNOWN) return result;
-				}
-			}
-		}
-
-		break; // Only check first child (the condition)
-	}
-
-	return TYPE_UNKNOWN;
-}
-
-/**
- * Check if a BINARY_EXPR at `expr_idx` is a null comparison for `name`.
- * One child must be a NAME_EXPR matching `name`, and the other must be
- * a LITERAL_EXPR with extra_text "null". If so, look up the variable's
- * declared type and return it with nullable stripped.
- */
-fn TypeRef check_null_comparison(ParseResult* pr, TypeInfo* info, uint expr_idx, String name) {
-	bool found_name = false;
-	bool found_null = false;
-
-	for (uint c = 0; c < pr.node_count; c++) {
-		if (pr.nodes[c].parent != expr_idx) continue;
-
-		if (pr.nodes[c].kind == NAME_EXPR && pr.nodes[c].name == name) {
-			found_name = true;
-		}
-		if (pr.nodes[c].kind == LITERAL_EXPR && pr.nodes[c].extra_text == "null") {
-			found_null = true;
-		}
-	}
-
-	if (!found_name || !found_null) return TYPE_UNKNOWN;
-
-	// Look up the declared type of the variable by searching declarations
-	// in enclosing scopes, same as resolve_name_expr_type
-	uint scope_idx = find_innermost_scope(pr, expr_idx);
-	uint current = scope_idx;
-	while (true) {
-		for (uint j = 0; j < pr.node_count; j++) {
-			AstNode* candidate = &pr.nodes[j];
-			if (candidate.parent != current) continue;
-			if (!is_typed_declaration(candidate.kind)) continue;
-			if (candidate.name != name) continue;
-
-			if (info.has_type[j]) {
-				TypeRef result = info.node_types[j];
-				result.nullable = false;
-				return result;
-			}
-			return TYPE_UNKNOWN;
-		}
-
-		AstNode* scope = &pr.nodes[current];
-		if (current == 0 || scope.parent == ast::NO_PARENT) break;
-		current = scope.parent;
-	}
-
-	return TYPE_UNKNOWN;
-}
 
 // ── Call expression resolution ─────────────────────────────────────
 
 /**
  * Count the number of arguments in a CALL_EXPR node.
- * Skips the callee NAME_EXPR and trailing LAMBDA_EXPR.
+ * Skips the callee NAME_EXPR and trailing lambda VALUE_ARGUMENT.
  */
 fn uint count_call_args(ParseResult* pr, uint call_idx, String callee_name) {
 	uint count = 0;
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* child = &pr.nodes[i];
 		if (child.parent != call_idx) continue;
-		// Skip the callee NAME_EXPR
-		if (child.kind == NAME_EXPR && child.name == callee_name) continue;
-		// Skip trailing lambdas (they count as a parameter but not a positional arg)
-		if (child.kind == LAMBDA_EXPR) continue;
+		// Only count VALUE_ARGUMENT children (parenthesized args)
+		if (child.kind != VALUE_ARGUMENT) continue;
+		// Skip trailing lambda (it counts as a parameter but not a positional arg)
+		if (child.extra_text == "trailing") continue;
 		count++;
 	}
 	return count;
@@ -1777,25 +1928,88 @@ fn uint count_call_args(ParseResult* pr, uint call_idx, String callee_name) {
 fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
-	// Check for well-known constructor/factory calls
-	TypeRef known = resolve_known_call(node.name);
-	if (known.kind != UNKNOWN) {
-		// Try to infer type arguments from call arguments
-		if (known.kind == GENERIC && known.type_arg_count == 0) {
-			known = infer_generic_args_from_call(pr, info, idx, known);
+	// Check for well-known constructor/factory calls. User-defined class with
+	// same name shadows stdlib (Kotlin spec §16.10 scope resolution); skip
+	// stdlib short-circuit so the constructor branch can run with proper
+	// type-argument inference from primary-ctor PARAMs.
+	bool user_class_shadows = false;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* candidate = &pr.nodes[j];
+		if (candidate.kind != CLASS_DECL && candidate.kind != OBJECT_DECL) continue;
+		if (candidate.name == node.name) { user_class_shadows = true; break; }
+	}
+	if (!user_class_shadows) {
+		TypeRef known = resolve_known_call(node.name);
+		if (known.kind != UNKNOWN) {
+			// Try to infer type arguments from call arguments
+			if (known.kind == GENERIC && known.type_arg_count == 0) {
+				known = infer_generic_args_from_call(pr, info, idx, known);
+			}
+			return known;
 		}
-		return known;
+	}
+
+	// `runCatching { ... }` → Result<T> where T = lambda body type.
+	// (Kotlin spec stdlib: kotlin.runCatching). Top-level form only;
+	// receiver form `x.runCatching { }` falls through to DOT_EXPR path.
+	if (node.name == "runCatching") {
+		TypeRef body = find_trailing_lambda_body_in_call(pr, info, idx);
+		TypeRef result = { .kind = GENERIC, .name = "Result" };
+		if (body.kind != UNKNOWN && body.name.len > 0) {
+			result.type_arg_count = 1;
+			result.type_arg_names[0] = body.name;
+			result.type_arg_nullable[0] = body.nullable;
+		}
+		return result;
+	}
+
+	// Stdlib static factories on class refs: `Result.success(x)` / `Result.failure(e)`.
+	// CALL_EXPR has DOT_EXPR child whose receiver is a class-ref NAME_EXPR.
+	// Decoded here so we can pull the argument type for the type parameter.
+	if (node.name == "success" || node.name == "failure") {
+		TypeRef factory = resolve_static_factory_call(pr, info, idx);
+		if (factory.kind != UNKNOWN) return factory;
 	}
 
 	// Count arguments of this call expression
 	uint call_arg_count = count_call_args(pr, idx, node.name);
 
-	// Search for best FUN_DECL matching this name (prefer param count match)
+	// Method call on a receiver: try in-file member resolution FIRST so user
+	// generic class members get proper type-arg substitution (Box<Int>.get():
+	// Int, not raw T from a top-level FUN_DECL match by bare name).
+	bool is_method_call = false;
+	bool generic_receiver = false;
+	bool method_receiver_known = false;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != idx) continue;
+		if (child.kind == DOT_EXPR && child.name == node.name) { is_method_call = true; break; }
+	}
+	if (is_method_call) {
+		TypeRef receiver_type = find_call_receiver_type(pr, info, idx);
+		if (receiver_type.kind != UNKNOWN && receiver_type.name.len > 0) {
+			method_receiver_known = true;
+			if (receiver_type.kind == GENERIC && receiver_type.type_arg_count > 0) {
+				generic_receiver = true;
+			}
+			TypeRef member_result = resolve_in_file_member(pr, receiver_type, node.name);
+			if (member_result.kind != UNKNOWN) return member_result;
+		}
+	}
+
+	// Search for best FUN_DECL matching this name (prefer param count match).
+	// Skip when this is a method call AND we know the receiver type — the
+	// receiver-based resolution above is authoritative; falling through to a
+	// bare-name FUN_DECL match would lose type-arg substitution (Box<Int>.get()
+	// → raw T) or pick an unrelated same-name member. When the receiver is
+	// unknown (still being typed), fall through and defer — caller's retry
+	// loop will re-resolve once receiver gets typed.
 	uint best_idx = 0;
 	bool found_any = false;
 	bool found_exact = false;
 
-	for (uint j = 0; j < pr.node_count; j++) {
+	bool skip_fun_search = generic_receiver || (is_method_call && !method_receiver_known);
+	if (!skip_fun_search) for (uint j = 0; j < pr.node_count; j++) {
 		AstNode* candidate = &pr.nodes[j];
 		if (candidate.kind != FUN_DECL) continue;
 		if (candidate.name != node.name) continue;
@@ -1817,7 +2031,11 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 
 	if (found_any) {
 		if (info.has_type[best_idx]) {
-			return info.node_types[best_idx];
+			TypeRef ret = info.node_types[best_idx];
+			// Substitute user-defined generic type parameters using arg types.
+			// Maps fun <T> id(x: T): T → id(42) returns Int (Kotlin spec §11.1.7).
+			ret = substitute_user_type_params(pr, info, best_idx, idx, ret);
+			return ret;
 		}
 		return TYPE_UNKNOWN;
 	}
@@ -1828,7 +2046,13 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		if (candidate.kind != CLASS_DECL && candidate.kind != OBJECT_DECL) continue;
 		if (candidate.name != node.name) continue;
 
-		return { .kind = SIMPLE, .name = candidate.name };
+		TypeRef result = { .kind = SIMPLE, .name = candidate.name };
+		// Infer class type-args from primary-ctor PARAM types vs call arg types.
+		// Box<T>(val v: T); Box(42) -> Box<Int>. (Kotlin spec §11.1.7.)
+		if (candidate.kind == CLASS_DECL) {
+			result = infer_class_type_args(pr, info, j, idx, result);
+		}
+		return result;
 	}
 
 	// Cross-file: query workspace for constructor calls and function return types
@@ -1838,7 +2062,35 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
 				// Constructor call: class name matches
 				if (sym.kind == symbols::SymbolKind.CLASS || sym.kind == symbols::SymbolKind.OBJECT) {
-					return { .kind = SIMPLE, .name = sym.name };
+					TypeRef base = { .kind = SIMPLE, .name = sym.name };
+					return infer_xfile_class_type_args(pr, info, sym.name, idx, base);
+				}
+				// Top-level function call: parse return type, substitute TPs.
+				// `fun <T> id(x: T): T` indexed cross-file → `id("hi")` returns String.
+				if (sym.kind == symbols::SymbolKind.FUNCTION && sym.receiver.len == 0) {
+					ParseResult*? other_pr_opt = g_workspace.get_cached_ast(sym.uri);
+					if (catch other_pr_opt) continue;
+					if (other_pr_opt == null) continue;
+					ParseResult* other_pr = other_pr_opt;
+					// Find FUN_DECL by name + line.
+					uint fidx = uint.max;
+					for (uint k = 0; k < other_pr.node_count; k++) {
+						AstNode* n = &other_pr.nodes[k];
+						if (n.kind != FUN_DECL) continue;
+						if (n.name != sym.name) continue;
+						if (n.name_line == sym.line) { fidx = k; break; }
+					}
+					if (fidx == uint.max) {
+						for (uint k = 0; k < other_pr.node_count; k++) {
+							AstNode* n = &other_pr.nodes[k];
+							if (n.kind == FUN_DECL && n.name == sym.name) { fidx = k; break; }
+						}
+					}
+					if (fidx == uint.max) continue;
+					String rt_text = other_pr.nodes[fidx].type_text;
+					TypeRef ret = rt_text.len > 0 ? parse_type_text(rt_text) : TYPE_UNKNOWN;
+					if (ret.kind == UNKNOWN) continue;
+					return infer_xfile_fun_type_args(pr, info, sym.uri, sym.name, sym.line, idx, ret);
 				}
 			}
 		}
@@ -1868,7 +2120,7 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 			TypeRef member_result = resolve_member_type(receiver_type, node.name);
 			if (member_result.kind != UNKNOWN) return member_result;
 			// Try workspace member cache
-			member_result = resolve_workspace_member_type(receiver_type, node.name);
+			member_result = resolve_workspace_member_type(receiver_type, node.name, pr, info, idx);
 			if (member_result.kind != UNKNOWN) return member_result;
 			// Try dependency index
 			if (g_workspace.dep_index.initialized) {
@@ -1883,6 +2135,23 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent == idx && pr.nodes[j].kind == DOT_EXPR && info.has_type[j]) {
 			return info.node_types[j];
+		}
+	}
+
+	// `operator fun invoke()` resolution per Kotlin spec §9.6: when the
+	// callee `name` resolves to a value of some type T (not a function),
+	// the call is rewritten to `name.invoke(...)`. Look up T.invoke and
+	// return its result type.
+	uint val_decl = find_decl_in_scope_chain(pr, idx, node.name);
+	if (val_decl != ast::NO_PARENT && info.has_type[val_decl]) {
+		TypeRef val_type = info.node_types[val_decl];
+		// Lambda value / function-typed val: return its declared return type.
+		if (val_type.kind == FUNCTION && val_type.return_type_name.len > 0) {
+			return parse_type_text(val_type.return_type_name);
+		}
+		if (val_type.kind != UNKNOWN && val_type.kind != FUNCTION) {
+			TypeRef invoke_result = lookup_member_anywhere(pr, info, val_type, "invoke");
+			if (invoke_result.kind != UNKNOWN) return invoke_result;
 		}
 	}
 
@@ -1903,16 +2172,15 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 	for (uint j = 0; j < pr.node_count; j++) {
 		AstNode* child = &pr.nodes[j];
 		if (child.parent != call_idx) continue;
-		// Skip the callee NAME_EXPR (usually the first child)
-		if (child.kind == NAME_EXPR && child.name == pr.nodes[call_idx].name) continue;
-		// Skip lambda arguments
-		if (child.kind == LAMBDA_EXPR) continue;
+		if (child.kind != VALUE_ARGUMENT) continue;
+		uint expr_idx = ast::get_arg_expr_idx(pr, j);
+		if (expr_idx == uint.max) continue;
 
-		if (info.has_type[j]) {
+		if (info.has_type[expr_idx]) {
 			if (arg_count == 0) {
-				first_arg_type = info.node_types[j];
+				first_arg_type = info.node_types[expr_idx];
 			} else if (arg_count == 1) {
-				second_arg_type = info.node_types[j];
+				second_arg_type = info.node_types[expr_idx];
 			}
 		}
 		arg_count++;
@@ -1949,10 +2217,616 @@ fn TypeRef infer_generic_args_from_call(ParseResult* pr, TypeInfo* info, uint ca
 }
 
 /**
+ * Lift a stdlib container TypeRef to a named supertype, projecting type args
+ * (Kotlin spec §7.1 supertype hierarchy). Returns UNKNOWN if no path found.
+ *
+ * Hardcoded stdlib hierarchy:
+ *   List<T>, MutableList<T>        → Collection<T> → Iterable<T>
+ *   Set<T>, MutableSet<T>, HashSet<T>, LinkedHashSet<T> → Collection<T> → Iterable<T>
+ *   ArrayList<T>                   → MutableList<T> → List<T> → Collection<T> → Iterable<T>
+ *   Sequence<T>                    → (no Iterable supertype in projection table)
+ *   Array<T>                       → (separate hierarchy, no Collection)
+ *   Map<K, V>, MutableMap<K, V>    → (separate, not Collection)
+ *
+ * Slot mapping is identity for collection projections (single TP T at slot 0).
+ */
+fn TypeRef lift_to_supertype(TypeRef arg, String target_name) {
+	if (arg.name == target_name) return arg;
+	if (arg.type_arg_count == 0) return TYPE_UNKNOWN;
+
+	// Single-TP collection family → Collection / Iterable
+	String n = arg.name;
+	bool is_collection_family = (n == "List" || n == "MutableList"
+		|| n == "ArrayList" || n == "Set" || n == "MutableSet"
+		|| n == "HashSet" || n == "LinkedHashSet" || n == "Collection"
+		|| n == "MutableCollection");
+	if (is_collection_family) {
+		if (target_name == "Collection" || target_name == "MutableCollection"
+			|| target_name == "Iterable" || target_name == "MutableIterable") {
+			TypeRef out = arg;
+			out.name = target_name;
+			return out;
+		}
+	}
+	// MutableList<T> <: List<T>
+	if ((n == "MutableList" || n == "ArrayList") && target_name == "List") {
+		TypeRef out = arg;
+		out.name = "List";
+		return out;
+	}
+	// MutableSet<T> <: Set<T>
+	if ((n == "MutableSet" || n == "HashSet" || n == "LinkedHashSet")
+		&& target_name == "Set") {
+		TypeRef out = arg;
+		out.name = "Set";
+		return out;
+	}
+	// MutableMap<K, V> <: Map<K, V>
+	if ((n == "MutableMap" || n == "HashMap" || n == "LinkedHashMap")
+		&& target_name == "Map") {
+		TypeRef out = arg;
+		out.name = "Map";
+		return out;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Unify a function-type parameter (FUNCTION TypeRef like `(T) -> R`) against
+ * a lambda's resolved FUNCTION TypeRef. Binds TPs in param-slot positions
+ * and the return-slot (Kotlin spec §11.1.7 + §4.6 function types).
+ *
+ * Lambda-side fields: `param_type_names[]` (strings, no nullable) and
+ * `return_type_name`. We only bind when the lambda-side string is a real
+ * type (not "?", not empty, not "Unit" placeholder when return_type_name
+ * was synthesized from an empty body).
+ */
+fn void unify_function_tps_into_subst(TypeRef param_tref, TypeRef arg_tref,
+		String[4] tp_names, usz* tp_count,
+		String[4]* subst_names, bool[4]* subst_nullable, bool[4]* subst_known) {
+	if (param_tref.kind != FUNCTION || arg_tref.kind != FUNCTION) return;
+
+	// Param-slot positions
+	usz slots = param_tref.param_type_count;
+	if (arg_tref.param_type_count < slots) slots = arg_tref.param_type_count;
+	for (usz i = 0; i < slots; i++) {
+		String pname = param_tref.param_type_names[i];
+		String aname = arg_tref.param_type_names[i];
+		if (aname.len == 0 || aname == "?") continue;
+		for (usz t = 0; t < *tp_count; t++) {
+			if ((*subst_known)[t]) continue;
+			if (pname == tp_names[t]) {
+				(*subst_names)[t] = aname;
+				(*subst_nullable)[t] = false;
+				(*subst_known)[t] = true;
+				break;
+			}
+		}
+	}
+
+	// Return-slot
+	String pret = param_tref.return_type_name;
+	String aret = arg_tref.return_type_name;
+	if (aret.len > 0 && aret != "?" && aret != "Unit") {
+		for (usz t = 0; t < *tp_count; t++) {
+			if ((*subst_known)[t]) continue;
+			if (pret == tp_names[t]) {
+				(*subst_names)[t] = aret;
+				(*subst_nullable)[t] = false;
+				(*subst_known)[t] = true;
+				break;
+			}
+		}
+	}
+}
+
+/**
+ * Infer implicit `it` type for a lambda passed to a user-defined function
+ * with a FUNCTION-typed parameter (Kotlin spec §11.1.7 + §4.6).
+ *
+ * Strategy:
+ *   1. Find the lambda's positional arg index in the call.
+ *   2. Look up the called fn (in-file FUN_DECL by name match).
+ *   3. Get that PARAM's type_text, parse as FUNCTION.
+ *   4. Take param_type_names[0] (the `it` slot).
+ *   5. If it's a TP of the called fn, run the standard TP inference
+ *      against the OTHER call args to bind it.
+ *   6. Return the bound type.
+ *
+ * Limitations: in-file callees only (workspace lookup deferred), single-
+ * param lambdas only, no support for receiver-typed lambdas.
+ */
+fn TypeRef infer_implicit_it_from_user_call(ParseResult* pr, TypeInfo* info,
+		uint lambda_idx, uint call_idx) {
+	// Locate lambda's arg position
+	uint arg_pos = 0;
+	uint pos = 0;
+	bool found = false;
+	uint lambda_parent = pr.nodes[lambda_idx].parent;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind != VALUE_ARGUMENT) continue;
+		// Direct VALUE_ARGUMENT wrap of lambda
+		if (j == lambda_parent) {
+			arg_pos = pos;
+			found = true;
+			break;
+		}
+		pos++;
+	}
+	// Trailing lambda: lambda is direct child of CALL_EXPR (after VALUE_ARGUMENTs)
+	if (!found && lambda_parent == call_idx) {
+		arg_pos = pos;
+		found = true;
+	}
+	if (!found) return TYPE_UNKNOWN;
+
+	String fn_name = pr.nodes[call_idx].name;
+	if (fn_name.len == 0) return TYPE_UNKNOWN;
+
+	// Find in-file FUN_DECL by name
+	uint fun_decl_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].kind != FUN_DECL) continue;
+		if (pr.nodes[j].name != fn_name) continue;
+		fun_decl_idx = j;
+		break;
+	}
+	if (fun_decl_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	// Find PARAM at arg_pos
+	uint param_pos_count = 0;
+	String fn_param_text = "";
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != fun_decl_idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (param_pos_count == arg_pos) {
+			fn_param_text = pr.nodes[j].type_text;
+			break;
+		}
+		param_pos_count++;
+	}
+	if (fn_param_text.len == 0) return TYPE_UNKNOWN;
+
+	TypeRef fn_param_tref = parse_type_text(fn_param_text);
+	if (fn_param_tref.kind != FUNCTION) return TYPE_UNKNOWN;
+	if (fn_param_tref.param_type_count == 0) return TYPE_UNKNOWN;
+
+	String it_slot = fn_param_tref.param_type_names[0];
+	if (it_slot.len == 0 || it_slot == "?") return TYPE_UNKNOWN;
+
+	// If it_slot is a literal type (e.g. Int), return it directly.
+	// If it's a TP, bind from other call args.
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) {
+		return { .kind = SIMPLE, .name = it_slot };
+	}
+
+	bool is_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (it_slot == tp_names[t]) { is_tp = true; break; }
+	}
+	if (!is_tp) {
+		return { .kind = SIMPLE, .name = it_slot };
+	}
+
+	// Bind TPs from non-FUNCTION call args (mirrors substitute_user_type_params)
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint pp = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		// Top-level T match
+		bool top_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_bound = true;
+				}
+			}
+		}
+		// Nested unification (skip FUNCTION-typed params to avoid recursion)
+		if (!top_bound && pt.len > 0) {
+			TypeRef ptref = parse_type_text(pt);
+			if (ptref.kind != FUNCTION && ptref.kind != UNKNOWN
+				&& ptref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (ptref.name == arg.name) {
+						unify_tps_into_subst(ptref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, ptref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(ptref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		pp++;
+	}
+
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t] && it_slot == tp_names[t]) {
+			return { .kind = SIMPLE, .name = subst_names[t],
+				.nullable = subst_nullable[t] };
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
+
+/**
+ * Unify a parameter TypeRef against an argument TypeRef and record any
+ * type-parameter bindings discovered (Kotlin spec §11.1.7 structural
+ * unification). Used by substitute_user_type_params to support nested
+ * type-param positions like `(xs: List<T>)` matched against `List<Int>`.
+ *
+ * Matches by position: param_tref.type_arg_names[i] == tp_name binds
+ * tp = arg_tref.type_arg_names[i]. Recurses one more level to support
+ * `(xs: List<List<T>>)` → `List<List<Int>>`. Container-name mismatch
+ * aborts (caller already gates on names matching).
+ *
+ * Limitations: no variance handling, no upper-bound checks, no
+ * inheritance-based unification (e.g. `(xs: Iterable<T>)` ↔ `List<Int>`).
+ */
+fn void unify_tps_into_subst(TypeRef param_tref, TypeRef arg_tref,
+		String[4] tp_names, usz* tp_count,
+		String[4]* subst_names, bool[4]* subst_nullable, bool[4]* subst_known) {
+	usz slots = param_tref.type_arg_count;
+	if (arg_tref.type_arg_count < slots) slots = arg_tref.type_arg_count;
+	for (usz i = 0; i < slots; i++) {
+		String pname = param_tref.type_arg_names[i];
+		String aname = arg_tref.type_arg_names[i];
+		bool a_nullable = arg_tref.type_arg_nullable[i];
+		// Direct TP slot
+		for (usz t = 0; t < *tp_count; t++) {
+			if ((*subst_known)[t]) continue;
+			if (pname == tp_names[t] && aname.len > 0) {
+				(*subst_names)[t] = aname;
+				(*subst_nullable)[t] = a_nullable;
+				(*subst_known)[t] = true;
+				break;
+			}
+		}
+	}
+}
+
+
+/**
+ * Substitute user-defined generic type parameters in a function's return type
+ * by inferring T = arg-type from positional FUN_DECL PARAM ↔ CALL_EXPR ARG
+ * matching (Kotlin spec §11.1.7 type-argument inference).
+ *
+ * Strategy: for each TYPE_PARAM child of the FUN_DECL, find the first PARAM
+ * whose declared type-text mentions the type-param name. Top-level matches
+ * (`(x: T)`) bind directly. Nested matches (`(xs: List<T>)`, `(p: Pair<A,B>)`)
+ * use unify_tps_into_subst to bind from corresponding type-arg slots when the
+ * container name matches. Then rewrite `ret` if its `name` or any
+ * `type_arg_names[i]` equals a type-param name.
+ *
+ * Limitations:
+ *   - One level of nesting; `(xs: List<List<T>>)` not unified deeper.
+ *   - Container name must match exactly; no inheritance / variance handling
+ *     (e.g. `(xs: Iterable<T>)` ↔ `List<Int>` doesn't bind T).
+ *   - Only return-type substitution; doesn't propagate into call-arg
+ *     contexts. Sufficient for `identity(x)` / single-T transformers and
+ *     `first`/`map`-style HOFs.
+ *   - Up to 4 type parameters per function.
+ */
+
+fn TypeRef substitute_user_type_params(ParseResult* pr, TypeInfo* info,
+		uint fun_decl_idx, uint call_idx, TypeRef ret) {
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return ret;
+
+	bool ret_uses_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (ret.name == tp_names[t]) { ret_uses_tp = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { ret_uses_tp = true; break; }
+		}
+		if (ret_uses_tp) break;
+	}
+	if (!ret_uses_tp) return ret;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint param_pos = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != fun_decl_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		// Top-level T match: (x: T) → bind T = arg type directly.
+		bool top_level_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		// Nested unification: (xs: List<T>) ↔ List<Int> → T=Int.
+		// (xs: Pair<A, B>) ↔ Pair<Int, String> → A=Int, B=String.
+		// (xs: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
+		// Supertype unification: (xs: Iterable<T>) ↔ List<Int> → T=Int
+		// via stdlib hierarchy table (Kotlin spec §11.1.7 + §7.1).
+		// Function-type unification: (f: (T) -> R) ↔ lambda → bind T from
+		// param slot, R from return slot (Kotlin spec §11.1.7 + §4.6).
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// Check if substitution is incomplete: ret references a TP we couldn't
+	// bind. Return UNKNOWN to defer — caller's multi-pass loop won't cache,
+	// so a later pass (after arg types resolve) gets another chance.
+	bool incomplete = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) continue;
+		if (ret.name == tp_names[t]) { incomplete = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { incomplete = true; break; }
+		}
+		if (incomplete) break;
+	}
+	if (incomplete) return TYPE_UNKNOWN;
+
+	TypeRef out = ret;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) continue;
+		if (out.name == tp_names[t]) {
+			out.name = subst_names[t];
+			if (subst_nullable[t]) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = subst_names[t];
+				if (subst_nullable[t]) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * Get the resolved type of the Nth positional VALUE_ARGUMENT of a CALL_EXPR.
+ * Returns TYPE_UNKNOWN if absent or unresolved.
+ */
+fn TypeRef nth_call_arg_type(ParseResult* pr, TypeInfo* info, uint call_idx, uint n) {
+	uint pos = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != call_idx) continue;
+		if (child.kind != VALUE_ARGUMENT) continue;
+		if (pos == n) {
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx == uint.max) return TYPE_UNKNOWN;
+			if (info.has_type[expr_idx]) return info.node_types[expr_idx];
+			return TYPE_UNKNOWN;
+		}
+		pos++;
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Infer class type-arguments at a constructor call site by matching
+ * primary-ctor PARAM types against call arg types (Kotlin spec §11.1.7).
+ *
+ * `class Box<T>(val v: T)`; `Box(42)` → returns `Box<Int>`.
+ *
+ * Strategy: collect the class's TYPE_PARAM names, then walk the primary-ctor
+ * PARAMs (PARAM children of the CLASS_DECL — Kotlin desugars `class Box<T>(val v: T)`
+ * into the class with PARAM children for the primary ctor). For each PARAM whose
+ * type-text equals a TP name (top-level only), bind that TP to the corresponding
+ * positional call-arg type. Promote the result to GENERIC with bound type-args.
+ */
+fn TypeRef infer_class_type_args(ParseResult* pr, TypeInfo* info,
+		uint class_decl_idx, uint call_idx, TypeRef base) {
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != class_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return base;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint param_pos = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != class_decl_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		// Top-level T match: (val x: T) → bind T = arg type directly.
+		bool top_level_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		// Nested unification: (val xs: List<T>) ↔ List<Int> → T=Int.
+		// (val store: Map<K, V>) ↔ Map<String, Int> → K=String, V=Int.
+		// Supertype unification: (val xs: Iterable<T>) ↔ List<Int> → T=Int.
+		// Function-type unification: (val f: (T) -> R) ↔ lambda.
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// If any TP remains unbound AND the call has at least one arg, defer:
+	// arg types may not be resolved yet. Returning UNKNOWN (rather than a
+	// placeholder GENERIC) prevents caching, so a later pass retries
+	// (mirrors the FUN_DECL incomplete-defer pattern).
+	bool any_unbound = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) { any_unbound = true; break; }
+	}
+	if (any_unbound) {
+		// Count call args
+		uint arg_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == call_idx
+				&& pr.nodes[j].kind == VALUE_ARGUMENT) arg_count++;
+		}
+		if (arg_count > 0) return TYPE_UNKNOWN;
+	}
+
+	// Build GENERIC TypeRef with type-args (UNKNOWN slot for unbound TPs)
+	TypeRef out = base;
+	out.kind = GENERIC;
+	out.type_arg_count = (uint)tp_count;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) {
+			out.type_arg_names[t] = subst_names[t];
+			out.type_arg_nullable[t] = subst_nullable[t];
+		} else {
+			// Leave the TP name as a placeholder so downstream substitution
+			// can still recognise it. (format_type prints it verbatim.)
+			out.type_arg_names[t] = tp_names[t];
+			out.type_arg_nullable[t] = false;
+		}
+	}
+	return out;
+}
+
+/**
+ * Hardcoded stdlib class-ref name table. Recognises well-known stdlib type
+ * names so they can be referenced as bare class refs (`Result.success(x)`,
+ * `Pair.…`, etc.) without requiring the workspace dep index to be available.
+ *
+ * Returns a class-ref TypeRef (`is_class_ref = true`) so DOT_EXPR member
+ * resolution treats the receiver as a static-member lookup (Kotlin spec
+ * companion-object access semantics).
+ */
+fn TypeRef resolve_stdlib_class_name(String name) {
+	if (name == "Result") {
+		return { .kind = SIMPLE, .name = "Result", .is_class_ref = true };
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
  * Resolve well-known stdlib factory/constructor calls.
  */
-fn TypeRef resolve_known_call(String name) {
-	if (name == "listOf" || name == "emptyList") {
+fn TypeRef resolve_known_call(String name) {	if (name == "listOf" || name == "emptyList") {
 		return { .kind = GENERIC, .name = "List" };
 	}
 	if (name == "mutableListOf" || name == "arrayListOf") {
@@ -1994,13 +2868,77 @@ fn TypeRef resolve_known_call(String name) {
 	return TYPE_UNKNOWN;
 }
 
+/**
+ * Resolve a stdlib static factory call of the form `<ClassRef>.<method>(args)`.
+ * Currently handles `Result.success(x) → Result<T>` and `Result.failure(e) → Result<T>`.
+ *
+ * Looks up the CALL_EXPR's DOT_EXPR child, checks the receiver is a class-ref
+ * NAME_EXPR for "Result", then derives T from the first argument's type
+ * (success: arg type; failure: explicit `Result.failure<T>(e)` requires
+ * arg-type-independent T which we don't have without explicit type args, so
+ * we return bare `Result` in that case).
+ */
+fn TypeRef resolve_static_factory_call(ParseResult* pr, TypeInfo* info, uint call_idx) {
+	// Find DOT_EXPR child of CALL_EXPR
+	uint dot_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != call_idx) continue;
+		if (pr.nodes[j].kind == DOT_EXPR) { dot_idx = j; break; }
+	}
+	if (dot_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+
+	AstNode* dot = &pr.nodes[dot_idx];
+	String method = dot.name;
+
+	// Find DOT_EXPR's receiver child
+	uint recv_idx = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == dot_idx) { recv_idx = j; break; }
+	}
+	if (recv_idx == ast::NO_PARENT) return TYPE_UNKNOWN;
+	AstNode* recv = &pr.nodes[recv_idx];
+	if (recv.kind != NAME_EXPR) return TYPE_UNKNOWN;
+
+	// Result class-ref
+	if (recv.name != "Result") return TYPE_UNKNOWN;
+
+	TypeRef result = { .kind = GENERIC, .name = "Result" };
+	if (method == "success") {
+		// T = first arg type
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* child = &pr.nodes[j];
+			if (child.parent != call_idx) continue;
+			if (child.kind != VALUE_ARGUMENT) continue;
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx == uint.max) break;
+			if (info.has_type[expr_idx]) {
+				TypeRef arg = info.node_types[expr_idx];
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					result.type_arg_count = 1;
+					result.type_arg_names[0] = arg.name;
+					result.type_arg_nullable[0] = arg.nullable;
+				}
+			}
+			break;
+		}
+		return result;
+	}
+	if (method == "failure") {
+		// T not derivable from Throwable arg without explicit type-arg parsing;
+		// return bare `Result` (callers can still use isFailure/exceptionOrNull).
+		return result;
+	}
+	return TYPE_UNKNOWN;
+}
+
 // ── Lambda body type inference helpers ──────────────────────────────
 
 /**
  * Find the trailing LAMBDA_EXPR sibling of a DOT_EXPR inside a CALL_EXPR.
  * Returns the type of the lambda's last expression (body return type).
  *
- * AST structure: CALL_EXPR → { DOT_EXPR, LAMBDA_EXPR }
+ * AST structure: CALL_EXPR → { DOT_EXPR, VALUE_ARGUMENT(trailing) → LAMBDA_EXPR }
+ *   (older synthesized form may have a direct LAMBDA_EXPR child).
  */
 fn TypeRef find_trailing_lambda_body_type(ParseResult* pr, TypeInfo* info, uint dot_idx) {
 	uint parent = pr.nodes[dot_idx].parent;
@@ -2008,8 +2946,16 @@ fn TypeRef find_trailing_lambda_body_type(ParseResult* pr, TypeInfo* info, uint 
 
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent != parent) continue;
+		// Direct lambda child (legacy synthesized form)
 		if (pr.nodes[j].kind == LAMBDA_EXPR) {
 			return last_expr_type_in(pr, info, j, true);
+		}
+		// Trailing lambda wrapped in VALUE_ARGUMENT(extra_text="trailing")
+		if (pr.nodes[j].kind == VALUE_ARGUMENT && pr.nodes[j].extra_text == "trailing") {
+			uint expr_idx = ast::get_arg_expr_idx(pr, j);
+			if (expr_idx != uint.max && pr.nodes[expr_idx].kind == LAMBDA_EXPR) {
+				return last_expr_type_in(pr, info, expr_idx, true);
+			}
 		}
 	}
 	return TYPE_UNKNOWN;
@@ -2108,9 +3054,11 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 	if (node.name.len == 0) return TYPE_UNKNOWN;
 
 	// Find receiver (first child)
+	uint recv_idx = ast::NO_PARENT;
 	TypeRef receiver_type = TYPE_UNKNOWN;
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent == idx) {
+			recv_idx = j;
 			if (info.has_type[j]) {
 				receiver_type = info.node_types[j];
 			}
@@ -2118,7 +3066,56 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 		}
 	}
 
+	// Anonymous object body member access (Kotlin spec §16.6): when the
+	// receiver is bound (directly or via a local val) to an OBJECT_EXPR,
+	// scan its body declarations for the member. Body decls take
+	// precedence over supertype members and are accessible even when the
+	// object has no declared supertype (receiver_type == UNKNOWN).
+	if (recv_idx != ast::NO_PARENT) {
+		TypeRef body_t = resolve_anon_object_member(pr, info, recv_idx, node.name);
+		if (body_t.kind != UNKNOWN) return body_t;
+	}
+
 	if (receiver_type.kind == UNKNOWN) return TYPE_UNKNOWN;
+
+	// Compute the base member type via the existing dispatch chain.
+	TypeRef base = resolve_dot_expr_member_type(pr, info, idx, node, receiver_type);
+	if (base.kind == UNKNOWN) return base;
+
+	// Flow-sensitive smart cast (member-property): if `recv.member` (or a
+	// multi-level chain like `a.b.c`) is narrowed by a flow fact and both
+	// receiver chain and final member are stable, apply it. The fact key
+	// uses the dotted form: ("a", "b.c") for a.b.c.
+	if (recv_idx != ast::NO_PARENT) {
+		String key_recv;
+		String key_member;
+		bool got_chain = flow::dotted_name_of_expr(pr, idx, &key_recv, &key_member);
+		if (got_chain && key_recv.len > 0 && key_member.len > 0) {
+			flow::Fact* fact = lookup_smart_cast_fact(pr, info, idx, key_recv, key_member);
+			if (fact != null && member_access_is_stable(pr, info, recv_idx, key_recv, receiver_type, node.name)) {
+				if (fact.narrowed.kind != UNKNOWN) {
+					return fact.narrowed;
+				}
+				if (fact.not_null && base.nullable) {
+					base.nullable = false;
+				}
+			}
+		}
+	}
+	return base;
+}
+
+/**
+ * Compute the member type of `recv.member` ignoring flow facts. Pulled
+ * out of `resolve_dot_expr_type` so the entry point can wrap with the
+ * smart-cast lookup + stability gate.
+ */
+fn TypeRef resolve_dot_expr_member_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node, TypeRef receiver_type) {
+	// Typealias unwrap (Kotlin spec §11.1.5): `typealias S = String` makes
+	// member access on `S` equivalent to member access on `String`. Done
+	// here too (in addition to lookup_member_anywhere) so the hardcoded
+	// stdlib-member shortcut sees the unwrapped name.
+	receiver_type = unwrap_typealias(pr, receiver_type);
 
 	// Try hardcoded stdlib member resolution first
 	TypeRef result = resolve_member_type(receiver_type, node.name);
@@ -2137,24 +3134,220 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 		if (lambda_body.kind != UNKNOWN) return lambda_body;
 	}
 
+	return lookup_member_anywhere(pr, info, receiver_type, node.name);
+}
+
+/**
+ * Lookup a member on `receiver` across the standard cascade (excluding
+ * stdlib + scope-fn shortcuts which are caller's job): in-file extension
+ * → in-file class member → workspace member → dep member.
+ *
+ * Used by `resolve_dot_expr_member_type` and by operator-call resolvers
+ * (binary/index/prefix/postfix/invoke) which need to find a user-defined
+ * `operator fun plus`/`get`/`invoke`/etc. on a non-stdlib receiver.
+ */
+fn TypeRef lookup_member_anywhere(ParseResult* pr, TypeInfo* info, TypeRef receiver_type, String member_name) {
+	// Typealias unwrap (Kotlin spec §11.1.5): `typealias S = String` makes
+	// `S` and `String` member-equivalent. Resolve receiver's name through
+	// any matching TYPEALIAS_DECL before any lookup.
+	receiver_type = unwrap_typealias(pr, receiver_type);
+
 	// In-file extension function resolution
-	// Look for `fun ReceiverType.name(): ReturnType` in same file
-	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, node.name);
+	TypeRef ext_result = resolve_in_file_extension(pr, info, receiver_type, member_name);
 	if (ext_result.kind != UNKNOWN) return ext_result;
+
+	// In-file class member resolution
+	TypeRef in_file_result = resolve_in_file_member(pr, receiver_type, member_name);
+	if (in_file_result.kind != UNKNOWN) return in_file_result;
 
 	// Cross-file: look up member from workspace member_cache
 	if (g_workspace != null) {
-		result = resolve_workspace_member_type(receiver_type, node.name);
-		if (result.kind != UNKNOWN) return result;
+		TypeRef ws = resolve_workspace_member_type(receiver_type, member_name);
+		if (ws.kind != UNKNOWN) return ws;
 
 		// Dependency index: look up member by receiver type name
 		if (g_workspace.dep_index.initialized) {
-			result = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, node.name, pr);
-			if (result.kind != UNKNOWN) return result;
+			TypeRef dep = resolve_dep_member_type(&g_workspace.dep_index, receiver_type, member_name, pr);
+			if (dep.kind != UNKNOWN) return dep;
 		}
 	}
 
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * If `t.name` matches an in-file TYPEALIAS_DECL, return the alias target
+ * type (transitively, with a 16-step cycle guard). Preserves nullability
+ * and is_class_ref. Returns `t` unchanged when no alias matches.
+ *
+ * Type arguments are not substituted — generic typealiases (e.g.
+ * `typealias List2<T> = List<T>`) only work when the alias and target
+ * have parallel type-arg shape; the receiver's type_arg_names are
+ * carried through as-is. Sufficient for simple aliases (`S = String`,
+ * `IntList = List<Int>`).
+ */
+fn TypeRef unwrap_typealias(ParseResult* pr, TypeRef t) {
+	if (t.kind != SIMPLE && t.kind != GENERIC) return t;
+	if (t.name.len == 0) return t;
+	for (uint hops = 0; hops < 16; hops++) {
+		uint matched = ast::NO_PARENT;
+		for (uint i = 0; i < pr.node_count; i++) {
+			AstNode* n = &pr.nodes[i];
+			if (n.kind != TYPEALIAS_DECL) continue;
+			if (n.name != t.name) continue;
+			if (n.type_text.len == 0) continue;
+			matched = i;
+			break;
+		}
+		if (matched != ast::NO_PARENT) {
+			TypeRef target = parse_type_text(pr.nodes[matched].type_text);
+			if (t.kind == GENERIC && t.type_arg_count > 0) {
+				target = substitute_class_type_params(pr, matched, t, target);
+			}
+			if (t.nullable) target.nullable = true;
+			if (t.is_class_ref) target.is_class_ref = true;
+			t = target;
+			continue;
+		}
+		// Cross-file fallback: workspace-indexed typealias (Kotlin spec §11.1.5).
+		if (g_workspace != null) {
+			TypealiasInfo* info = g_workspace.lookup_typealias(t.name);
+			if (info != null) {
+				TypeRef target = parse_type_text(info.aliased_type_text);
+				// Manual TP substitution (no AST handle; use info.tp_names).
+				if (t.kind == GENERIC && t.type_arg_count > 0 && info.tp_count > 0) {
+					usz n_subst = info.tp_count;
+					if (n_subst > t.type_arg_count) n_subst = t.type_arg_count;
+					for (usz k = 0; k < n_subst; k++) {
+						String tp = info.tp_names[k];
+						String binding = t.type_arg_names[k];
+						bool binding_nullable = t.type_arg_nullable[k];
+						if (binding == tp || binding.len == 0) continue;
+						if (target.name == tp) {
+							target.name = binding;
+							if (binding_nullable) target.nullable = true;
+						}
+						for (uint a = 0; a < target.type_arg_count; a++) {
+							if (target.type_arg_names[a] == tp) {
+								target.type_arg_names[a] = binding;
+								if (binding_nullable) target.type_arg_nullable[a] = true;
+							}
+						}
+					}
+				}
+				if (t.nullable) target.nullable = true;
+				if (t.is_class_ref) target.is_class_ref = true;
+				t = target;
+				continue;
+			}
+		}
+		return t;
+	}
+	return t;
+}
+
+/**
+ * Map a binary operator symbol to its Kotlin operator-fun method name
+ * per the language spec (§9.6 Operator overloading). Returns "" for
+ * operators that don't map to a method (||, &&, ===, etc. — handled by
+ * the compiler directly) or that are already short-circuited by the
+ * caller (==, <, etc. which always return Boolean).
+ */
+fn String binary_op_method(String op) {
+	if (op == "+") return "plus";
+	if (op == "-") return "minus";
+	if (op == "*") return "times";
+	if (op == "/") return "div";
+	if (op == "%") return "rem";
+	if (op == "..") return "rangeTo";
+	if (op == "..<") return "rangeUntil";
+	if (op == "in" || op == "!in") return "contains";  // receiver = RHS, result = Boolean
+	return "";
+}
+
+/**
+ * Map a unary operator symbol to its Kotlin operator-fun method name.
+ * `prefix` distinguishes `+a`/`-a` (unaryPlus/unaryMinus) from
+ * binary `a+b`/`a-b` (plus/minus).
+ */
+fn String unary_op_method(String op) {
+	if (op == "+") return "unaryPlus";
+	if (op == "-") return "unaryMinus";
+	if (op == "!") return "not";
+	if (op == "++") return "inc";
+	if (op == "--") return "dec";
+	return "";
+}
+
+/**
+ * Stability gate for a member access `recv.member`. Both halves must be
+ * stable for the smart cast to apply.
+ *
+ * Receiver stability: walk the receiver's NAME_EXPR scope chain to find
+ * its declaration, apply the existing single-decl gate. THIS_EXPR is
+ * always stable (this-reference can't be reassigned).
+ *
+ * Member stability: prefer the in-file class member if we can find it,
+ * apply the existing gate. Cross-file members are conservatively
+ * assumed unstable (no direct access to workspace decl AST here).
+ */
+fn bool member_access_is_stable(ParseResult* pr, TypeInfo* info, uint recv_idx, String recv_name,
+		TypeRef receiver_type, String member_name) {
+	if (recv_idx >= pr.node_count) return false;
+
+	// Receiver side
+	AstNode* rn = &pr.nodes[recv_idx];
+	if (rn.kind != THIS_EXPR) {
+		uint recv_decl = find_decl_in_scope_chain(pr, recv_idx, recv_name);
+		if (recv_decl == ast::NO_PARENT) return false;
+		if (!is_stable_for_smart_cast(pr, info, recv_decl, recv_idx)) return false;
+	}
+
+	// Member side: locate the in-file class declaration and apply the
+	// gate to the member decl. If we can't find an in-file class for the
+	// receiver type, the member must be cross-file → conservative deny.
+	uint member_decl = ast::NO_PARENT;
+	resolve_in_file_member(pr, receiver_type, member_name, &member_decl);
+	if (member_decl == ast::NO_PARENT) return false;
+	return is_stable_for_smart_cast(pr, info, member_decl, recv_idx);
+}
+
+/**
+ * Find a binding for `name` reachable from `use_idx`'s scope chain.
+ * Returns the AST decl idx, or ast::NO_PARENT if unresolved.
+ */
+fn uint find_decl_in_scope_chain(ParseResult* pr, uint use_idx, String name) {
+	uint scope_idx = find_innermost_scope(pr, use_idx);
+	uint current = scope_idx;
+	while (true) {
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* candidate = &pr.nodes[j];
+			if (candidate.parent != current) continue;
+			if (!is_typed_declaration(candidate.kind)) continue;
+			if (candidate.name != name) continue;
+			return j;
+		}
+		// Also look inside destructuring-wrapper PROPERTY_DECLs at this scope:
+		// `val (a, b) = expr` produces a PROPERTY_DECL named "(destructuring)"
+		// whose PROPERTY_DECL children are the destructured bindings. Their
+		// parent is the wrapper, not the enclosing BLOCK, so the direct-child
+		// scan above misses them. (Kotlin spec §11.7)
+		for (uint j = 0; j < pr.node_count; j++) {
+			AstNode* wrapper = &pr.nodes[j];
+			if (wrapper.parent != current) continue;
+			if (wrapper.kind != PROPERTY_DECL || wrapper.name != "(destructuring)") continue;
+			for (uint k = 0; k < pr.node_count; k++) {
+				AstNode* inner = &pr.nodes[k];
+				if (inner.parent != j) continue;
+				if (inner.kind != PROPERTY_DECL) continue;
+				if (inner.name == name) return k;
+			}
+		}
+		AstNode* scope = &pr.nodes[current];
+		if (current == 0 || scope.parent == ast::NO_PARENT) break;
+		current = scope.parent;
+	}
+	return ast::NO_PARENT;
 }
 
 // ── In-file extension function resolution ──────────────────────────
@@ -2190,6 +3383,178 @@ fn TypeRef resolve_in_file_extension(ParseResult* pr, TypeInfo* info, TypeRef re
 		return TYPE_UNKNOWN;
 	}
 	return TYPE_UNKNOWN;
+}
+
+// ── In-file class member resolution ────────────────────────────────
+
+/**
+ * Look for a property/function/primary-ctor-val-or-var member named `member_name`
+ * inside a CLASS_DECL/INTERFACE_DECL/OBJECT_DECL named `receiver.name` in the
+ * current file's AST.
+ *
+ * Handles three declaration shapes:
+ *  - PROPERTY_DECL child         (val/var x: T)
+ *  - FUN_DECL child              (fun f(): T)
+ *  - PARAM child with MOD_FINAL  (primary-ctor `val x: T`)
+ *  - PARAM child with MOD_VAR    (primary-ctor `var x: T`)
+ *
+ * Returns TYPE_UNKNOWN if no match. Does not walk supertypes (workspace path
+ * handles that for cross-file; in-file supertype walk falls through to the
+ * workspace path which already handles the current file when indexed).
+ *
+ * If `out_decl_idx` is non-null, sets it to the matched declaration's AST
+ * index (for downstream stability-gate checks). Set to ast::NO_PARENT on miss.
+ */
+fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String member_name, uint* out_decl_idx = null) {
+	if (out_decl_idx != null) *out_decl_idx = ast::NO_PARENT;
+	String recv_name = receiver.name;
+	if (recv_name.len == 0 || member_name.len == 0) return TYPE_UNKNOWN;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* cls = &pr.nodes[i];
+		if (cls.kind != CLASS_DECL && cls.kind != INTERFACE_DECL && cls.kind != OBJECT_DECL) continue;
+		if (cls.name != recv_name) continue;
+
+		// Synthetic enum members (Kotlin spec §11.2.6 + §16.30 Enum<E>):
+		//   val name: String      — entry name
+		//   val ordinal: Int      — declaration order
+		// Plus class-ref-only:
+		//   fun values(): Array<E>
+		//   fun valueOf(name: String): E
+		bool is_enum_class = (cls.kind == CLASS_DECL) && ((cls.mod_flags & ast::MOD_ENUM) != 0);
+		if (is_enum_class) {
+			if (member_name == "name") return TYPE_STRING;
+			if (member_name == "ordinal") return TYPE_INT;
+			if (receiver.is_class_ref) {
+				if (member_name == "values") {
+					TypeRef arr = { .kind = GENERIC, .name = "Array", .type_arg_count = 1 };
+					arr.type_arg_names[0] = recv_name;
+					return arr;
+				}
+				if (member_name == "valueOf") {
+					return { .kind = SIMPLE, .name = recv_name };
+				}
+			}
+		}
+
+		// Synthetic data class members (Kotlin spec §11.2.4):
+		//   fun copy(...): Foo  — return the same class type, args mirror
+		//                          primary-ctor PARAMs with defaults.
+		// (componentN() functions for destructuring are handled elsewhere.)
+		// Only on instance receivers; `Foo.copy` (class-ref) is not valid.
+		bool is_data_class = (cls.kind == CLASS_DECL) && ((cls.mod_flags & ast::MOD_DATA) != 0);
+		if (is_data_class && !receiver.is_class_ref && member_name == "copy") {
+			return substitute_class_type_params(pr, i, receiver, { .kind = SIMPLE, .name = recv_name });
+		}
+
+		// Scan direct children for matching member
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != i) continue;
+			AstNode* child = &pr.nodes[j];
+			if (child.name != member_name) continue;
+
+			switch (child.kind) {
+				case PROPERTY_DECL:
+				case FUN_DECL:
+					if (out_decl_idx != null) *out_decl_idx = j;
+					if (child.type_text.len > 0) {
+						TypeRef declared = parse_type_text(child.type_text);
+						return substitute_class_type_params(pr, i, receiver, declared);
+					}
+					if (child.kind == FUN_DECL) return TYPE_UNIT;
+					return TYPE_UNKNOWN;
+				case ENUM_ENTRY:
+					// `Color.RED` — receiver is enum class-ref, member is
+					// the entry. Each entry is an instance of the enum class.
+					if (out_decl_idx != null) *out_decl_idx = j;
+					return { .kind = SIMPLE, .name = recv_name };
+				case PARAM:
+					// Primary-ctor val/var only — plain params aren't members
+					uint mods = child.mod_flags;
+					if ((mods & ast::MOD_FINAL) == 0 && (mods & ast::MOD_VAR) == 0) continue;
+					if (out_decl_idx != null) *out_decl_idx = j;
+					if (child.type_text.len > 0) {
+						TypeRef declared = parse_type_text(child.type_text);
+						return substitute_class_type_params(pr, i, receiver, declared);
+					}
+					return TYPE_UNKNOWN;
+				default:
+					continue;
+			}
+		}
+
+		// Companion-object members: `Foo.member` resolves to `Foo.Companion.member`
+		// (Kotlin spec §11.4.4 companion-object access). Walk OBJECT_DECL children
+		// of this class with MOD_COMPANION (or named "Companion") and search them.
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent != i) continue;
+			AstNode* comp = &pr.nodes[j];
+			if (comp.kind != OBJECT_DECL) continue;
+			bool is_companion = (comp.mod_flags & ast::MOD_COMPANION) != 0
+				|| comp.name == "Companion" || comp.name.len == 0;
+			if (!is_companion) continue;
+			for (uint k = 0; k < pr.node_count; k++) {
+				if (pr.nodes[k].parent != j) continue;
+				AstNode* m = &pr.nodes[k];
+				if (m.name != member_name) continue;
+				if (m.kind != PROPERTY_DECL && m.kind != FUN_DECL) continue;
+				if (out_decl_idx != null) *out_decl_idx = k;
+				if (m.type_text.len > 0) return parse_type_text(m.type_text);
+				if (m.kind == FUN_DECL) {
+					// Companion factory `fun new(...): Foo` may have implicit
+					// return type matching the enclosing class — return class-ref
+					// of the enclosing class as a heuristic when type_text empty.
+					return { .kind = SIMPLE, .name = recv_name };
+				}
+				return TYPE_UNKNOWN;
+			}
+		}
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
+ * Substitute class type-parameters in a member's declared type using the
+ * receiver's bound type-arguments (Kotlin spec §11.1.7 propagation through
+ * member access). For `class Box<T>(val v: T) { fun get(): T }`, given a
+ * receiver `Box<Int>`, substitutes T → Int in the member's return type.
+ *
+ * Mirrors substitute_user_type_params but binds from the receiver's
+ * type_arg_names[] rather than from call-arg positions.
+ */
+fn TypeRef substitute_class_type_params(ParseResult* pr, uint class_decl_idx,
+		TypeRef receiver, TypeRef declared) {
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != class_decl_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return declared;
+
+	TypeRef out = declared;
+	for (usz t = 0; t < tp_count && t < receiver.type_arg_count; t++) {
+		String binding = receiver.type_arg_names[t];
+		bool binding_nullable = receiver.type_arg_nullable[t];
+		// Skip if receiver still carries unbound TP placeholder identical to TP name
+		if (binding == tp_names[t]) continue;
+		if (binding.len == 0) continue;
+		if (out.name == tp_names[t]) {
+			out.name = binding;
+			if (binding_nullable) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = binding;
+				if (binding_nullable) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
 }
 
 // ── Generic type argument propagation helpers ──────────────────────
@@ -2283,6 +3648,39 @@ fn TypeRef make_map_with_receiver_args(TypeRef receiver) {
 /**
  * Resolve the type of a member access on a known type.
  */
+/**
+ * Whether `name` denotes Throwable or one of the well-known stdlib
+ * exception subtypes (mirrors STDLIB_SUPERTYPES exception block).
+ * Used to expose Throwable instance API (message/cause/...) on bare
+ * `catch (e: T)` parameters without dep-index lookup (Kotlin spec
+ * §11.1.4 + §17.2).
+ */
+fn bool is_throwable_type(String name) {
+	if (name.len == 0) return false;
+	switch (name) {
+		case "Throwable":
+		case "Exception":
+		case "RuntimeException":
+		case "Error":
+		case "IllegalArgumentException":
+		case "IllegalStateException":
+		case "NullPointerException":
+		case "IndexOutOfBoundsException":
+		case "UnsupportedOperationException":
+		case "NoSuchElementException":
+		case "ConcurrentModificationException":
+		case "ArithmeticException":
+		case "ClassCastException":
+		case "NumberFormatException":
+		case "AssertionError":
+		case "OutOfMemoryError":
+		case "StackOverflowError":
+			return true;
+		default:
+			return false;
+	}
+}
+
 fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 	String type_name = receiver.name;
 
@@ -2424,6 +3822,37 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 		}
 	}
 
+	// Result members (Kotlin spec stdlib: kotlin.Result<T>)
+	if (type_name == "Result") {
+		if (member_name == "isSuccess" || member_name == "isFailure") return TYPE_BOOLEAN;
+		if (member_name == "getOrNull") {
+			return extract_element_type(receiver, true);  // T?
+		}
+		if (member_name == "getOrThrow" || member_name == "getOrDefault") {
+			return extract_element_type(receiver, false); // T
+		}
+		if (member_name == "exceptionOrNull") {
+			return { .kind = SIMPLE, .name = "Throwable", .nullable = true };
+		}
+		if (member_name == "getOrElse") {
+			return extract_element_type(receiver, false); // T (from default fn)
+		}
+		if (member_name == "fold" || member_name == "recover" || member_name == "recoverCatching") {
+			// fold transforms via two lambdas; return type unknown without analysis
+			return TYPE_UNKNOWN;
+		}
+		if (member_name == "map" || member_name == "mapCatching") {
+			// transforms T → R; return bare Result (R inferred elsewhere)
+			return { .kind = GENERIC, .name = "Result" };
+		}
+		if (member_name == "onSuccess" || member_name == "onFailure") {
+			return receiver;  // returns this Result<T> for chaining
+		}
+		if (member_name == "toString") return TYPE_STRING;
+		if (member_name == "hashCode") return TYPE_INT;
+		if (member_name == "equals") return TYPE_BOOLEAN;
+	}
+
 	// Map members
 	if (type_name == "Map" || type_name == "MutableMap" || type_name == "HashMap" || type_name == "LinkedHashMap") {
 		if (member_name == "size" || member_name == "count") return TYPE_INT;
@@ -2456,6 +3885,25 @@ fn TypeRef resolve_member_type(TypeRef receiver, String member_name) {
 		if (member_name == "toString") return TYPE_STRING;
 		if (member_name == "hashCode") return TYPE_INT;
 		if (member_name == "equals") return TYPE_BOOLEAN;
+	}
+
+	// Throwable + descendants (Kotlin spec §11.1.4 + §17.2). All
+	// share the Throwable instance API: message: String?, cause: Throwable?,
+	// stackTrace: Array<StackTraceElement>; printStackTrace(): Unit.
+	if (is_throwable_type(type_name)) {
+		if (member_name == "message") return TYPE_STRING_NULLABLE;
+		if (member_name == "cause") return { .kind = SIMPLE, .name = "Throwable", .nullable = true };
+		if (member_name == "localizedMessage") return TYPE_STRING_NULLABLE;
+		if (member_name == "stackTrace") {
+			return { .kind = GENERIC, .name = "Array", .type_arg_count = 1,
+			         .type_arg_names = { [0] = "StackTraceElement" } };
+		}
+		if (member_name == "printStackTrace") return TYPE_UNIT;
+		if (member_name == "addSuppressed" || member_name == "fillInStackTrace") return TYPE_UNIT;
+		if (member_name == "suppressed" || member_name == "suppressedExceptions") {
+			return { .kind = GENERIC, .name = "Array", .type_arg_count = 1,
+			         .type_arg_names = { [0] = "Throwable" } };
+		}
 	}
 
 	// Any members (available on all types)
@@ -2519,10 +3967,548 @@ fn TypeRef resolve_member_type_with_supertypes(TypeRef receiver, String member_n
  * a matching member declaration, returning its type_text as a TypeRef.
  * Also checks supertypes of the receiver class.
  */
-fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
+/**
+ * Infer cross-file class type-args at constructor call site by matching
+ * primary-ctor PARAM types (from workspace member cache) against call arg
+ * types (Kotlin spec §11.1.7). Mirrors in-file `infer_class_type_args`
+ * but operates on `MemberDecl[]` indexed by workspace.
+ *
+ * Returns UNKNOWN if any TP unbound AND call has args (defer pattern), so
+ * the multi-pass loop retries once arg types resolve. If TPs not declared
+ * (non-generic class) returns base unchanged.
+ */
+fn TypeRef infer_xfile_class_type_args(ParseResult* pr, TypeInfo* info,
+		String class_name, uint call_idx, TypeRef base) {
+	if (g_workspace == null) return base;
+
+	List{String}*? tps_opt = g_workspace.lookup_class_type_params(class_name);
+	if (catch tps_opt) return base;
+	if (tps_opt == null || tps_opt.len() == 0) return base;
+
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = tps_opt.len();
+	if (tp_count > MAX_TP) tp_count = MAX_TP;
+	for (usz t = 0; t < tp_count; t++) tp_names[t] = (*tps_opt)[t];
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	// Walk member cache for class, find PARAMs in indexed order
+	if (try members = g_workspace.member_cache.get_ref(class_name)) {
+		uint pp = 0;
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = &(*members)[i];
+			if (m.node_kind != PARAM) continue;
+			String pt = m.type_text;
+			// Top-level T match
+			bool top_bound = false;
+			for (usz t = 0; t < tp_count; t++) {
+				if (subst_known[t]) continue;
+				if (pt == tp_names[t]) {
+					TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+					if (arg.kind != UNKNOWN && arg.name.len > 0) {
+						// Preserve nested generics (see §9.1).
+						subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
+						subst_nullable[t] = arg.nullable;
+						subst_known[t] = true;
+						top_bound = true;
+					}
+				}
+			}
+			// Nested + supertype unification (skip FUNCTION-typed PARAMs)
+			if (!top_bound && pt.len > 0) {
+				TypeRef ptref = parse_type_text(pt);
+				if (ptref.kind != UNKNOWN && ptref.kind != FUNCTION
+					&& ptref.type_arg_count > 0) {
+					TypeRef arg = nth_call_arg_type(pr, info, call_idx, pp);
+					if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+						if (ptref.name == arg.name) {
+							unify_tps_into_subst(ptref, arg,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						} else {
+							TypeRef lifted = lift_to_supertype(arg, ptref.name);
+							if (lifted.kind != UNKNOWN) {
+								unify_tps_into_subst(ptref, lifted,
+									tp_names, &tp_count,
+									&subst_names, &subst_nullable, &subst_known);
+							}
+						}
+					}
+				}
+			}
+			pp++;
+		}
+	}
+
+	// Defer if any TP unbound + call has args
+	bool any_unbound = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) { any_unbound = true; break; }
+	}
+	if (any_unbound) {
+		uint arg_count = 0;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == call_idx
+				&& pr.nodes[j].kind == VALUE_ARGUMENT) arg_count++;
+		}
+		if (arg_count > 0) return TYPE_UNKNOWN;
+	}
+
+	TypeRef out = base;
+	out.kind = GENERIC;
+	out.type_arg_count = (uint)tp_count;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) {
+			out.type_arg_names[t] = subst_names[t];
+			out.type_arg_nullable[t] = subst_nullable[t];
+		} else {
+			out.type_arg_names[t] = tp_names[t];
+			out.type_arg_nullable[t] = false;
+		}
+	}
+	return out;
+}
+
+/**
+ * Infer cross-file FUN_DECL type-arguments by matching declared PARAM types
+ * (from cached workspace AST) against call arg types, then substitute into
+ * the function's return type. Mirrors `substitute_user_type_params` for the
+ * cross-file case (Kotlin spec §11.1.7).
+ *
+ * `fun <T> id(x: T): T = x` indexed in workspace; caller `id("hi")` →
+ * returns `String`. Top-level + nested + supertype + FUNCTION-type
+ * unification all supported.
+ *
+ * Returns UNKNOWN when ret references an unbound TP (defer pattern), so the
+ * caller's multi-pass loop retries once arg types resolve. Returns ret
+ * unchanged when no TPs declared or ret doesn't reference any TP.
+ */
+fn TypeRef infer_xfile_fun_type_args(ParseResult* pr, TypeInfo* info,
+		String fun_uri, String fun_name, uint fun_line, uint call_idx, TypeRef ret) {
+	if (g_workspace == null) return ret;
+
+	ParseResult*? other_pr_opt = g_workspace.get_cached_ast(fun_uri);
+	if (catch other_pr_opt) return ret;
+	if (other_pr_opt == null) return ret;
+	ParseResult* other_pr = other_pr_opt;
+
+	// Find FUN_DECL with matching name + line. Line is 0-based.
+	uint fun_idx = uint.max;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* n = &other_pr.nodes[j];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name != fun_name) continue;
+		if (n.name_line == fun_line) { fun_idx = j; break; }
+	}
+	if (fun_idx == uint.max) {
+		// Fallback: any FUN_DECL with this name (multiple-overloads not handled)
+		for (uint j = 0; j < other_pr.node_count; j++) {
+			AstNode* n = &other_pr.nodes[j];
+			if (n.kind == FUN_DECL && n.name == fun_name) { fun_idx = j; break; }
+		}
+		if (fun_idx == uint.max) return ret;
+	}
+
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return ret;
+
+	bool ret_uses_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (ret.name == tp_names[t]) { ret_uses_tp = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { ret_uses_tp = true; break; }
+		}
+		if (ret_uses_tp) break;
+	}
+	if (!ret_uses_tp) return ret;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	uint param_pos = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		// Top-level T match.
+		bool top_level_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		// Nested + supertype + FUNCTION-type unification.
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// Defer if ret references unbound TP.
+	bool incomplete = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) continue;
+		if (ret.name == tp_names[t]) { incomplete = true; break; }
+		for (uint a = 0; a < ret.type_arg_count; a++) {
+			if (ret.type_arg_names[a] == tp_names[t]) { incomplete = true; break; }
+		}
+		if (incomplete) break;
+	}
+	if (incomplete) return TYPE_UNKNOWN;
+
+	TypeRef out = ret;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) continue;
+		if (out.name == tp_names[t]) {
+			out.name = subst_names[t];
+			if (subst_nullable[t]) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = subst_names[t];
+				if (subst_nullable[t]) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
+/**
+ * Substitute a workspace class's TYPE_PARAMs in a member's declared type
+ * using the receiver's type-arg names (Kotlin spec §11.1.7).
+ *
+ * `class Bag<T>(val items: List<T>)` indexed in workspace.
+ * Receiver = Bag<Int>, member type = List<T> → substituted = List<Int>.
+ *
+ * Uses `WorkspaceIndex.lookup_class_type_params` to retrieve declared
+ * TP names. Substitutes:
+ *   - top-level `T` → receiver.type_arg_names[i] (when raw.name == TP)
+ *   - nested `List<T>` → `List<Int>` (when raw.type_arg_names[i] == TP)
+ *
+ * Skips unbound or empty cases — returns raw unchanged so caller can fall
+ * back to whatever the source said.
+ */
+/**
+ * Infer return type of a cross-file extension function with TYPE_PARAMs.
+ * `fun <U> List<U>.firstOr(d: U): U` — TPs come from the FUN_DECL itself,
+ * but may be bound by either receiver type-args (`List<Int>` → U=Int) or
+ * call args. (Kotlin spec §11.1.7.)
+ *
+ * Strategy: find the FUN_DECL in the cached AST (by name + line). Collect
+ * its TYPE_PARAMs. Bind TPs by unifying the parsed receiver text
+ * (`extra_text` like "List<U>") against the actual receiver TypeRef. Then
+ * unify each PARAM type against call args (mirroring substitute_user_type_params).
+ * Substitute bound TPs into the raw return type.
+ *
+ * Returns UNKNOWN to defer when ret references unbound TPs.
+ */
+fn TypeRef infer_xfile_ext_fn_return(String fun_uri, String fun_name, uint fun_line,
+		TypeRef receiver, ParseResult* pr, TypeInfo* info, uint call_idx, TypeRef raw_ret) {
+	if (g_workspace == null) return raw_ret;
+
+	ParseResult*? other_pr_opt = g_workspace.get_cached_ast(fun_uri);
+	if (catch other_pr_opt) return raw_ret;
+	if (other_pr_opt == null) return raw_ret;
+	ParseResult* other_pr = other_pr_opt;
+
+	// Find FUN_DECL by name + line; fallback to first match.
+	uint fun_idx = uint.max;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* n = &other_pr.nodes[j];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name != fun_name) continue;
+		if (n.name_line == fun_line) { fun_idx = j; break; }
+	}
+	if (fun_idx == uint.max) {
+		for (uint j = 0; j < other_pr.node_count; j++) {
+			AstNode* n = &other_pr.nodes[j];
+			if (n.kind == FUN_DECL && n.name == fun_name) { fun_idx = j; break; }
+		}
+		if (fun_idx == uint.max) return raw_ret;
+	}
+
+	const usz MAX_TP = 4;
+	String[MAX_TP] tp_names;
+	usz tp_count = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_PARAM) continue;
+		if (tp_count >= MAX_TP) break;
+		tp_names[tp_count++] = child.name;
+	}
+	if (tp_count == 0) return raw_ret;
+
+	bool ret_uses_tp = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (raw_ret.name == tp_names[t]) { ret_uses_tp = true; break; }
+		for (uint a = 0; a < raw_ret.type_arg_count; a++) {
+			if (raw_ret.type_arg_names[a] == tp_names[t]) { ret_uses_tp = true; break; }
+		}
+		if (ret_uses_tp) break;
+	}
+	if (!ret_uses_tp) return raw_ret;
+
+	String[MAX_TP] subst_names;
+	bool[MAX_TP] subst_nullable;
+	bool[MAX_TP] subst_known;
+	for (usz t = 0; t < tp_count; t++) subst_known[t] = false;
+
+	// Bind TPs from receiver: parse FUN_DECL.extra_text (e.g. "List<U>") and
+	// unify against receiver TypeRef. Top-level "T" form treats receiver as
+	// the bound directly.
+	String recv_text = other_pr.nodes[fun_idx].extra_text;
+	if (recv_text.len > 0 && receiver.kind != UNKNOWN && receiver.name.len > 0) {
+		// Top-level: receiver is just "T"
+		bool recv_top_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (recv_text == tp_names[t]) {
+				subst_names[t] = receiver.name;
+				subst_nullable[t] = receiver.nullable;
+				subst_known[t] = true;
+				recv_top_bound = true;
+			}
+		}
+		if (!recv_top_bound) {
+			TypeRef recv_tref = parse_type_text(recv_text);
+			if (recv_tref.kind != UNKNOWN && recv_tref.type_arg_count > 0
+				&& receiver.type_arg_count > 0) {
+				if (recv_tref.name == receiver.name) {
+					unify_tps_into_subst(recv_tref, receiver,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				} else {
+					TypeRef lifted = lift_to_supertype(receiver, recv_tref.name);
+					if (lifted.kind != UNKNOWN) {
+						unify_tps_into_subst(recv_tref, lifted,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					}
+				}
+			}
+		}
+	}
+
+	// Bind remaining TPs from call args.
+	uint param_pos = 0;
+	for (uint j = 0; j < other_pr.node_count; j++) {
+		AstNode* child = &other_pr.nodes[j];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != PARAM) continue;
+		String pt = child.type_text;
+		bool top_level_bound = false;
+		for (usz t = 0; t < tp_count; t++) {
+			if (subst_known[t]) continue;
+			if (pt == tp_names[t]) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.name.len > 0) {
+					// Preserve nested generics (Box<Int> not "Box");
+					// substitute_class_tps_from_receiver reparses on `<`
+					// (Kotlin spec §9.1).
+					subst_names[t] = arg.kind == GENERIC ? format_type(&arg) : arg.name;
+					subst_nullable[t] = arg.nullable;
+					subst_known[t] = true;
+					top_level_bound = true;
+				}
+			}
+		}
+		if (!top_level_bound && pt.len > 0) {
+			TypeRef param_tref = parse_type_text(pt);
+			if (param_tref.kind == FUNCTION) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind == FUNCTION) {
+					unify_function_tps_into_subst(param_tref, arg,
+						tp_names, &tp_count,
+						&subst_names, &subst_nullable, &subst_known);
+				}
+			} else if (param_tref.kind != UNKNOWN && param_tref.type_arg_count > 0) {
+				TypeRef arg = nth_call_arg_type(pr, info, call_idx, param_pos);
+				if (arg.kind != UNKNOWN && arg.type_arg_count > 0) {
+					if (param_tref.name == arg.name) {
+						unify_tps_into_subst(param_tref, arg,
+							tp_names, &tp_count,
+							&subst_names, &subst_nullable, &subst_known);
+					} else {
+						TypeRef lifted = lift_to_supertype(arg, param_tref.name);
+						if (lifted.kind != UNKNOWN) {
+							unify_tps_into_subst(param_tref, lifted,
+								tp_names, &tp_count,
+								&subst_names, &subst_nullable, &subst_known);
+						}
+					}
+				}
+			}
+		}
+		param_pos++;
+	}
+
+	// Defer if ret references unbound TP.
+	bool incomplete = false;
+	for (usz t = 0; t < tp_count; t++) {
+		if (subst_known[t]) continue;
+		if (raw_ret.name == tp_names[t]) { incomplete = true; break; }
+		for (uint a = 0; a < raw_ret.type_arg_count; a++) {
+			if (raw_ret.type_arg_names[a] == tp_names[t]) { incomplete = true; break; }
+		}
+		if (incomplete) break;
+	}
+	if (incomplete) return TYPE_UNKNOWN;
+
+	TypeRef out = raw_ret;
+	for (usz t = 0; t < tp_count; t++) {
+		if (!subst_known[t]) continue;
+		if (out.name == tp_names[t]) {
+			out.name = subst_names[t];
+			if (subst_nullable[t]) out.nullable = true;
+		}
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp_names[t]) {
+				out.type_arg_names[a] = subst_names[t];
+				if (subst_nullable[t]) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
+fn TypeRef substitute_class_tps_from_receiver(TypeRef raw, TypeRef receiver, String class_name) {
+	if (g_workspace == null) return raw;
+	if (receiver.type_arg_count == 0) return raw;
+
+	List{String}*? tps_opt = g_workspace.lookup_class_type_params(class_name);
+	if (catch tps_opt) return raw;
+	if (tps_opt == null || tps_opt.len() == 0) return raw;
+
+	usz n = tps_opt.len();
+	if (n > receiver.type_arg_count) n = receiver.type_arg_count;
+
+	TypeRef out = raw;
+	for (usz t = 0; t < n; t++) {
+		String tp = (*tps_opt)[t];
+		if (tp.len == 0) continue;
+		String binding = receiver.type_arg_names[t];
+		if (binding.len == 0) continue;
+		bool b_nullable = receiver.type_arg_nullable[t];
+		bool binding_is_generic = false;
+		for (usz i = 0; i < binding.len; i++) {
+			if (binding[i] == '<') { binding_is_generic = true; break; }
+		}
+
+		// Top-level: raw.name == TP. If binding is generic (e.g. "Box<Int>"),
+		// reparse so kind/type_arg_count/type_arg_names are populated;
+		// otherwise SIMPLE name swap is enough (Kotlin spec §9.1).
+		if (out.name == tp) {
+			if (binding_is_generic) {
+				TypeRef parsed = parse_type_text(binding);
+				bool was_nullable = out.nullable || b_nullable;
+				out = parsed;
+				if (was_nullable) out.nullable = true;
+			} else {
+				out.name = binding;
+				if (b_nullable) out.nullable = true;
+			}
+		}
+		// Nested: raw.type_arg_names[i] == TP. Slot stores name string only;
+		// nested generics inside a slot can't be expressed here, but for the
+		// bare-TP case the swap is correct.
+		for (uint a = 0; a < out.type_arg_count; a++) {
+			if (out.type_arg_names[a] == tp) {
+				out.type_arg_names[a] = binding;
+				if (b_nullable) out.type_arg_nullable[a] = true;
+			}
+		}
+	}
+	return out;
+}
+
+fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name,
+		ParseResult* pr = null, TypeInfo* info = null, uint call_idx = 0) {
 	if (g_workspace == null) return TYPE_UNKNOWN;
 	String type_name = receiver.name;
 	if (type_name.len == 0) return TYPE_UNKNOWN;
+
+	// Synthetic enum + data class members (Kotlin spec §11.2.4 data,
+	// §11.2.6 enum). Mirrors in-file resolve_in_file_member synthesis.
+	uint cls_flags = g_workspace.lookup_class_mod_flags(type_name);
+	if ((cls_flags & ast::MOD_ENUM) != 0) {
+		if (member_name == "name") return TYPE_STRING;
+		if (member_name == "ordinal") return TYPE_INT;
+		if (receiver.is_class_ref) {
+			if (member_name == "values") {
+				TypeRef arr = { .kind = GENERIC, .name = "Array", .type_arg_count = 1 };
+				arr.type_arg_names[0] = type_name;
+				return arr;
+			}
+			if (member_name == "valueOf") {
+				return { .kind = SIMPLE, .name = type_name };
+			}
+		}
+	}
+	if ((cls_flags & ast::MOD_DATA) != 0 && !receiver.is_class_ref && member_name == "copy") {
+		// .copy() returns the same class type with the same generics.
+		// `data class Box<T>(val v: T)`; `Box(1).copy(v=2)` → Box<Int>
+		// (Kotlin spec §11.2.4). Mirror receiver type args verbatim.
+		if (receiver.kind == GENERIC && receiver.type_arg_count > 0) {
+			TypeRef out = { .kind = GENERIC, .name = type_name, .type_arg_count = receiver.type_arg_count };
+			for (usz i = 0; i < receiver.type_arg_count; i++) {
+				out.type_arg_names[i] = receiver.type_arg_names[i];
+				out.type_arg_nullable[i] = receiver.type_arg_nullable[i];
+			}
+			return out;
+		}
+		return { .kind = SIMPLE, .name = type_name };
+	}
 
 	// Direct lookup in member cache
 	if (try members = g_workspace.member_cache.get_ref(type_name)) {
@@ -2530,7 +4516,20 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 			MemberDecl* m = &(*members)[i];
 			if (m.name == member_name) {
 				if (m.type_text.len > 0) {
-					return parse_type_text(m.type_text);
+					TypeRef raw = parse_type_text(m.type_text);
+					// Extension-fn TP substitution from receiver + call args
+					// (Kotlin spec §11.1.7). Mirrors top-level cross-file path.
+					if (m.node_kind == FUN_DECL && pr != null && call_idx > 0) {
+						TypeRef ext_subst = infer_xfile_ext_fn_return(
+							m.uri, m.name, m.line, receiver, pr, info, call_idx, raw);
+						if (ext_subst.kind != UNKNOWN) {
+							// Also apply class-TP substitution for non-fn TPs
+							return substitute_class_tps_from_receiver(ext_subst, receiver, type_name);
+						}
+						// Defer: incomplete substitution
+						return TYPE_UNKNOWN;
+					}
+					return substitute_class_tps_from_receiver(raw, receiver, type_name);
 				}
 				// Function with no explicit return type — assume Unit
 				if (m.node_kind == FUN_DECL) return TYPE_UNIT;
@@ -2577,7 +4576,10 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name) {
 			for (usz j = 0; j < super_members.len(); j++) {
 				MemberDecl* m = &(*super_members)[j];
 				if (m.name == member_name) {
-					if (m.type_text.len > 0) return parse_type_text(m.type_text);
+					if (m.type_text.len > 0) {
+						TypeRef raw = parse_type_text(m.type_text);
+						return substitute_class_tps_from_receiver(raw, receiver, st);
+					}
 					if (m.node_kind == FUN_DECL) return TYPE_UNIT;
 					return TYPE_UNKNOWN;
 				}
@@ -2902,9 +4904,6 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 		return TYPE_BOOLEAN;
 	}
 
-	if (op == "..") return { .kind = SIMPLE, .name = "IntRange" };
-
-	// Elvis: T? ?: T -> non-nullable T
 	if (op == "?:") {
 		uint child_count = 0;
 		for (uint j = 0; j < pr.node_count; j++) {
@@ -2925,15 +4924,29 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 		return TYPE_UNKNOWN;
 	}
 
-	// Arithmetic
-	if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+	// Arithmetic — try operator method lookup first (user/data class plus/minus/etc.),
+	// fall back to left-operand type for primitives where stdlib member table covers it.
+	if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == ".." || op == "..<") {
+		TypeRef left_t = TYPE_UNKNOWN;
 		for (uint j = 0; j < pr.node_count; j++) {
 			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				TypeRef left_type = info.node_types[j];
-				if (op == "+" && left_type.name == "String") return TYPE_STRING;
-				return left_type;
+				left_t = info.node_types[j];
+				break;
 			}
 		}
+		if (left_t.kind == UNKNOWN) return TYPE_UNKNOWN;
+		String method = binary_op_method(op);
+		if (method.len > 0) {
+			// String "+" stays special: Kotlin spec says String + Any → String
+			if (op == "+" && left_t.name == "String") return TYPE_STRING;
+			TypeRef looked_up = resolve_member_type(left_t, method);
+			if (looked_up.kind == UNKNOWN) {
+				looked_up = lookup_member_anywhere(pr, info, left_t, method);
+			}
+			if (looked_up.kind != UNKNOWN) return looked_up;
+		}
+		// Fallback: assume same type as left (legacy behaviour for unknown receivers)
+		return left_t;
 	}
 
 	// Infix function calls
@@ -2961,7 +4974,44 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 	}
 	if (op == "until" || op == "downTo") return { .kind = SIMPLE, .name = "IntRange" };
 
+	// Generic infix call: `a NAME b` where NAME is a user-defined infix
+	// function (member or extension) on left receiver. Kotlin spec §17.6
+	// (infix function calls). Lookup uses standard cascade; matches only
+	// on name (overload by parameter type not modelled).
+	if (op.len > 0 && is_identifier_op(op)) {
+		TypeRef left_t = TYPE_UNKNOWN;
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == idx && info.has_type[j]) {
+				left_t = info.node_types[j];
+				break;
+			}
+		}
+		if (left_t.kind != UNKNOWN) {
+			TypeRef looked_up = lookup_member_anywhere(pr, info, left_t, op);
+			if (looked_up.kind != UNKNOWN) return looked_up;
+		}
+	}
+
 	return TYPE_UNKNOWN;
+}
+
+/**
+ * True when `op` looks like an identifier (alphanumeric + underscore,
+ * starts with letter or underscore) — i.e. likely an infix function
+ * name rather than a punctuation operator.
+ */
+fn bool is_identifier_op(String op) {
+	if (op.len == 0) return false;
+	char c0 = op[0];
+	bool first_ok = (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_';
+	if (!first_ok) return false;
+	for (usz i = 1; i < op.len; i++) {
+		char c = op[i];
+		bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		       || (c >= '0' && c <= '9') || c == '_';
+		if (!ok) return false;
+	}
+	return true;
 }
 
 // ── Prefix expression resolution ───────────────────────────────────
@@ -2969,15 +5019,36 @@ fn TypeRef resolve_binary_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 fn TypeRef resolve_prefix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	String op = node.extra_text;
 
-	if (op == "!") return TYPE_BOOLEAN;
-
-	if (op == "-" || op == "+" || op == "++" || op == "--") {
-		for (uint j = 0; j < pr.node_count; j++) {
-			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				return info.node_types[j];
-			}
+	// Find operand type once
+	TypeRef operand = TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			operand = info.node_types[j];
+			break;
 		}
 	}
+
+	// `!` is always Boolean per spec (Boolean operand required), but try
+	// user-defined `not` first for other types (e.g. custom BitSet).
+	if (op == "!") {
+		if (operand.kind != UNKNOWN && operand.name != "Boolean") {
+			TypeRef looked_up = lookup_member_anywhere(pr, info, operand, "not");
+			if (looked_up.kind != UNKNOWN) return looked_up;
+		}
+		return TYPE_BOOLEAN;
+	}
+
+	String method = unary_op_method(op);
+	if (method.len > 0 && operand.kind != UNKNOWN) {
+		TypeRef looked_up = resolve_member_type(operand, method);
+		if (looked_up.kind == UNKNOWN) {
+			looked_up = lookup_member_anywhere(pr, info, operand, method);
+		}
+		if (looked_up.kind != UNKNOWN) return looked_up;
+	}
+
+	// Fallback: legacy behaviour — operand type for unary +/- and pre-inc/dec
+	if (op == "-" || op == "+" || op == "++" || op == "--") return operand;
 
 	return TYPE_UNKNOWN;
 }
@@ -2987,22 +5058,31 @@ fn TypeRef resolve_prefix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, A
 fn TypeRef resolve_postfix_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
 	String op = node.extra_text;
 
-	if (op == "!!") {
-		for (uint j = 0; j < pr.node_count; j++) {
-			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				TypeRef inner = info.node_types[j];
-				inner.nullable = false;
-				return inner;
-			}
+	// Find operand type once
+	TypeRef operand = TYPE_UNKNOWN;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx && info.has_type[j]) {
+			operand = info.node_types[j];
+			break;
 		}
 	}
 
+	if (op == "!!") {
+		operand.nullable = false;
+		return operand;
+	}
+
+	// Postfix `++` / `--` — try operator method, fall back to operand type
 	if (op == "++" || op == "--") {
-		for (uint j = 0; j < pr.node_count; j++) {
-			if (pr.nodes[j].parent == idx && info.has_type[j]) {
-				return info.node_types[j];
+		String method = unary_op_method(op);
+		if (method.len > 0 && operand.kind != UNKNOWN) {
+			TypeRef looked_up = resolve_member_type(operand, method);
+			if (looked_up.kind == UNKNOWN) {
+				looked_up = lookup_member_anywhere(pr, info, operand, method);
 			}
+			if (looked_up.kind != UNKNOWN) return looked_up;
 		}
+		return operand;
 	}
 
 	return TYPE_UNKNOWN;
@@ -3168,6 +5248,101 @@ fn TypeRef resolve_try_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstN
 }
 
 /**
+ * Resolve type of a LAMBDA_EXPR node into a FUNCTION TypeRef.
+ *
+ * Builds the function type from:
+ *  - PARAM children (parameter types from explicit annotations; "?" if missing)
+ *  - body's last-expression type as the return type
+ *
+ * Used so `val f = { ... }` infers `f` as a function type, and so a later
+ * `f(args)` call can return the lambda body's type.
+ */
+fn TypeRef resolve_lambda_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	TypeRef result = { .kind = FUNCTION, .name = "Function" };
+
+	// Collect parameter type texts from PARAM children (in source order).
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (result.param_type_count >= MAX_TYPE_ARGS) break;
+
+		String pt = pr.nodes[j].type_text;
+		result.param_type_names[result.param_type_count] = pt.len > 0 ? pt : "?";
+		result.param_type_count++;
+	}
+
+	// Return type: last expression of body. Skip PARAM children.
+	TypeRef body_type = last_expr_type_in(pr, info, idx, true);
+	if (body_type.kind != UNKNOWN && body_type.name.len > 0) {
+		result.return_type_name = body_type.name;
+	} else {
+		result.return_type_name = "Unit";
+	}
+
+	return result;
+}
+
+
+/**
+ * Build a FUNCTION TypeRef from a FUN_DECL's PARAMs + return type.
+ * Used by callable-reference resolution (`::name`, `Type::name`).
+ */
+fn TypeRef function_type_from_fun_decl(ParseResult* pr, uint fun_decl_idx) {
+	TypeRef result = { .kind = FUNCTION, .name = "Function" };
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent != fun_decl_idx) continue;
+		if (pr.nodes[j].kind != PARAM) continue;
+		if (result.param_type_count >= MAX_TYPE_ARGS) break;
+		String pt = pr.nodes[j].type_text;
+		result.param_type_names[result.param_type_count] = pt.len > 0 ? pt : "?";
+		result.param_type_count++;
+	}
+	String rt = pr.nodes[fun_decl_idx].type_text;
+	result.return_type_name = rt.len > 0 ? rt : "Unit";
+	return result;
+}
+
+/**
+ * Resolve a CALLABLE_REF_EXPR node (`::name` or `Type::name`) into a FUNCTION TypeRef
+ * (Kotlin spec §16.30.5). Bare `::name` looks up FUN_DECL via scope chain then
+ * top-level. `Type::name` resolves the receiver child's type and looks up the
+ * method via lookup_member_anywhere; v1 returns a minimal FUNCTION TypeRef with
+ * just the return type populated.
+ */
+fn TypeRef resolve_callable_ref_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
+	if (node.name.len == 0) return TYPE_UNKNOWN;
+
+	// Check for receiver child (Type::name form).
+	uint recv_child = ast::NO_PARENT;
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].parent == idx) { recv_child = j; break; }
+	}
+
+	if (recv_child != ast::NO_PARENT) {
+		// Type::name form: look up method on receiver type.
+		if (!info.has_type[recv_child]) return TYPE_UNKNOWN;
+		TypeRef recv = info.node_types[recv_child];
+		TypeRef ret = lookup_member_anywhere(pr, info, recv, node.name);
+		if (ret.kind == UNKNOWN) return TYPE_UNKNOWN;
+		TypeRef result = { .kind = FUNCTION, .name = "Function" };
+		result.return_type_name = ret.name.len > 0 ? ret.name : "Unit";
+		return result;
+	}
+
+	// Bare ::name form: scope-chain lookup, then top-level FUN_DECL fallback.
+	uint decl = find_decl_in_scope_chain(pr, idx, node.name);
+	if (decl != ast::NO_PARENT && pr.nodes[decl].kind == FUN_DECL) {
+		return function_type_from_fun_decl(pr, decl);
+	}
+	for (uint j = 0; j < pr.node_count; j++) {
+		if (pr.nodes[j].kind != FUN_DECL) continue;
+		if (pr.nodes[j].name != node.name) continue;
+		return function_type_from_fun_decl(pr, j);
+	}
+	return TYPE_UNKNOWN;
+}
+
+/**
  * Find last expression type inside a parent node.
  * Descends into BLOCK children. Skips PARAM nodes when skip_params is true.
  */
@@ -3204,6 +5379,9 @@ fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, As
 				// List<T>[i] → T, etc.
 				return { .kind = SIMPLE, .name = receiver.type_arg_names[0] };
 			}
+			// User-defined `operator fun get(...)` lookup per Kotlin spec §9.6.
+			TypeRef getter = lookup_member_anywhere(pr, info, receiver, "get");
+			if (getter.kind != UNKNOWN) return getter;
 			break;
 		}
 	}
@@ -3211,6 +5389,106 @@ fn TypeRef resolve_index_expr_type(ParseResult* pr, TypeInfo* info, uint idx, As
 }
 
 // ── Helper: common supertype ───────────────────────────────────────
+
+/**
+ * Build the supertype chain (including the type itself) in BFS order.
+ * Stdlib hierarchy via STDLIB_SUPERTYPES, workspace via g_workspace
+ * symbol supertypes. Caps at `cap` entries. Last entry is always "Any".
+ *
+ * Returns the number of names written to `out`.
+ */
+fn usz collect_supertype_chain(String name, String[] out, usz cap) {
+	if (name.len == 0 || cap == 0) return 0;
+	usz n = 0;
+	out[n++] = name;
+
+	// BFS using `out` itself as visited set
+	usz cursor = 0;
+	while (cursor < n && n < cap) {
+		String cur = out[cursor++];
+
+		// Stdlib first
+		bool found_stdlib = false;
+		foreach (entry : STDLIB_SUPERTYPES) {
+			if (entry.name == cur) {
+				found_stdlib = true;
+				for (usz s = 0; s < entry.super_count && n < cap; s++) {
+					String sup = entry.supertypes[s];
+					if (sup.len == 0) continue;
+					bool seen = false;
+					for (usz i = 0; i < n; i++) if (out[i] == sup) { seen = true; break; }
+					if (!seen) out[n++] = sup;
+				}
+				break;
+			}
+		}
+		if (found_stdlib) continue;
+
+		// Workspace lookup
+		if (g_workspace == null) continue;
+		if (try indices = g_workspace.lookup_by_name(cur)) {
+			for (usz i = 0; i < indices.len() && n < cap; i++) {
+				WorkspaceSymbol* sym = g_workspace.get_symbol((*indices)[i]);
+				for (usz s = 0; s < sym.supertype_count && n < cap; s++) {
+					String sup = sym.supertypes[s];
+					if (sup.len == 0) continue;
+					bool seen = false;
+					for (usz k = 0; k < n; k++) if (out[k] == sup) { seen = true; break; }
+					if (!seen) out[n++] = sup;
+				}
+			}
+		}
+	}
+
+	// Ensure Any is reachable
+	bool has_any = false;
+	for (usz i = 0; i < n; i++) if (out[i] == "Any") { has_any = true; break; }
+	if (!has_any && n < cap) out[n++] = "Any";
+	return n;
+}
+
+/**
+ * Compute the least upper bound (LUB) of N type names.
+ * Returns the most specific common supertype, walking stdlib + workspace.
+ * Falls back to "Any" when no shared ancestor is found.
+ *
+ * Used by multi-condition `when` arms (Kotlin spec §16.30): the subject
+ * narrows to the LUB of the arm's `is T` conditions.
+ */
+fn TypeRef compute_lub_of_names(String[] names, usz count, bool any_nullable) {
+	if (count == 0) return TYPE_UNKNOWN;
+	if (count == 1) {
+		TypeRef r = { .kind = SIMPLE, .name = names[0] };
+		r.nullable = any_nullable;
+		return r;
+	}
+
+	String[32] chain0;
+	usz chain0_len = collect_supertype_chain(names[0], &chain0, 32);
+
+	// For each candidate in chain0 (in BFS order = closest-first), check
+	// if every other name has it in their chain. First hit = LUB.
+	String[32] chain_n;
+	for (usz c = 0; c < chain0_len; c++) {
+		String cand = chain0[c];
+		bool common = true;
+		for (usz i = 1; i < count; i++) {
+			usz ln = collect_supertype_chain(names[i], &chain_n, 32);
+			bool found = false;
+			for (usz k = 0; k < ln; k++) if (chain_n[k] == cand) { found = true; break; }
+			if (!found) { common = false; break; }
+		}
+		if (common) {
+			TypeRef r = { .kind = SIMPLE, .name = cand };
+			r.nullable = any_nullable;
+			return r;
+		}
+	}
+
+	TypeRef any_r = TYPE_ANY;
+	any_r.nullable = any_nullable;
+	return any_r;
+}
 
 fn TypeRef common_type(TypeRef a, TypeRef b) {
 	if (a.kind == UNKNOWN) return b;

@@ -582,12 +582,22 @@ fn Object* resolve_dep_definition(DepSymbol* sym) {
 		return null; // No source available
 	}
 
-	// Find the source entry in the JAR
+	// Find the source entry in the JAR.
+	// Special case: StandardKt members (scope functions) live in Standard.kt
+	// under a multiplatform layout; use the dedicated finder.
 	String entry_name;
-	if (try e = find_source_entry_in_jar(source_jar, sym.package_name, sym.class_name)) {
-		entry_name = e;
+	if (sym.class_name == "StandardKt") {
+		if (try e = find_standard_kt_entry(source_jar)) {
+			entry_name = e;
+		} else {
+			return null;
+		}
 	} else {
-		return null;
+		if (try e = find_source_entry_in_jar(source_jar, sym.package_name, sym.class_name)) {
+			entry_name = e;
+		} else {
+			return null;
+		}
 	}
 
 	// Extract to cache
@@ -673,78 +683,76 @@ fn bool is_scope_function(String name) {
  * Returns an LSP Location or null if sources are not available.
  */
 fn Object* find_scope_function_definition(DependencyIndex* dep_index, String member_name) {
-	if (dep_index == null || !dep_index.initialized) return null;
+	DepSymbol* sym = find_or_synthesize_scope_function_symbol(dep_index, member_name);
+	if (sym == null) return null;
+	return resolve_dep_definition(sym);
+}
 
-	// Find the kotlin-stdlib jar_path by looking up the StandardKt class.
-	// StandardKt is the public facade class — it's always indexed even though
-	// it has no methods (the actual inline methods are private in __StandardKt).
+/**
+ * Find or synthesize a DepSymbol for a Kotlin scope function (apply, let,
+ * also, run, takeIf, takeUnless). Scope functions are inline so the actual
+ * methods are private in StandardKt__StandardKt.class and not indexed.
+ * We synthesize a stub DEP_METHOD pointing at kotlin/StandardKt so the
+ * standard resolve_dep_definition path can navigate into Standard.kt.
+ *
+ * Subsequent lookups reuse the synthesized symbol via name_index, giving
+ * stable indices across the session for TokenTarget identity.
+ *
+ * Returns null when stdlib is not on the classpath or the member is not
+ * a known scope function.
+ */
+fn DepSymbol* find_or_synthesize_scope_function_symbol(DependencyIndex* dep_index, String member_name) {
+	if (dep_index == null || !dep_index.initialized) return null;
+	if (!is_scope_function(member_name)) return null;
+
+	// Look for an existing synthetic entry first
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(member_name, &matches);
+	for (usz i = 0; i < count; i++) {
+		if (matches[i].class_name == "StandardKt" && matches[i].kind == DEP_METHOD) {
+			return matches[i];
+		}
+	}
+
+	// Need a stdlib jar to synthesize against
 	String stdlib_jar = find_kotlin_stdlib_jar(dep_index);
 	if (stdlib_jar.len == 0) return null;
 
-	// Derive the sources JAR path
-	String source_jar = derive_source_jar_path(stdlib_jar);
-	if (source_jar.len == 0) return null;
+	// Append synthetic symbol. Strings must outlive the index — use heap copies.
+	// jar_path is copied (not shared) to avoid aliasing the source symbol's
+	// jar_path pointer; DependencyIndex.free handles owned (shared=false) ptrs.
+	dep_index.index_mutex.lock();
+	defer dep_index.index_mutex.unlock();
 
-	// Scan the sources JAR for an entry ending with "/Standard.kt" or exactly "Standard.kt"
-	String entry_name;
-	if (try e = find_standard_kt_entry(source_jar)) {
-		entry_name = e;
+	usz new_idx = dep_index.symbols.len();
+	String name_h = member_name.copy(mem);
+	String pkg_h = "kotlin".copy(mem);
+	String cls_h = "StandardKt".copy(mem);
+	String jar_h = stdlib_jar.copy(mem);
+	DepSymbol sym = {
+		.name = name_h,
+		.signature = "",
+		.package_name = pkg_h,
+		.class_name = cls_h,
+		.jar_path = jar_h,
+		.kind = DEP_METHOD,
+		.jar_path_shared = false,
+		.is_static = false,
+		.supertype_count = 0,
+	};
+	dep_index.symbols.push(sym);
+
+	// Register in name_index so future lookups find it
+	if (try list_ref = dep_index.name_index.get_ref(name_h)) {
+		list_ref.push(new_idx);
 	} else {
-		return null;
+		List{usz} new_list;
+		new_list.init(mem);
+		new_list.push(new_idx);
+		dep_index.name_index.set(name_h, new_list);
 	}
 
-	// Extract to cache
-	String extracted_path;
-	if (try p = extract_source_to_cache(source_jar, entry_name)) {
-		extracted_path = p;
-	} else {
-		return null;
-	}
-	defer mem::free(extracted_path.ptr);
-
-	// Read the extracted source
-	char[] source_data;
-	if (try d = file::load(tmem, extracted_path)) {
-		source_data = d;
-	} else {
-		return null;
-	}
-	String source_content = (String)source_data;
-
-	// Find the symbol position in the source.
-	// Use DEP_METHOD kind so find_symbol_position looks for "fun <name>".
-	// For extension functions like "fun <T> T.apply(...)", the primary
-	// pattern won't match (prev token is "." not "fun"), but the fallback
-	// finds the first identifier occurrence which lands on the declaration.
-	uint sym_line = 0;
-	uint sym_col = 0;
-	if (!find_symbol_position(source_content, member_name, DEP_METHOD, &sym_line, &sym_col)) {
-		sym_line = 0;
-		sym_col = 0;
-	}
-
-	// Build the LSP Location
-	DString uri_ds;
-	uri_ds.tinit();
-	uri_ds.appendf("file://%s", extracted_path);
-
-	Object* start = object::new_obj(tmem);
-	start.set("line", (int)sym_line);
-	start.set("character", (int)sym_col);
-
-	Object* end_pos = object::new_obj(tmem);
-	end_pos.set("line", (int)sym_line);
-	end_pos.set("character", (int)(sym_col + member_name.len));
-
-	Object* range = object::new_obj(tmem);
-	range.set("start", start);
-	range.set("end", end_pos);
-
-	Object* location = object::new_obj(tmem);
-	location.set("uri", uri_ds.str_view());
-	location.set("range", range);
-
-	return location;
+	return &dep_index.symbols[new_idx];
 }
 
 /**

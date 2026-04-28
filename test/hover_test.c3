@@ -812,3 +812,45 @@ fn void hover_jvmoverloads_annotation_displayed() @test {
 			"expected '@JvmOverloads' in hover signature, got: '%s'", value);
 	};
 }
+
+// ── Operator-token hover (Phase 7 of operator-call ticket) ────────────
+
+fn void hover_binary_plus_shows_operator_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "class Vec(val x: Int) {\n    operator fun plus(other: Vec): Vec = Vec(x + other.x)\n}\nfun f() {\n    val a = Vec(1); val b = Vec(2); val c = a + b\n}";
+		store.open("file:///op.kt", "kotlin", 1, content);
+
+		// Cursor on `+` on line 4, col 46
+		Object* params = make_hover_params("file:///op.kt", 4, 46);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+		assert(result != null, "expected hover result for +");
+
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("plus"), "expected 'plus' in hover, got: '%s'", value);
+	};
+}
+
+fn void hover_index_bracket_shows_get_signature() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "class Box {\n    operator fun get(i: Int): Int = i\n}\nfun f() {\n    val b = Box(); val v = b[0]\n}";
+		store.open("file:///idx.kt", "kotlin", 1, content);
+
+		// `[` on line 4, col 28
+		Object* params = make_hover_params("file:///idx.kt", 4, 28);
+		Object* result = hover::handle_hover(&store, null, params)!!;
+		assert(result != null, "expected hover result for [");
+
+		Object* contents = result.get("contents")!!;
+		String value = contents.get_string("value")!!;
+		assert(value.contains("get"), "expected 'get' in hover, got: '%s'", value);
+	};
+}

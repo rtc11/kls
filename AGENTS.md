@@ -49,7 +49,7 @@ kls/
       lifecycle.c3            # kls::lsp::lifecycle - initialize, shutdown handlers
       sync.c3                 # kls::lsp::sync - didOpen, didChange, didClose (triggers diagnostics)
       capabilities.c3         # kls::lsp::capabilities - server capability declarations
-      diagnostics.c3          # kls::lsp::diagnostics - publishDiagnostics (lexer + parser errors, unused imports/locals, deprecated usage)
+      diagnostics.c3          # kls::lsp::diagnostics - publishDiagnostics (lexer + parser errors, unused imports/locals, deprecated usage, smart-cast-impossible)
       hover.c3                # kls::lsp::hover - textDocument/hover (keywords, AST signatures, dep docs)
       completion.c3           # kls::lsp::completion - textDocument/completion (keywords, identifiers, cross-file)
       definition.c3           # kls::lsp::definition - textDocument/definition (scope-aware, cross-file, dep sources)
@@ -81,11 +81,14 @@ kls/
       ast.c3                  # kls::kotlin::ast - AST node types, ParseResult, tree queries
       parser.c3               # kls::kotlin::parser - Recursive-descent parser (flat AST with parents)
       symbols.c3              # kls::kotlin::symbols - Lightweight declaration symbol scanner
-      types.c3                # kls::kotlin::types - Type representation (TypeRef, TypeKind), inference/resolution
+      types.c3                # kls::kotlin::types - Type representation (TypeRef, TypeKind), inference/resolution + flow-sensitive smart cast
       stdlib.c3               # kls::kotlin::stdlib - Built-in Kotlin stdlib symbol table for completions/hover
+      contracts.c3            # kls::kotlin::contracts - Kotlin contracts DSL (returns()/implies/callsInPlace) effect extraction + stdlib contract table
       incremental.c3          # kls::kotlin::incremental - Incremental re-parsing (chunk-based top-level decls)
       token_cache.c3          # kls::kotlin::token_cache - Cached token streams, binary-search splice on edit
       jdk_symbols.c3          # kls::kotlin::jdk_symbols - Hard-coded JDK symbol table (java.lang, java.util)
+      cfg.c3                  # kls::kotlin::cfg - Per-function CFG construction (if/when/while/for/try/return/throw/break/continue)
+      flow.c3                 # kls::kotlin::flow - Dataflow analysis (worklist solver, smart cast facts, cross-lambda inheritance)
     deps/
       classpath.c3            # kls::deps::classpath - Build system detection (Gradle/Maven), JAR resolution
       classfile.c3            # kls::deps::classfile - JVM .class file parser (constant pool, descriptors)
@@ -147,8 +150,12 @@ kls/
     javadoc_test.c3           # Javadoc extraction tests
     classfile_test.c3         # Class file parser tests
     stdlib_test.c3            # Stdlib symbol tests
+    contracts_test.c3         # Kotlin contracts DSL extraction + stdlib contract narrowing tests
     kotlin_fallback_test.c3   # Kotlin fallback detection tests
     source_nav_test.c3        # Source navigation tests
+    cfg_test.c3               # CFG construction tests
+    flow_test.c3              # Dataflow analysis tests
+    smart_cast_diagnostic_test.c3 # Smart-cast-impossible diagnostic tests
     cross_file_completion_test.c3  # Cross-file completion tests
     cross_file_hover_test.c3       # Cross-file hover tests
     cross_file_references_test.c3  # Cross-file references tests
@@ -175,6 +182,34 @@ kls/
 **LSP Handlers** (`lsp/`): Each feature in own file. Cross-file features use workspace index + dep symbols.
 
 **DAP Debug Adapter** (`dap/`): `--dap` mode runs DapServer instead of LSP Server. Same Content-Length framing (reuses json_rpc). Spawns/attaches JVM with JDWP agent. JDWP binary protocol over TCP for breakpoints, stepping, variable inspection. IdManager maps between JDWP 8-byte IDs and DAP integer IDs. Poll loop multiplexes stdin (DAP messages) + JDWP socket (VM events) + process output.
+
+### Flow Analysis (smart casts)
+
+**CFG** (`kotlin/cfg.c3`): Per-function control-flow graphs covering `if`/`when`/`while`/`do-while`/`for`/`try`/`return`/`throw`/`break`/`continue`. Built once per function-like declaration (FUN_DECL, CONSTRUCTOR_DECL, INIT_BLOCK, LAMBDA_EXPR, ANONYMOUS_FUN_EXPR). Each AST stmt gets a CFG STATEMENT node; conditions get COND nodes with `succ[0]` = true branch, `succ[1]` = false branch. `Cfg.cfg_node_for(ast_idx)` looks up the CFG node owning a given AST node.
+
+**Dataflow** (`kotlin/flow.c3`): Worklist solver over the CFG with `FlowState` carrying up to `MAX_FACTS_PER_STATE` per-name `Fact`s. Transfer functions extract narrowing facts from `x is T` / `x !is T` / `x == null` / `x != null` (with conjunction/disjunction support), `x!!`, `requireNotNull(x)`, `x ?: return …`. Meet-over-paths fixpoint with TOP/BOTTOM lattice. `analyze_with_entry(pr, cfg, initial)` seeds the entry state from a caller-supplied snapshot — used to inherit enclosing-function facts into nested lambda CFGs at the lambda's lexical position so labeled-return null guards propagate across lambda boundaries.
+
+**Wiring** (`kotlin/types.c3`): Phase 9 of `resolve_types` calls `build_function_flows` to construct one `FunctionFlow {cfg, fa}` per function-like decl plus an `enclosing_func` map for every AST node. Phase 10 clears NAME_EXPR/DOT_EXPR `has_type` bits and re-runs expression + initializer + destructuring resolution so val/var bindings see narrowed types. `resolve_name_expr_type` calls `lookup_smart_cast_fact` then applies the **stability gate** (`is_stable_for_smart_cast`):
+- Function PARAM and primary-ctor `val` PARAM are stable. Primary-ctor `var` PARAM (PARAM with MOD_VAR) is treated as a member var → unstable.
+- Local val is always stable.
+- Local var is stable only when the use site is in the same function as the declaration (i.e. not captured by a nested lambda).
+- Top-level / member val is stable iff: not `var`, not `open`, AND no custom `get()` accessor (`property_has_custom_getter` checks for a FUN_DECL child named "get"). Top-level var is never stable.
+- Cross-file member-property smart casts also depend on `b.x` resolving to a type, which goes through the workspace member-resolution path; in-file bare-name access to top-level vals already narrows.
+
+**Member-property smart cast** (`kotlin/types.c3:resolve_dot_expr_type` + `kotlin/flow.c3`): `b.x` and `this.x` narrow via flow facts keyed by `(receiver_name, member_name)` tuple. `Fact.member_name` is empty for bare-name facts (legacy single-key behaviour). `dotted_name_of_expr` recognises NAME_EXPR / THIS_EXPR / one-level DOT_EXPR — multi-level (`a.b.c`) is not narrowed. `kill_receiver(name)` invalidates all `name.*` member facts on receiver reassignment. `member_access_is_stable` requires both receiver decl AND member decl to pass the stability gate; cross-file members (where in-file class lookup misses) are conservatively denied.
+
+Memory: every `mem::free(*.cached_types)` must be preceded by `types::free_type_info(...)` which calls `clear_flow` to release the per-function `Cfg`/`FlowAnalysis`.
+
+**Diagnostic** (`lsp/diagnostics.c3`): `add_smart_cast_impossible_diagnostics` walks NAME_EXPR and DOT_EXPR uses; if a flow fact would narrow the (bare or `recv.member`) name but the stability gate fails (`is_stable_for_smart_cast` for bare names, `types::member_access_is_stable` for member access), emits a Warning ("Smart cast to T is impossible…"). DOT_EXPR path requires receiver to be NAME_EXPR or THIS_EXPR; skips writes (LHS of ASSIGNMENT_EXPR). Shared `emit_smart_cast_impossible_named` helper handles both paths. Gated by `config::smart_cast_diagnostic` (default true, key: `smartCastDiagnostic` in initializationOptions).
+
+**Contracts** (`kotlin/contracts.c3`): Kotlin contracts DSL (`kotlin.contracts.*`) effect extraction and consumption.
+- `ContractEffect` models `returns() implies (cond)`, `returns(true|false|null) implies (cond)`, and `callsInPlace(lambda, KIND)`.
+- `STDLIB_CONTRACTS` table hardcodes effects for `requireNotNull`, `checkNotNull`, `require`, `check`, `isNullOrEmpty`, `isNullOrBlank` so flow analysis narrows at stdlib call sites without parsing kotlin-stdlib source.
+- `extract_user_contracts(pr, fun_decl_idx, out)` walks a FUN_DECL's body, finds the leading `contract { ... }` call (no new AST kinds — uses regular CALL_EXPR + LAMBDA_EXPR + BINARY_EXPR("implies")), and decodes each statement into a `ContractEffect`. `implies` was added to the parser infix whitelist (`parser.c3:is_known_infix_function`).
+- `flow.c3:apply_call_contracts` consumes `RETURNS_IMPLIES` effects with `rv == ANY_RETURN` at statement-position calls. PRED_NOT_NULL / PRED_IS_TYPE assert facts directly. PRED_BOOL_PARAM additionally inspects the actual call argument for `x != null` / `x is T` shapes via `propagate_boolean_arg_narrowing`, replacing the previous hardcoded `requireNotNull` / `checkNotNull` / `require` / `check` paths.
+- Conditional-position narrowing for `returns(true|false) implies (cond)` is wired through `flow.c3:apply_call_cond_contracts` (called from `apply_cond_facts` when the condition is a CALL_EXPR). RETURN_TRUE feeds the true branch, RETURN_FALSE feeds the false branch, ANY_RETURN feeds both (postcondition of normal completion). `negated` flag from `unwrap_negation` flips branch assignment so `if (!s.isNullOrEmpty()) s.length` narrows `s` to non-null in the then-branch.
+- `callsInPlace` is parsed and stored but not yet consumed (lambda-exit fact join deferred).
+- User-defined contract consumption at call sites is wired in-file: `flow.c3:collect_contracts_for_callee` first checks `STDLIB_CONTRACTS`, then scans the same `ParseResult` for FUN_DECLs whose name matches and runs `extract_user_contracts` on each match. Both statement-position (`apply_call_contracts`) and conditional-position (`apply_call_cond_contracts`) consumers route through the unified collector. Cross-file (workspace-resolved) callee contracts are deferred — would require lifting contract collection into a higher pass that has access to `workspace::g_workspace` (kotlin → workspace would invert layering).
 
 ## C3 Coding Conventions
 
@@ -403,6 +438,7 @@ DONE (Phase 0–2 of Tier-3 refactor):
 
 NOT DONE (deferred):
 1. **`@JvmStatic` / Java-interop semantic effect** — currently displayed cosmetically in `build_signature` (`@JvmStatic`/`@JvmField`/`@JvmOverloads`/`@JvmName` shown in hover). No resolution semantics: workspace already exposes companion members via `from_companion`, deps already get the synthetic static method from kotlinc-emitted bytecode. KLS does not serve Java callers, so no further effect needed.
+2. **Label references / rename** — labeled loops (`outer@ for`), labeled lambdas (`label@ { ... }`), and implicit fun-name labels resolve via `definition::find_label_target` (go-to-def works). References (`textDocument/references`) and rename for `@label` usages are not yet wired; the existing identifier-based references/rename paths skip `AT label` tokens entirely.
 
 ## Key References
 

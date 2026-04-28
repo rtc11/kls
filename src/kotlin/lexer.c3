@@ -444,7 +444,7 @@ fn Token Lexer.lex_number(Lexer* self, usz start, uint start_line, uint start_co
 		if (self.pos < self.source.len && (self.peek() == '+' || self.peek() == '-')) {
 			self.advance();
 		}
-		while (self.pos < self.source.len && is_digit(self.peek())) {
+		while (self.pos < self.source.len && (is_digit(self.peek()) || self.peek() == '_')) {
 			self.advance();
 		}
 	}
@@ -655,14 +655,20 @@ fn Token Lexer.lex_char(Lexer* self, usz start, uint start_line, uint start_col)
 		if (self.pos < self.source.len) {
 			if (self.peek() == 'u') {
 				self.advance(); // 'u'
-				// Consume up to 4 hex digits for \uXXXX
-				for (int i = 0; i < 4 && self.pos < self.source.len; i++) {
-					char hc = self.peek();
-					if (is_hex_digit(hc) && hc != '_') {
-						self.advance();
-					} else {
-						break;
-					}
+				// Kotlin spec §16.5: \uXXXX requires exactly 4 hex digits,
+				// underscores not allowed. We do not advance past invalid
+				// escapes (let the closing `'` mismatch surface as a parse
+				// error downstream).
+				usz peek_pos = self.pos;
+				int valid = 0;
+				while (valid < 4 && peek_pos < self.source.len) {
+					char hc = self.source[peek_pos];
+					if (!is_hex_digit(hc) || hc == '_') break;
+					valid++;
+					peek_pos++;
+				}
+				if (valid == 4) {
+					for (int i = 0; i < 4; i++) self.advance();
 				}
 			} else {
 				self.advance(); // single escaped char (\n, \t, \\, etc.)
