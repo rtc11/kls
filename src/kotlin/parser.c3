@@ -386,6 +386,17 @@ fn void Parser.add_error(Parser* self, String message) {
 	self.result.error_count++;
 }
 
+fn void Parser.discard_errors_since(Parser* self, usz start) {
+	if (start >= self.result.error_count) return;
+	for (usz i = start; i < self.result.error_count; i++) {
+		if (self.result.errors[i].message.len > 0) {
+			mem::free((void*)self.result.errors[i].message.ptr);
+			self.result.errors[i].message = "";
+		}
+	}
+	self.result.error_count = start;
+}
+
 /**
  * Set the start span of a node from a token.
  */
@@ -1229,6 +1240,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
 		uint type_end = self.previous.offset + self.previous.len;
 		if (type_end > type_start) {
 			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			self.attach_type_ref_child_from_text(idx, type_start, type_end, "return");
 		}
 	}
 
@@ -1428,6 +1440,7 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 		uint type_end = self.previous.offset + self.previous.len;
 		if (type_end > type_start) {
 			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			self.attach_type_ref_child_from_text(idx, type_start, type_end);
 		}
 	}
 
@@ -1604,6 +1617,7 @@ fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
 		uint type_end = self.previous.offset + self.previous.len;
 		if (type_end > type_start) {
 			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			self.attach_type_ref_child_from_text(idx, type_start, type_end);
 		}
 	}
 
@@ -1671,15 +1685,15 @@ fn void Parser.parse_type_params(Parser* self) {
 				uint bound_start = self.current.offset;
 
 				uint bound_idx = self.add_node(TYPE_REF);
-				self.node_start(bound_idx, self.current);
+				self.result.nodes[bound_idx].parent = idx;
 
 				self.skip_type_param_bound_ref();
 				uint bound_end = self.previous.offset + self.previous.len;
 				if (bound_end > last_end) last_end = bound_end;
 				if (bound_end > bound_start) {
 					self.result.nodes[bound_idx].type_text = self.source[bound_start:bound_end - bound_start];
+					self.fill_type_ref_from_text(bound_idx, bound_start, bound_end);
 				}
-				self.node_end(bound_idx);
 
 				if (!self.eat(AMP)) break;
 				last_end = self.current.offset;
@@ -1730,6 +1744,7 @@ fn void Parser.parse_type_args(Parser* self) {
 			self.advance(); // consume '*'
 			uint type_end = self.previous.offset + self.previous.len;
 			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			self.attach_type_ref_child_from_text(idx, type_start, type_end, "arg", mods);
 		} else {
 			// Type reference
 			uint type_start = self.current.offset;
@@ -1738,6 +1753,7 @@ fn void Parser.parse_type_args(Parser* self) {
 			if (type_end > type_start) {
 				String type_text = self.source[type_start:type_end - type_start];
 				self.result.nodes[idx].type_text = type_text;
+				self.attach_type_ref_child_from_text(idx, type_start, type_end, "arg", mods);
 				// Set name to simple identifier if it's just a name
 				self.result.nodes[idx].name = type_text;
 			}
@@ -1840,6 +1856,7 @@ fn void Parser.parse_where_clause(Parser* self) {
 				uint type_end = self.previous.offset + self.previous.len;
 				if (type_end > type_start) {
 					self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+					self.attach_type_ref_child_from_text(idx, type_start, type_end);
 				}
 			}
 
@@ -2301,6 +2318,7 @@ fn void Parser.parse_when_entry_conditions(Parser* self, uint entry_idx) {
 			uint type_end = self.previous.offset + self.previous.len;
 			if (type_end > type_start) {
 				self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+				self.attach_type_ref_child_from_text(idx, type_start, type_end);
 			}
 			self.node_end(idx);
 		} else if (self.at(KW_IN) || self.at(NOT_IN)) {
@@ -2417,6 +2435,7 @@ fn void Parser.parse_for_stmt(Parser* self) {
 						uint type_end = self.previous.offset + self.previous.len;
 						if (type_end > type_start) {
 							self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+							self.attach_type_ref_child_from_text(param_idx, type_start, type_end);
 						}
 					}
 					self.node_end(param_idx);
@@ -2440,6 +2459,7 @@ fn void Parser.parse_for_stmt(Parser* self) {
 				uint type_end = self.previous.offset + self.previous.len;
 				if (type_end > type_start) {
 					self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+					self.attach_type_ref_child_from_text(param_idx, type_start, type_end);
 				}
 			}
 			self.node_end(param_idx);
@@ -3381,6 +3401,7 @@ fn uint Parser.parse_anonymous_fun_expr(Parser* self) {
 		uint type_end = self.previous.offset + self.previous.len;
 		if (type_end > type_start) {
 			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			self.attach_type_ref_child_from_text(idx, type_start, type_end, "return");
 		}
 	}
 
@@ -3457,6 +3478,7 @@ fn void Parser.parse_lambda_params(Parser* self) {
 				uint type_end = self.previous.offset + self.previous.len;
 				if (type_end > type_start) {
 					self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+					self.attach_type_ref_child_from_text(param_idx, type_start, type_end);
 				}
 			}
 
@@ -3485,6 +3507,7 @@ fn void Parser.parse_lambda_params(Parser* self) {
 							uint type_end = self.previous.offset + self.previous.len;
 							if (type_end > type_start) {
 								self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+								self.attach_type_ref_child_from_text(param_idx, type_start, type_end);
 							}
 						}
 						self.node_end(param_idx);
@@ -3970,6 +3993,7 @@ fn uint Parser.parse_type_check(Parser* self, uint left) {
 	uint type_end = self.previous.offset + self.previous.len;
 	if (type_end > type_start) {
 		self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+		self.attach_type_ref_child_from_text(idx, type_start, type_end);
 	}
 
 	self.node_end(idx);
@@ -3997,6 +4021,7 @@ fn uint Parser.parse_type_cast(Parser* self, uint left) {
 	uint type_end = self.previous.offset + self.previous.len;
 	if (type_end > type_start) {
 		self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+		self.attach_type_ref_child_from_text(idx, type_start, type_end);
 	}
 
 	self.node_end(idx);
@@ -4042,6 +4067,294 @@ fn void Parser.skip_balanced_parens(Parser* self) {
 		self.advance();
 	}
 	self.expect(RPAREN);
+}
+
+fn bool Parser.peek_group_followed_by_arrow(Parser* self) {
+	if (!self.at(LPAREN)) return false;
+	String save_source = self.source;
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	usz save_error_count = self.result.error_count;
+	self.skip_balanced_parens();
+	bool result = self.at(ARROW);
+	self.source = save_source;
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.discard_errors_since(save_error_count);
+	return result;
+}
+
+fn bool Parser.peek_top_level_intersection(Parser* self) {
+	String save_source = self.source;
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	usz save_error_count = self.result.error_count;
+	self.skip_type_param_bound_ref();
+	bool result = self.at(AMP);
+	self.source = save_source;
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.discard_errors_since(save_error_count);
+	return result;
+}
+
+fn String type_role_marker(String role, bool nullable) {
+	if (role.len == 0) return nullable ? "nullable" : "";
+	switch (role) {
+		case "param": return nullable ? "param nullable" : "param";
+		case "return": return nullable ? "return nullable" : "return";
+		case "receiver": return nullable ? "receiver nullable" : "receiver";
+		case "arg": return nullable ? "arg nullable" : "arg";
+		default: return nullable ? "nullable" : role;
+	}
+}
+
+fn void Parser.mark_nullable_type_role(Parser* self, uint idx) {
+	String marker = self.result.nodes[idx].extra_text;
+	if (marker == "") {
+		self.result.nodes[idx].extra_text = "nullable";
+		return;
+	}
+	switch (marker) {
+		case "param": self.result.nodes[idx].extra_text = "param nullable";
+		case "return": self.result.nodes[idx].extra_text = "return nullable";
+		case "receiver": self.result.nodes[idx].extra_text = "receiver nullable";
+		case "arg": self.result.nodes[idx].extra_text = "arg nullable";
+		case "function": self.result.nodes[idx].extra_text = "function nullable";
+		case "intersection": self.result.nodes[idx].extra_text = "intersection nullable";
+		default: {}
+	}
+}
+
+fn void Parser.finish_structured_type_ref(Parser* self, uint idx, Token start_tok,
+		String marker = "") {
+	self.node_start(idx, start_tok);
+	self.node_end(idx);
+	uint start = self.result.nodes[idx].start_offset;
+	uint end = self.result.nodes[idx].end_offset;
+	if (end > start && end <= self.source.len) {
+		self.result.nodes[idx].type_text = self.source[start:end - start];
+	}
+	self.result.nodes[idx].extra_text = marker;
+}
+
+fn void Parser.parse_structured_type_ref_existing(Parser* self, uint idx,
+		String role = "", uint mods = ast::MOD_NONE) {
+	Token start_tok = self.current;
+	if (self.peek_top_level_intersection()) {
+		self.result.nodes[idx].kind = TYPE_REF;
+		self.result.nodes[idx].mod_flags = mods;
+		uint children_start = self.result.node_count;
+		while (true) {
+			uint member_start = self.current.offset;
+			uint member_idx = self.add_node(TYPE_REF);
+			self.result.nodes[member_idx].parent = idx;
+			self.skip_type_param_bound_ref();
+			uint member_end = self.previous.offset + self.previous.len;
+			if (member_end > member_start) {
+				self.fill_type_ref_from_text(member_idx, member_start, member_end);
+			}
+			if (!self.eat(AMP)) break;
+		}
+		bool nullable = false;
+		while (self.eat(QUEST)) nullable = true;
+		self.adopt_children(idx, children_start);
+		self.finish_structured_type_ref(idx, start_tok,
+			nullable ? "intersection nullable" : "intersection");
+		return;
+	}
+
+	bool saw_suspend = false;
+	if (self.at(KW_SUSPEND)) {
+		mods |= ast::MOD_SUSPEND;
+		saw_suspend = true;
+		start_tok = self.current;
+		self.advance();
+	}
+
+	if (self.at(LPAREN) && !self.peek_group_followed_by_arrow()) {
+		self.advance();
+		self.parse_structured_type_ref_existing(idx, role, mods);
+		self.expect(RPAREN);
+		bool nullable = false;
+		while (self.eat(QUEST)) nullable = true;
+		if (nullable) self.mark_nullable_type_role(idx);
+		self.result.nodes[idx].mod_flags |= mods;
+		self.node_start(idx, start_tok);
+		self.node_end(idx);
+		self.result.nodes[idx].type_text = self.source[start_tok.offset:
+			self.result.nodes[idx].end_offset - start_tok.offset];
+		return;
+	}
+
+	if (self.at(LPAREN) && self.peek_group_followed_by_arrow()) {
+		self.result.nodes[idx].kind = TYPE_REF;
+		self.result.nodes[idx].mod_flags = mods;
+		uint children_start = self.result.node_count;
+		self.advance();
+		while (!self.at(RPAREN) && !self.at_eof()) {
+			self.parse_structured_type_ref_node(idx, "param");
+			if (!self.eat(COMMA)) break;
+		}
+		self.expect(RPAREN);
+		if (self.eat(ARROW)) {
+			self.parse_structured_type_ref_node(idx, "return");
+		}
+		bool nullable = false;
+		while (self.eat(QUEST)) nullable = true;
+		self.adopt_children(idx, children_start);
+		self.finish_structured_type_ref(idx, start_tok,
+			nullable ? "function nullable" : "function");
+		return;
+	}
+
+	self.result.nodes[idx].kind = TYPE_REF;
+	self.result.nodes[idx].mod_flags = mods;
+	uint children_start = self.result.node_count;
+	if (self.at_identifier() || self.at(KW_DYNAMIC)) {
+		Token name_tok = self.current;
+		self.node_set_name(idx, name_tok);
+		self.advance();
+		while (self.eat(DOT)) {
+			if (!self.at_identifier()) break;
+			name_tok = self.current;
+			self.node_set_name(idx, name_tok);
+			self.advance();
+		}
+		if (self.at(LANGLE)) {
+			self.advance();
+			while (!self.at(RANGLE) && !self.at_eof()) {
+				uint arg_mods = ast::MOD_NONE;
+				if (self.eat(KW_IN)) {
+					arg_mods |= ast::MOD_IN;
+				} else if (self.eat(KW_OUT)) {
+					arg_mods |= ast::MOD_OUT;
+				}
+				if (self.at(MULT)) {
+					uint star_idx = self.add_node(TYPE_REF);
+					self.result.nodes[star_idx].parent = idx;
+					self.result.nodes[star_idx].mod_flags = arg_mods;
+					Token star_tok = self.current;
+					self.result.nodes[star_idx].name = "*";
+					self.advance();
+					self.finish_structured_type_ref(star_idx, star_tok, type_role_marker("arg", false));
+				} else {
+					self.parse_structured_type_ref_node(idx, "arg", arg_mods);
+				}
+				if (!self.eat(COMMA)) break;
+			}
+			if (self.at(RANGLE)) self.advance();
+		}
+	}
+	bool nullable = false;
+	while (self.eat(QUEST)) nullable = true;
+	if (self.previous.kind == DOT && self.at(LPAREN)) {
+		uint original_parent = self.result.nodes[idx].parent;
+		uint fn_idx = self.add_node(TYPE_REF);
+		self.result.nodes[fn_idx].parent = original_parent;
+		self.result.nodes[fn_idx].mod_flags = mods;
+		uint fn_children_start = idx;
+		self.result.nodes[idx].parent = fn_idx;
+		self.result.nodes[idx].extra_text = type_role_marker("receiver", nullable);
+		self.advance();
+		while (!self.at(RPAREN) && !self.at_eof()) {
+			self.parse_structured_type_ref_node(fn_idx, "param");
+			if (!self.eat(COMMA)) break;
+		}
+		self.expect(RPAREN);
+		if (self.eat(ARROW)) {
+			self.parse_structured_type_ref_node(fn_idx, "return");
+		}
+		bool fn_nullable = false;
+		while (self.eat(QUEST)) fn_nullable = true;
+		self.adopt_children(fn_idx, fn_children_start);
+		self.finish_structured_type_ref(fn_idx, start_tok,
+			fn_nullable ? "function nullable" : "function");
+		if (saw_suspend) self.result.nodes[fn_idx].mod_flags |= ast::MOD_SUSPEND;
+		return;
+	}
+	self.adopt_children(idx, children_start);
+	self.finish_structured_type_ref(idx, start_tok, type_role_marker(role, nullable));
+	if (saw_suspend) self.result.nodes[idx].mod_flags |= ast::MOD_SUSPEND;
+}
+
+fn uint Parser.parse_structured_type_ref_node(Parser* self, uint parent_idx,
+		String role = "", uint mods = ast::MOD_NONE) {
+	uint idx = self.add_node(TYPE_REF);
+	self.result.nodes[idx].parent = parent_idx;
+	self.parse_structured_type_ref_existing(idx, role, mods);
+	return idx;
+}
+
+fn uint Parser.attach_type_ref_child_from_text(Parser* self, uint parent_idx,
+		uint abs_start, uint abs_end, String role = "", uint mods = ast::MOD_NONE) {
+	if (abs_end <= abs_start || abs_end > self.source.len) return ast::NO_PARENT;
+
+	String save_source = self.source;
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	usz save_error_count = self.result.error_count;
+
+	String slice = save_source[abs_start:abs_end - abs_start];
+	self.source = slice;
+	self.lexer = lexer::init(slice);
+	self.current = self.lexer.next();
+	self.previous = self.current;
+
+	uint first_idx = self.result.node_count;
+	uint idx = self.parse_structured_type_ref_node(parent_idx, role, mods);
+	for (uint i = first_idx; i < self.result.node_count; i++) {
+		self.result.nodes[i].start_offset += abs_start;
+		self.result.nodes[i].end_offset += abs_start;
+		if (self.result.nodes[i].name_len > 0) {
+			self.result.nodes[i].name_offset += abs_start;
+		}
+	}
+
+	self.source = save_source;
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.discard_errors_since(save_error_count);
+	return idx;
+}
+
+fn void Parser.fill_type_ref_from_text(Parser* self, uint idx,
+		uint abs_start, uint abs_end, String role = "", uint mods = ast::MOD_NONE) {
+	if (abs_end <= abs_start || abs_end > self.source.len) return;
+
+	String save_source = self.source;
+	Lexer save_lexer = self.lexer;
+	Token save_current = self.current;
+	Token save_previous = self.previous;
+	usz save_error_count = self.result.error_count;
+
+	String slice = save_source[abs_start:abs_end - abs_start];
+	self.source = slice;
+	self.lexer = lexer::init(slice);
+	self.current = self.lexer.next();
+	self.previous = self.current;
+
+	uint first_idx = idx;
+	self.parse_structured_type_ref_existing(idx, role, mods);
+	for (uint i = first_idx; i < self.result.node_count; i++) {
+		self.result.nodes[i].start_offset += abs_start;
+		self.result.nodes[i].end_offset += abs_start;
+		if (self.result.nodes[i].name_len > 0) {
+			self.result.nodes[i].name_offset += abs_start;
+		}
+	}
+
+	self.source = save_source;
+	self.lexer = save_lexer;
+	self.current = save_current;
+	self.previous = save_previous;
+	self.discard_errors_since(save_error_count);
 }
 
 /**
@@ -4412,6 +4725,7 @@ fn void Parser.parse_property_accessor(Parser* self) {
 					uint type_end = self.previous.offset + self.previous.len;
 					if (type_end > type_start) {
 						self.result.nodes[param_idx].type_text = self.source[type_start:type_end - type_start];
+						self.attach_type_ref_child_from_text(param_idx, type_start, type_end);
 					}
 				}
 				self.node_end(param_idx);
@@ -4429,6 +4743,7 @@ fn void Parser.parse_property_accessor(Parser* self) {
 		uint type_end = self.previous.offset + self.previous.len;
 		if (type_end > type_start) {
 			self.result.nodes[idx].type_text = self.source[type_start:type_end - type_start];
+			self.attach_type_ref_child_from_text(idx, type_start, type_end, "return");
 		}
 	}
 

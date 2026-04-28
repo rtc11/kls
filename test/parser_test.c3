@@ -1403,21 +1403,45 @@ fn AstNode* fun_block(ParseResult* r, AstNode* fun_node) {
 
 // Find the first child of a given kind
 fn AstNode* find_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
-	for (uint i = 0; i < parent.child_count; i++) {
-		AstNode* ch = ast::get_child(r, parent, i)!!;
-		if (ch.kind == kind) return ch;
+	uint parent_idx = ast::node_index(r, parent);
+	for (uint i = 0; i < r.node_count; i++) {
+		AstNode* ch = &r.nodes[i];
+		if (ch.parent == parent_idx && ch.kind == kind) return ch;
 	}
 	unreachable("expected child of kind %d", (int)kind);
 }
 
 // Count children of a given kind
 fn usz count_kind(ParseResult* r, AstNode* parent, NodeKind kind) {
+	uint parent_idx = ast::node_index(r, parent);
 	usz count = 0;
-	for (uint i = 0; i < parent.child_count; i++) {
-		AstNode* ch = ast::get_child(r, parent, i)!!;
-		if (ch.kind == kind) count++;
+	for (uint i = 0; i < r.node_count; i++) {
+		AstNode* ch = &r.nodes[i];
+		if (ch.parent == parent_idx && ch.kind == kind) count++;
 	}
 	return count;
+}
+
+fn AstNode* nth_kind(ParseResult* r, AstNode* parent, NodeKind kind, uint n) {
+	uint parent_idx = ast::node_index(r, parent);
+	uint count = 0;
+	for (uint i = 0; i < r.node_count; i++) {
+		AstNode* ch = &r.nodes[i];
+		if (ch.parent != parent_idx || ch.kind != kind) continue;
+		if (count == n) return ch;
+		count++;
+	}
+	unreachable("expected child %d of kind %d", (int)n, (int)kind);
+}
+
+fn AstNode* first_type_ref_child(ParseResult* r, AstNode* parent) {
+	uint parent_idx = ast::node_index(r, parent);
+	for (uint i = 0; i < r.node_count; i++) {
+		if (r.nodes[i].parent == parent_idx && r.nodes[i].kind == TYPE_REF) {
+			return &r.nodes[i];
+		}
+	}
+	unreachable("expected TYPE_REF child");
 }
 
 // ── Local val/var inside function body ──────────────────────────────
@@ -4614,6 +4638,75 @@ fn void parse_type_args_use_site_variance() @test {
 		assert(arg_count == 2, "expected 2 TYPE_ARG, got %d", (int)arg_count);
 	};
 }
+
+// ── T11: TYPE_REF dual-storage sub-AST ──────────────────────────────
+
+fn void type_ref_simple_param_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(x: Int) {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode* param = nth_kind(r, fun, PARAM, 0);
+		assert(param.type_text == "Int", "expected param type_text 'Int', got '%s'", param.type_text);
+		uint tr_idx = ast::node_index(r, param) + 1;
+		AstNode* tr = &r.nodes[tr_idx];
+		assert(tr.parent == ast::node_index(r, param) && tr.kind == TYPE_REF, "expected adjacent TYPE_REF child");
+		assert(tr.name == "Int", "expected TYPE_REF name 'Int', got '%s'", tr.name);
+		assert(tr.child_count == 0, "expected no TYPE_REF children, got %d", (int)tr.child_count);
+	};
+}
+
+fn void type_ref_generic_return_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(): List<String> = listOf()"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		assert(fun.type_text == "List<String>", "expected return type_text 'List<String>', got '%s'", fun.type_text);
+		AstNode* tr = first_type_ref_child(r, fun);
+		assert(tr.name == "List", "expected TYPE_REF name 'List', got '%s'", tr.name);
+		assert(count_kind(r, tr, TYPE_REF) == 1, "expected 1 TYPE_REF child, got %d", (int)count_kind(r, tr, TYPE_REF));
+		AstNode* arg = nth_kind(r, tr, TYPE_REF, 0);
+		assert(arg.name == "String", "expected type arg name 'String', got '%s'", arg.name);
+		assert(arg.extra_text == "arg", "expected type arg marker 'arg', got '%s'", arg.extra_text);
+	};
+}
+
+// T11 deferred — function-type TYPE_REF shape WIP.
+
+// T11 deferred — suspend function-type TYPE_REF shape WIP.
+
+fn void type_ref_intersection_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun <T> f(x: T): T & Any = x!!"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		assert(fun.type_text == "T & Any", "expected return type_text 'T & Any', got '%s'", fun.type_text);
+		AstNode* tr = first_type_ref_child(r, fun);
+		assert(tr.extra_text == "intersection", "expected intersection marker, got '%s'", tr.extra_text);
+		assert(count_kind(r, tr, TYPE_REF) == 2, "expected 2 intersection members, got %d", (int)count_kind(r, tr, TYPE_REF));
+		assert(nth_kind(r, tr, TYPE_REF, 0).name == "T", "expected first intersection member T");
+		assert(nth_kind(r, tr, TYPE_REF, 1).name == "Any", "expected second intersection member Any");
+	};
+}
+
+fn void type_ref_variance_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("class Box<T>(val items: Array<out T>)"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* cls = child(r, file_node(r), 0);
+		AstNode* param = nth_kind(r, cls, PARAM, 0);
+		assert(param.type_text == "Array<out T>", "expected param type_text 'Array<out T>', got '%s'", param.type_text);
+		uint tr_idx = ast::node_index(r, param) + 1;
+		AstNode* tr = &r.nodes[tr_idx];
+		assert(tr.parent == ast::node_index(r, param) && tr.kind == TYPE_REF, "expected adjacent TYPE_REF child");
+		assert(tr.name == "Array", "expected TYPE_REF name 'Array', got '%s'", tr.name);
+		AstNode* arg = nth_kind(r, tr, TYPE_REF, 0);
+		assert(arg.name == "T", "expected type arg name 'T', got '%s'", arg.name);
+		assert((arg.mod_flags & ast::MOD_OUT) != 0, "expected MOD_OUT on variance type arg");
+	};
+}
+
+// T11 deferred — deeply nested generic TYPE_REF traversal WIP.
 
 // ── WHERE_CONSTRAINT nodes ─────────────────────────────────────────
 
