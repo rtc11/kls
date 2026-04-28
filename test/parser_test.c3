@@ -3719,6 +3719,62 @@ fn void parse_property_getter_and_setter() @test {
 	};
 }
 
+fn void parse_property_getter_field_marker() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+`class Foo {
+    var x: Int = 0
+        get() = field
+}`
+		); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		bool found_field = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "field") {
+				assert(r.nodes[i].extra_text == "field",
+					"expected getter field NAME_EXPR extra_text='field', got '%s'", r.nodes[i].extra_text);
+				found_field = true;
+			}
+		}
+		assert(found_field, "expected NAME_EXPR 'field' in getter body");
+	};
+}
+
+fn void parse_property_setter_field_marker() @test {
+	@pool() {
+		ParseResult* r = do_parse(
+`class Foo {
+    var x: Int = 0
+        set(v) { field = v }
+}`
+		); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		bool found_field = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "field") {
+				assert(r.nodes[i].extra_text == "field",
+					"expected setter field NAME_EXPR extra_text='field', got '%s'", r.nodes[i].extra_text);
+				found_field = true;
+			}
+		}
+		assert(found_field, "expected NAME_EXPR 'field' in setter body");
+	};
+}
+
+fn void parse_field_outside_accessor_no_marker() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun foo() { val field = 1; print(field) }"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		bool found_use = false;
+		for (uint i = 0; i < r.node_count; i++) {
+			if (r.nodes[i].kind == NAME_EXPR && r.nodes[i].name == "field" && r.nodes[i].extra_text != "field") {
+				found_use = true;
+			}
+		}
+		assert(found_use, "expected regular NAME_EXPR 'field' without backing-field marker");
+	};
+}
+
 fn void parse_property_setter_with_typed_param() @test {
 	@pool() {
 		String content =

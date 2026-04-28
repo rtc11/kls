@@ -16,6 +16,7 @@ struct Parser {
 	String last_annotations;  // set by parse_modifiers, read by declaration parsers
 	bool allow_angle_comparison;  // when true, treat < > as comparison in expressions
 	bool in_when_body;            // when true, break expression at newline-`is`/`!is` (Kotlin spec §16.30 entry separator)
+	bool in_accessor_body;        // when true, `field` names backing field inside accessor bodies
 	bool is_script;  // when true, allow top-level statements/expressions (.kts files)
 
 	// User-defined infix function names. Populated by `parse()` from a quick
@@ -3060,6 +3061,9 @@ fn uint Parser.parse_name_expr(Parser* self) {
 	uint idx = self.add_node(NAME_EXPR);
 	self.node_start(idx, self.current);
 	self.node_set_name(idx, self.current);
+	if (self.in_accessor_body && self.current.text == "field") {
+		self.result.nodes[idx].extra_text = "field";
+	}
 	self.advance(); // consume identifier/soft keyword
 	self.node_end(idx);
 	return idx;
@@ -4300,9 +4304,15 @@ fn void Parser.parse_property_accessor(Parser* self) {
 
 	// Body: block or expression-body
 	if (self.at(LCURL)) {
+		bool save_in_accessor_body = self.in_accessor_body;
+		self.in_accessor_body = true;
 		self.parse_block();
+		self.in_accessor_body = save_in_accessor_body;
 	} else if (self.eat(ASSIGNMENT)) {
+		bool save_in_accessor_body = self.in_accessor_body;
+		self.in_accessor_body = true;
 		self.parse_expression_body();
+		self.in_accessor_body = save_in_accessor_body;
 	}
 
 	self.adopt_children(idx, children_start);
