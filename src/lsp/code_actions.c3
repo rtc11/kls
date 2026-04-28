@@ -1200,8 +1200,19 @@ fn Object* try_extract_variable(String uri, Document* doc, ParseResult* ast, Obj
 
 	AstNode* expr = &ast.nodes[best_idx];
 
-	// Skip NAME_EXPR — already a variable reference, no point extracting
+	// Skip trivial extractions
 	if (expr.kind == NAME_EXPR) return null;
+	if (expr.kind == LITERAL_EXPR) return null;
+	if (expr.kind == THIS_EXPR) return null;
+	if (expr.kind == SUPER_EXPR) return null;
+
+	// Correctness guards — refuse extractions that would change semantics
+	if (range_has_comment(doc.content, expr.start_offset, expr.end_offset)) return null;
+	if (subtree_contains_kind(ast, best_idx, RETURN_EXPR)) return null;
+	if (subtree_contains_kind(ast, best_idx, THROW_EXPR)) return null;
+	if (subtree_contains_kind(ast, best_idx, BREAK_EXPR)) return null;
+	if (subtree_contains_kind(ast, best_idx, CONTINUE_EXPR)) return null;
+	if (subtree_contains_kind(ast, best_idx, ASSIGNMENT_EXPR)) return null;
 
 	// Get expression source text
 	String expr_text = doc.content[(usz)expr.start_offset..(usz)expr.end_offset - 1];

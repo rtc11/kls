@@ -3004,3 +3004,95 @@ fn void no_extract_statements_with_assignment() @test {
 		}
 	};
 }
+
+// ── Feature 46: extract variable correctness guards ─────────────
+
+fn void no_extract_var_for_bare_literal() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `fun main() { val x = 42 }`;
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "42" (col 21 to col 23)
+		Object* params = make_extract_params("file:///t.kt", 0, 21, 0, 23);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable for bare literal");
+		}
+	};
+}
+
+fn void no_extract_var_for_this_expr() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = `class A { fun foo() { val r = this } }`;
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "this" (col 30 to col 34)
+		Object* params = make_extract_params("file:///t.kt", 0, 30, 0, 34);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable for bare this");
+		}
+	};
+}
+
+fn void no_extract_var_when_subtree_has_return() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f(): Int {\n    val x = run { return 1 }\n    return x\n}";
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "run { return 1 }"
+		// Line 1: "    val x = run { return 1 }"
+		//          0         1         2
+		//          0123456789012345678901234567
+		Object* params = make_extract_params("file:///t.kt", 1, 16, 1, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable when selection contains return");
+		}
+	};
+}
+
+fn void no_extract_var_when_subtree_has_assignment() @test {
+	@pool() {
+		DocumentStore store;
+		store.init();
+		defer store.free();
+
+		String content = "fun f() {\n    var y = 0\n    val x = run { y = 1; y }\n    println(x)\n}";
+		store.open("file:///t.kt", "kotlin", 1, content);
+
+		// Select "run { y = 1; y }" on line 2
+		// Line 2: "    val x = run { y = 1; y }"
+		//          0         1         2
+		//          0123456789012345678901234567
+		Object* params = make_extract_params("file:///t.kt", 2, 16, 2, 32);
+		Object* result = code_actions::handle_code_action(&store, null, params)!!;
+
+		for (sz i = 0; i < result.get_len(); i++) {
+			String title = get_action_title(result, (usz)i);
+			assert(title != "Extract variable",
+				"should refuse extract variable when selection contains assignment");
+		}
+	};
+}
