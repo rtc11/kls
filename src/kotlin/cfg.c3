@@ -485,7 +485,13 @@ fn uint lower_do_while(Cfg* cfg, ParseResult* pr, uint do_idx, uint pred, LoopSt
 	if (body_after != NO_CFG) cfg.add_edge(body_after, cond_node);
 
 	cfg.add_edge(cond_node, head);          // cond true: back-edge
-	cfg.add_edge(cond_node, loop_exit);     // cond false: exit
+	// Detect `do {...} while (true)` divergent loop: skip false-exit edge
+	// when condition is literal true and body has no break (Kotlin spec §16.30.5).
+	bool divergent = is_literal_true_cond(pr, cond)
+		&& !contains_break(pr, body);
+	if (!divergent) {
+		cfg.add_edge(cond_node, loop_exit); // cond false: exit
+	}
 	return loop_exit;
 }
 
