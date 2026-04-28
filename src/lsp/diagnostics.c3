@@ -170,6 +170,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		}
 		if (config::redundant_if_bool_diagnostic_enabled()) {
 			add_redundant_if_bool_diagnostics(diagnostics, ast);
+			add_redundant_when_bool_diagnostics(diagnostics, ast);
 		}
 		if (type_info != null && config::unnecessary_elvis_diagnostic_enabled()) {
 			add_unnecessary_elvis_diagnostics(diagnostics, ast, type_info);
@@ -4008,4 +4009,96 @@ fn void add_redundant_type_check_diagnostics(Object* diagnostics, ParseResult* a
 
 		diagnostics.push(diag);
 	}
+}
+
+// ── Redundant subject-less `when` returning bool ─────────────
+//
+// Detect `when { cond -> true; else -> false }` (or inverse), which
+// reduces to `cond` (or `!cond`) per Kotlin spec §17.6.5. Subject-less
+// form only; `when (s) { c -> true; else -> false }` requires emitting
+// `s == c` and is deferred.
+fn void add_redundant_when_bool_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != WHEN_EXPR) continue;
+
+		// Skip if has subject (first child is non-WHEN_ENTRY)
+		bool has_subject = false;
+		for (uint c = node.children_start; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			has_subject = (ast.nodes[c].kind != WHEN_ENTRY);
+			break;
+		}
+		if (has_subject) continue;
+
+		// Collect WHEN_ENTRY children
+		uint[8] entries;
+		uint entry_count = 0;
+		for (uint c = node.children_start; c < ast.node_count && entry_count < 8; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			entries[entry_count++] = c;
+		}
+		if (entry_count != 2) continue;
+
+		// Identify regular vs else arm
+		uint regular_idx = ast::NO_PARENT;
+		uint else_idx = ast::NO_PARENT;
+		for (uint k = 0; k < entry_count; k++) {
+			if (ast.nodes[entries[k]].extra_text == "else") {
+				else_idx = entries[k];
+			} else {
+				regular_idx = entries[k];
+			}
+		}
+		if (regular_idx == ast::NO_PARENT || else_idx == ast::NO_PARENT) continue;
+
+		// Body of each = last child
+		uint regular_body = last_child_of(ast, regular_idx);
+		uint else_body = last_child_of(ast, else_idx);
+		if (regular_body == ast::NO_PARENT || else_body == ast::NO_PARENT) continue;
+
+		String reg_val = unwrap_bool_literal(ast, regular_body);
+		String else_val = unwrap_bool_literal(ast, else_body);
+		if (reg_val.len == 0 || else_val.len == 0) continue;
+		if (reg_val == else_val) continue;
+
+		bool negated = (reg_val == "false" && else_val == "true");
+		bool direct = (reg_val == "true" && else_val == "false");
+		if (!direct && !negated) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2);
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem));
+		diag.set("tags", tags);
+
+		diag.set("message", negated
+			? "Redundant 'when': replace with negated condition"
+			: "Redundant 'when': replace with condition");
+
+		diagnostics.push(diag);
+	}
+}
+
+fn uint last_child_of(ParseResult* ast, uint parent_idx) {
+	uint last = ast::NO_PARENT;
+	for (uint c = ast.nodes[parent_idx].children_start; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != parent_idx) continue;
+		last = c;
+	}
+	return last;
 }
