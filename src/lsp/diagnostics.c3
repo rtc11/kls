@@ -173,6 +173,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::unrelated_equality_diagnostic_enabled() && type_info != null) {
 			add_unrelated_equality_diagnostics(diagnostics, ast, type_info);
 		}
+		if (config::redundant_when_else_only_diagnostic_enabled()) {
+			add_redundant_when_else_only_diagnostics(diagnostics, ast);
+		}
 		if (config::unreachable_catch_diagnostic_enabled()) {
 			add_unreachable_catch_diagnostics(diagnostics, ast);
 		}
@@ -4883,6 +4886,52 @@ fn void add_unrelated_equality_diagnostics(Object* diagnostics, ParseResult* ast
 		msg.appendf("Comparison of unrelated types '%s' and '%s' always yields %s",
 			lt.name, rt.name, verdict);
 		diag.set("message", msg.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ─── Diagnostic: redundant `when` with only `else` arm ───────────
+//
+// `when { else -> X }` (subject-less or subject-form) is exactly `X`.
+// Hint that the wrapping `when` provides nothing.
+//
+// Skips:
+//   - `when` with multiple entries (real use)
+//   - `when` with a single non-else entry (the cond is doing work)
+//   - empty `when {}` (caught by parser elsewhere)
+//
+// Emits Hint at the WHEN_EXPR span.
+fn void add_redundant_when_else_only_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != WHEN_EXPR) continue;
+
+		// Walk direct children, count entries, check if exactly one is else.
+		uint entry_count = 0;
+		uint else_count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind != WHEN_ENTRY) continue;
+			entry_count++;
+			if (ast.nodes[c].extra_text == "else") else_count++;
+		}
+		if (entry_count != 1) continue;
+		if (else_count != 1) continue;
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.start_line);
+		start.set("character", (int)n.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.end_line);
+		end_pos.set("character", (int)n.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		diag.set("message", "Redundant 'when' — only an 'else' branch; the body is the value");
 		diagnostics.push(diag);
 	}
 }

@@ -44,6 +44,7 @@ struct ServerConfig {
 	bool shortcircuit_nothing_diagnostic; // emit hints for `b && error(...)` / `b || error(...)` (rhs Nothing)
 	bool foreach_loop_diagnostic;         // emit hints for `xs.forEach { ... }` (suggest `for` loop)
 	bool unrelated_equality_diagnostic;   // warn on `==` / `!=` between unrelated types
+	bool redundant_when_else_only_diagnostic; // hint when `when { else -> X }` collapses to `X`
 }
 
 // Module-level global with defaults
@@ -74,6 +75,7 @@ ServerConfig g_config = {
 	.shortcircuit_nothing_diagnostic = true,
 	.foreach_loop_diagnostic = true,
 	.unrelated_equality_diagnostic = true,
+	.redundant_when_else_only_diagnostic = true,
 };
 
 /**
@@ -290,6 +292,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.unrelated_equality_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantWhenElseOnlyDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_when_else_only_diagnostic = val.b;
+			log::debug("[kls] config: redundantWhenElseOnlyDiagnostic = %s",
+				g_config.redundant_when_else_only_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -458,6 +468,10 @@ fn bool foreach_loop_diagnostic_enabled() {
 
 fn bool unrelated_equality_diagnostic_enabled() {
 	return g_config.unrelated_equality_diagnostic;
+}
+
+fn bool redundant_when_else_only_diagnostic_enabled() {
+	return g_config.redundant_when_else_only_diagnostic;
 }
 
 /**
