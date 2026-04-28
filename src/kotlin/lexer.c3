@@ -148,6 +148,8 @@ fn Token Lexer.lex_normal_token(Lexer* self) {
  * tokens where every visible token must be reported.
  */
 fn Token Lexer.next_all(Lexer* self) {
+	self.skip_shebang_if_at_bof();
+
 	// If we're inside a string template expression (${ ... }),
 	// lex normally (with whitespace tokens) but track brace nesting.
 	if (self.string_depth > 0 && self.brace_depth[self.string_depth - 1] > 0) {
@@ -190,8 +192,9 @@ fn Token Lexer.next_all(Lexer* self) {
 
 		// Block comment (nestable)
 		if (c == '/' && self.peek_at(1) == '*') {
+			bool is_doc_comment = self.peek_at(2) == '*' && self.peek_at(3) != '*' && self.peek_at(3) != '/';
 			self.skip_block_comment();
-			return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
+			return self.make_token_at(is_doc_comment ? DOC_COMMENT : BLOCK_COMMENT, start, start_line, start_col);
 		}
 
 		// Track braces inside template expressions
@@ -257,8 +260,9 @@ fn Token Lexer.next_all(Lexer* self) {
 
 	// Block comment (nestable)
 	if (c == '/' && self.peek_at(1) == '*') {
+		bool is_doc_comment = self.peek_at(2) == '*' && self.peek_at(3) != '*' && self.peek_at(3) != '/';
 		self.skip_block_comment();
-		return self.make_token_at(BLOCK_COMMENT, start, start_line, start_col);
+		return self.make_token_at(is_doc_comment ? DOC_COMMENT : BLOCK_COMMENT, start, start_line, start_col);
 	}
 
 	return self.lex_normal_token();

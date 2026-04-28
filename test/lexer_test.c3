@@ -45,6 +45,15 @@ fn void newlines_only() @test {
 	assert(tok.kind == EOF, "expected EOF after newlines");
 }
 
+fn void doc_comment_skipped_in_normal_mode() @test {
+	Token[] toks = all_tokens("/** doc */ fun foo()");
+	assert(toks.len >= 4, "expected doc comment skipped, got %d tokens", (int)toks.len);
+	assert(toks[0].kind == KW_FUN, "expected KW_FUN after skipped doc comment, got %d", (int)toks[0].kind);
+	assert(toks[1].kind == IDENTIFIER, "expected identifier foo, got %d", (int)toks[1].kind);
+	assert(toks[2].kind == LPAREN, "expected LPAREN after foo, got %d", (int)toks[2].kind);
+	assert(toks[3].kind == RPAREN, "expected RPAREN after foo, got %d", (int)toks[3].kind);
+}
+
 fn void shebang_at_file_start_skipped() @test {
 	Token[] toks = all_tokens("#!/usr/bin/env kotlin\nfun main() {}\n");
 	assert(toks.len >= 4, "expected tokens after shebang, got %d", (int)toks.len);
