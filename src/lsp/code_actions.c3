@@ -327,6 +327,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (pair_to != null) {
 			actions.push(pair_to);
 		}
+		Object* let_id = try_collapse_let_identity(uri, doc, ast, params);
+		if (let_id != null) {
+			actions.push(let_id);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -6610,6 +6614,149 @@ fn Object* try_pair_to_infix(String uri, Document* doc, ParseResult* ast, Object
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Replace 'Pair(a, b)' with 'a to b'");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ─── Refactor: `recv?.let { it }` / `recv.let { it }` → `recv` ───
+//
+// Cursor-based refactor.rewrite. The `let` block evaluates to its last
+// expression; if that expression is just the bare `it` reference, the
+// whole call is identity (modulo nullability semantics that are also
+// preserved since the receiver type is unchanged). Drop the call.
+//
+// Skips:
+//   - Lambda body that isn't exactly one expression
+//   - Lambda with explicit param (the user intends the rename for
+//     readability — leave alone)
+//   - Body uses any non-`it` reference (defensive — covers
+//     destructuring or unusual lambda shapes)
+//   - Body is a NAME_EXPR named "it" but with comments around it
+//   - The call has more than the trailing lambda arg (it shouldn't,
+//     but be defensive)
+fn Object* try_collapse_let_identity(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Smallest CALL_EXPR named "let" containing the cursor.
+	uint call_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != "let") continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			call_idx = i;
+		}
+	}
+	if (call_idx == uint.max) return null;
+	AstNode* call = &ast.nodes[call_idx];
+
+	// Children: callee (DOT_EXPR) + trailing VALUE_ARGUMENT(LAMBDA_EXPR).
+	uint callee_idx = ast::NO_PARENT;
+	uint trailing_va_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != call_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == ANNOTATION_ENTRY) continue;
+		if (ch.kind == VALUE_ARGUMENT) {
+			if (ch.extra_text != "trailing") return null;
+			if (trailing_va_idx != ast::NO_PARENT) return null;
+			trailing_va_idx = c;
+		} else {
+			if (callee_idx != ast::NO_PARENT) return null;
+			callee_idx = c;
+		}
+	}
+	if (callee_idx == ast::NO_PARENT) return null;
+	if (trailing_va_idx == ast::NO_PARENT) return null;
+	if (ast.nodes[callee_idx].kind != DOT_EXPR) return null;
+
+	// Trailing arg holds the LAMBDA_EXPR.
+	uint lambda_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != trailing_va_idx) continue;
+		lambda_idx = c;
+		break;
+	}
+	if (lambda_idx == ast::NO_PARENT) return null;
+	if (ast.nodes[lambda_idx].kind != LAMBDA_EXPR) return null;
+
+	// Lambda children: PARAM*, then body stmts (no BLOCK wrapper).
+	// Reject explicit params; require exactly one body stmt that is `it`.
+	uint body_stmt = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != lambda_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == PARAM) return null;
+		if (body_stmt != ast::NO_PARENT) return null;
+		body_stmt = c;
+	}
+	if (body_stmt == ast::NO_PARENT) return null;
+	if (ast.nodes[body_stmt].kind != NAME_EXPR) return null;
+	if (ast.nodes[body_stmt].name != "it") return null;
+
+	// Receiver = first child of the DOT_EXPR callee (lower-indexed).
+	AstNode* dot = &ast.nodes[callee_idx];
+	uint recv_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != callee_idx) continue;
+		recv_idx = c;
+		break;
+	}
+	if (recv_idx == ast::NO_PARENT) return null;
+	AstNode* recv = &ast.nodes[recv_idx];
+	if (recv.start_offset >= recv.end_offset) return null;
+	if (recv.end_offset > doc.content.len) return null;
+
+	// Comment guard over the WHOLE call expression.
+	if (range_has_comment(doc.content, call.start_offset, call.end_offset)) return null;
+
+	// Replacement = bare receiver source. Note: we deliberately keep the
+	// original receiver type — `?.` vs `.` doesn't matter because the
+	// call value already had the receiver's type (T? for safe-call, T
+	// for plain). The only effect of `?.let { it }` is identity.
+	String recv_src = doc.content[recv.start_offset:recv.end_offset - recv.start_offset];
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, call.start_offset, &start_line, &start_col);
+	offset_to_line_col(doc.content, call.end_offset, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", recv_src);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Drop redundant 'let { it }' wrapping");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
