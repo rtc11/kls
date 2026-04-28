@@ -177,6 +177,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			if (action != null) {
 				actions.push(action);
 			}
+			Object* prefix_action = try_prefix_unused_param_underscore(uri, diag);
+			if (prefix_action != null) {
+				actions.push(prefix_action);
+			}
 		}
 
 		// Quick fix: replace & with && or | with ||
@@ -5306,6 +5310,55 @@ fn Object* try_rename_unused_param_underscore(String uri, Object* diag) {
 	action.set("title", "Rename to '_'");
 	action.set("kind", "quickfix");
 	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Quickfix: prefix unused parameter with '_' ──────────────────
+//
+// Companion to try_rename_unused_param_underscore. Some users prefer to
+// keep the name readable (e.g. `_event` instead of `_`) for documentation
+// while still silencing the diagnostic — Kotlin's unused-name rule keys
+// on the leading underscore.
+fn Object* try_prefix_unused_param_underscore(String uri, Object* diag) {
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	// Insert '_' at the start of the name range — zero-width edit.
+	Object* zero_end = object::new_obj(tmem);
+	int sl = start.get_int("line") ?? 0;
+	int sc = start.get_int("character") ?? 0;
+	zero_end.set("line", sl);
+	zero_end.set("character", sc);
+	Object* zero_start = object::new_obj(tmem);
+	zero_start.set("line", sl);
+	zero_start.set("character", sc);
+	Object* insert_range = object::new_obj(tmem);
+	insert_range.set("start", zero_start);
+	insert_range.set("end", zero_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", insert_range);
+	edit.set("newText", "_");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Prefix with '_'");
+	action.set("kind", "quickfix");
 	action.set("edit", workspace_edit);
 
 	Object* action_diags = object::new_obj(tmem);

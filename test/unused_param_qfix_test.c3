@@ -227,3 +227,96 @@ fn void rename_replaces_only_param_name() @test {
 		assert(ec == 14, "end col 14");
 	};
 }
+
+// ── Prefix-with-_ variant ──────────────────────────────────────
+
+fn void prefix_offered_alongside_rename() @test {
+	@pool() {
+		String uri = "file:///t.kt";
+		String content = "fun foo(event: String) {}\n";
+		DocumentStore store; store.init(); defer store.free();
+		store.open(uri, "kotlin", 1, content);
+
+		Object* diags = build_diags(content);
+		Object* d = find_unused_param_diag(diags);
+		assert(d != null, "diag");
+		Object* params = make_params_with_diag(uri, d);
+		Object* res = code_actions::handle_code_action(&store, null, params)!!;
+
+		assert(find_action_with_title(res, "Rename to '_'") != null, "rename present");
+		assert(find_action_with_title(res, "Prefix with '_'") != null, "prefix present");
+	};
+}
+
+fn void prefix_inserts_underscore_at_name_start() @test {
+	@pool() {
+		String uri = "file:///t.kt";
+		String content = "fun foo(event: String) {}\n";
+		DocumentStore store; store.init(); defer store.free();
+		store.open(uri, "kotlin", 1, content);
+
+		Object* diags = build_diags(content);
+		Object* d = find_unused_param_diag(diags);
+		Object* params = make_params_with_diag(uri, d);
+		Object* res = code_actions::handle_code_action(&store, null, params)!!;
+		Object* action = find_action_with_title(res, "Prefix with '_'");
+		assert(action != null, "found");
+
+		Object* edit = action.get("edit") ?? null;
+		Object* changes = edit.get("changes") ?? null;
+		Object* edits = changes.get(uri) ?? null;
+		Object* e = edits.get_at(0);
+		String new_text = e.get_string("newText") ?? "";
+		assert(new_text == "_", "underscore");
+
+		// Zero-width insertion at the name's start col (8 = after "fun foo(").
+		Object* range = e.get("range") ?? null;
+		Object* s = range.get("start") ?? null;
+		Object* en = range.get("end") ?? null;
+		int sc = s.get_int("character") ?? 0;
+		int ec = en.get_int("character") ?? 0;
+		assert(sc == 8, "starts at name col");
+		assert(ec == 8, "zero width");
+	};
+}
+
+fn void prefix_kind_quickfix_carries_diag() @test {
+	@pool() {
+		String uri = "file:///t.kt";
+		String content = "fun foo(x: Int) {}\n";
+		DocumentStore store; store.init(); defer store.free();
+		store.open(uri, "kotlin", 1, content);
+		Object* diags = build_diags(content);
+		Object* d = find_unused_param_diag(diags);
+		Object* params = make_params_with_diag(uri, d);
+		Object* res = code_actions::handle_code_action(&store, null, params)!!;
+		Object* action = find_action_with_title(res, "Prefix with '_'");
+		assert(action != null, "found");
+		String kind = action.get_string("kind") ?? "";
+		assert(kind == "quickfix", "quickfix kind");
+		Object* attached = action.get("diagnostics") ?? null;
+		assert(attached != null && attached.get_len() == 1, "diag attached");
+	};
+}
+
+fn void rename_preferred_over_prefix() @test {
+	// The 'Rename to _' action remains the preferred one (auto-fix on save).
+	@pool() {
+		String uri = "file:///t.kt";
+		String content = "fun foo(x: Int) {}\n";
+		DocumentStore store; store.init(); defer store.free();
+		store.open(uri, "kotlin", 1, content);
+		Object* diags = build_diags(content);
+		Object* d = find_unused_param_diag(diags);
+		Object* params = make_params_with_diag(uri, d);
+		Object* res = code_actions::handle_code_action(&store, null, params)!!;
+
+		Object* rename = find_action_with_title(res, "Rename to '_'");
+		Object* prefix = find_action_with_title(res, "Prefix with '_'");
+		bool rp; bool pp;
+		if (try v = rename.get_bool("isPreferred")) { rp = v; }
+		if (try v = prefix.get_bool("isPreferred")) { pp = v; }
+		assert(rp, "rename is preferred");
+		assert(!pp, "prefix is not preferred");
+	};
+}
