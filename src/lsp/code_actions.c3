@@ -307,6 +307,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (cmp_chain != null) {
 			actions.push(cmp_chain);
 		}
+		Object* if_bool = try_simplify_if_bool_consts(uri, doc, ast, params);
+		if (if_bool != null) {
+			actions.push(if_bool);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -5686,6 +5690,192 @@ fn Object* try_simplify_compareto_chain(String uri, Document* doc, ParseResult* 
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Replace with 'compareValuesBy'");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ─── Refactor: simplify `if (cond) true else false` (or boolean inverse) ───
+//
+// Cursor-based refactor.rewrite. Triggers when the cursor sits inside an
+// IF_EXPR whose then and else branches each unwrap to a single boolean
+// literal (`true` / `false`). Two forms supported:
+//   expression form   if (c) true else false        →  c
+//                     if (c) false else true        →  !c
+//   return form       if (c) return true else return false   → return c
+//                     if (c) return false else return true   → return !c
+// Both literal-position and BLOCK-wrapped variants are accepted (e.g.
+// `if (c) { true } else { false }`). Mixed forms (one branch literal, the
+// other return) are skipped — the rewrite would change control flow.
+//
+// Comments anywhere inside the if-expr span suppress the action.
+fn uint if_bool_unwrap_branch(ParseResult* ast, uint branch_idx, bool* is_return_out) {
+	if (branch_idx >= ast.node_count) return ast::NO_PARENT;
+	AstNode* n = &ast.nodes[branch_idx];
+	// Unwrap BLOCK { single statement }
+	if (n.kind == BLOCK) {
+		uint inner = ast::NO_PARENT;
+		uint count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != branch_idx) continue;
+			if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+			count++;
+			inner = c;
+		}
+		if (count != 1) return ast::NO_PARENT;
+		return if_bool_unwrap_branch(ast, inner, is_return_out);
+	}
+	// RETURN_EXPR with single literal child
+	if (n.kind == RETURN_EXPR) {
+		uint inner = ast::NO_PARENT;
+		uint count = 0;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != branch_idx) continue;
+			if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+			count++;
+			inner = c;
+		}
+		if (count != 1) return ast::NO_PARENT;
+		AstNode* lit = &ast.nodes[inner];
+		if (lit.kind != LITERAL_EXPR) return ast::NO_PARENT;
+		if (lit.extra_text != "true" && lit.extra_text != "false") return ast::NO_PARENT;
+		*is_return_out = true;
+		return inner;
+	}
+	if (n.kind == LITERAL_EXPR) {
+		if (n.extra_text != "true" && n.extra_text != "false") return ast::NO_PARENT;
+		*is_return_out = false;
+		return branch_idx;
+	}
+	return ast::NO_PARENT;
+}
+
+fn Object* try_simplify_if_bool_consts(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find the smallest IF_EXPR containing the cursor.
+	uint if_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != IF_EXPR) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			if_idx = i;
+		}
+	}
+	if (if_idx == uint.max) return null;
+
+	AstNode* iff = &ast.nodes[if_idx];
+
+	// Collect children: cond, then, else.
+	uint cond_idx = ast::NO_PARENT;
+	uint then_idx = ast::NO_PARENT;
+	uint else_idx = ast::NO_PARENT;
+	uint child_seen = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != if_idx) continue;
+		if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+		if (child_seen == 0) {
+			cond_idx = c;
+		} else if (child_seen == 1) {
+			then_idx = c;
+		} else if (child_seen == 2) {
+			else_idx = c;
+		} else {
+			return null; // more than 3 children – unexpected
+		}
+		child_seen++;
+	}
+	if (cond_idx == ast::NO_PARENT) return null;
+	if (then_idx == ast::NO_PARENT) return null;
+	if (else_idx == ast::NO_PARENT) return null;
+
+	bool then_is_return = false;
+	bool else_is_return = false;
+	uint then_lit = if_bool_unwrap_branch(ast, then_idx, &then_is_return);
+	uint else_lit = if_bool_unwrap_branch(ast, else_idx, &else_is_return);
+	if (then_lit == ast::NO_PARENT) return null;
+	if (else_lit == ast::NO_PARENT) return null;
+	// Mixed forms (literal vs return) would change control flow – skip.
+	if (then_is_return != else_is_return) return null;
+
+	String then_val = ast.nodes[then_lit].extra_text;
+	String else_val = ast.nodes[else_lit].extra_text;
+	bool negate;
+	if (then_val == "true" && else_val == "false") {
+		negate = false;
+	} else if (then_val == "false" && else_val == "true") {
+		negate = true;
+	} else {
+		return null;
+	}
+
+	// Refuse if any comment lives inside the if-expr span – preserve intent.
+	if (range_has_comment(doc.content, iff.start_offset, iff.end_offset)) return null;
+
+	// Extract the original cond source slice.
+	AstNode* cond = &ast.nodes[cond_idx];
+	if (cond.start_offset >= cond.end_offset) return null;
+	if (cond.end_offset > doc.content.len) return null;
+	String cond_src = doc.content[cond.start_offset:cond.end_offset - cond.start_offset];
+
+	DString out;
+	out.tinit();
+	if (then_is_return) {
+		out.append("return ");
+	}
+	if (negate) {
+		out.append("!");
+		if (cond_text_needs_parens(cond_src)) {
+			out.append("(");
+			out.append(cond_src);
+			out.append(")");
+		} else {
+			out.append(cond_src);
+		}
+	} else {
+		out.append(cond_src);
+	}
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, iff.start_offset, &start_line, &start_col);
+	offset_to_line_col(doc.content, iff.end_offset, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Simplify boolean expression");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
