@@ -311,6 +311,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (if_bool != null) {
 			actions.push(if_bool);
 		}
+		Object* let_to_sc = try_collapse_let_to_safe_call(uri, doc, ast, params);
+		if (let_to_sc != null) {
+			actions.push(let_to_sc);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -5876,6 +5880,271 @@ fn Object* try_simplify_if_bool_consts(String uri, Document* doc, ParseResult* a
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Simplify boolean expression");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ─── Refactor: `recv?.let { it.foo(args) }` → `recv?.foo(args)` ──────
+//
+// Cursor-based refactor.rewrite. Triggers when the cursor sits inside a
+// CALL_EXPR whose callee is `recv.let` / `recv?.let` and whose single
+// argument is a trailing lambda containing exactly one statement of the
+// form `it.member` or `it.member(args)`.
+//
+// Cases handled:
+//   recv.let { it.foo() }      →  recv.foo()
+//   recv?.let { it.foo() }     →  recv?.foo()
+//   recv.let { it.field }      →  recv.field
+//   recv?.let { it.field }     →  recv?.field
+//
+// Skipped when the inner access is itself `?.` (would chain safe-calls
+// around an already-narrowed `it` which is illegal), when the lambda has
+// any explicit parameters (renaming `it` defeats the rewrite), when the
+// args reference `it` (would lose the local binding), or when comments
+// live inside the CALL_EXPR span.
+fn bool name_expr_is_it(ParseResult* ast, uint idx) {
+	if (idx >= ast.node_count) return false;
+	AstNode* n = &ast.nodes[idx];
+	return n.kind == NAME_EXPR && n.name == "it";
+}
+
+fn bool subtree_uses_name(ParseResult* ast, uint root, String name) {
+	if (root >= ast.node_count) return false;
+	uint root_lo = ast.nodes[root].start_offset;
+	uint root_hi = ast.nodes[root].end_offset;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != NAME_EXPR) continue;
+		if (n.name != name) continue;
+		if (n.start_offset < root_lo) continue;
+		if (n.end_offset > root_hi) continue;
+		return true;
+	}
+	return false;
+}
+
+fn Object* try_collapse_let_to_safe_call(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Smallest CALL_EXPR containing the cursor.
+	uint call_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			call_idx = i;
+		}
+	}
+	if (call_idx == uint.max) return null;
+
+	AstNode* call = &ast.nodes[call_idx];
+
+	// Children: callee + value-arguments.
+	uint callee_idx = ast::NO_PARENT;
+	uint trailing_va_idx = ast::NO_PARENT;
+	uint other_arg_count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != call_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == ANNOTATION_ENTRY) continue;
+		if (ch.kind == VALUE_ARGUMENT) {
+			if (ch.extra_text == "trailing") {
+				if (trailing_va_idx != ast::NO_PARENT) return null;
+				trailing_va_idx = c;
+			} else {
+				other_arg_count++;
+			}
+		} else {
+			if (callee_idx != ast::NO_PARENT) return null;
+			callee_idx = c;
+		}
+	}
+	if (callee_idx == ast::NO_PARENT) return null;
+	if (trailing_va_idx == ast::NO_PARENT) return null;
+	if (other_arg_count != 0) return null;
+
+	// Callee must be DOT_EXPR named "let".
+	AstNode* callee = &ast.nodes[callee_idx];
+	if (callee.kind != DOT_EXPR) return null;
+	if (callee.name != "let") return null;
+	// Outer dot: "" (plain ".") or "?." for safe call.
+	String outer_dot = callee.extra_text == "?." ? "?." : ".";
+
+	// Receiver of `recv.let` / `recv?.let`.
+	uint outer_recv_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != callee_idx) continue;
+		if (ast.nodes[c].kind == ANNOTATION_ENTRY) continue;
+		if (ast.nodes[c].kind == TYPE_ARG) continue;
+		if (outer_recv_idx == ast::NO_PARENT) {
+			outer_recv_idx = c;
+		} else {
+			return null;
+		}
+	}
+	if (outer_recv_idx == ast::NO_PARENT) return null;
+	AstNode* outer_recv = &ast.nodes[outer_recv_idx];
+
+	// Trailing arg must wrap a single LAMBDA_EXPR.
+	uint lambda_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != trailing_va_idx) continue;
+		if (lambda_idx != ast::NO_PARENT) return null;
+		lambda_idx = c;
+	}
+	if (lambda_idx == ast::NO_PARENT) return null;
+	AstNode* lambda = &ast.nodes[lambda_idx];
+	if (lambda.kind != LAMBDA_EXPR) return null;
+
+	// Lambda must have no explicit PARAMs (implicit `it` only) and a single
+	// statement body.
+	uint body_stmt = ast::NO_PARENT;
+	uint body_count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != lambda_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == ANNOTATION_ENTRY) continue;
+		if (ch.kind == PARAM) return null; // explicit params – skip
+		body_count++;
+		body_stmt = c;
+	}
+	if (body_count != 1) return null;
+	if (body_stmt == ast::NO_PARENT) return null;
+
+	// Body statement: `it.member` (DOT_EXPR) or `it.member(args)` (CALL_EXPR).
+	AstNode* stmt = &ast.nodes[body_stmt];
+	uint inner_dot_idx = ast::NO_PARENT;
+	uint inner_args_lo = 0;
+	uint inner_args_hi = 0;
+	bool is_call_form = false;
+	if (stmt.kind == DOT_EXPR) {
+		inner_dot_idx = body_stmt;
+	} else if (stmt.kind == CALL_EXPR) {
+		is_call_form = true;
+		// Find inner callee + check args don't reference `it`.
+		uint inner_callee = ast::NO_PARENT;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != body_stmt) continue;
+			AstNode* ch = &ast.nodes[c];
+			if (ch.kind == ANNOTATION_ENTRY) continue;
+			if (ch.kind == VALUE_ARGUMENT) {
+				if (subtree_uses_name(ast, c, "it")) return null;
+			} else if (ch.kind != TYPE_ARG) {
+				if (inner_callee != ast::NO_PARENT) return null;
+				inner_callee = c;
+			}
+		}
+		if (inner_callee == ast::NO_PARENT) return null;
+		if (ast.nodes[inner_callee].kind != DOT_EXPR) return null;
+		inner_dot_idx = inner_callee;
+		// Args span: from end of inner callee dot to end of body stmt
+		// (covers `(args)` including parens).
+		inner_args_lo = ast.nodes[inner_callee].end_offset;
+		inner_args_hi = stmt.end_offset;
+		if (inner_args_hi < inner_args_lo) return null;
+	} else {
+		return null;
+	}
+
+	AstNode* inner_dot = &ast.nodes[inner_dot_idx];
+	// Plain dot has empty extra_text; safe-call has "?.". Skip the latter
+	// because chaining safe calls around an already-narrowed `it` is illegal.
+	if (inner_dot.extra_text == "?.") return null;
+	if (inner_dot.name.len == 0) return null;
+	String member = inner_dot.name;
+
+	// Inner dot's receiver must be the bare `it` NAME_EXPR.
+	uint it_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != inner_dot_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == ANNOTATION_ENTRY) continue;
+		if (ch.kind == TYPE_ARG) continue;
+		if (it_idx == ast::NO_PARENT) {
+			it_idx = c;
+		} else {
+			return null;
+		}
+	}
+	if (it_idx == ast::NO_PARENT) return null;
+	if (!name_expr_is_it(ast, it_idx)) return null;
+
+	// Comments inside the CALL_EXPR span suppress the rewrite.
+	if (range_has_comment(doc.content, call.start_offset, call.end_offset)) return null;
+
+	// Outer receiver source slice.
+	if (outer_recv.start_offset >= outer_recv.end_offset) return null;
+	if (outer_recv.end_offset > doc.content.len) return null;
+	String recv_src = doc.content[outer_recv.start_offset:outer_recv.end_offset - outer_recv.start_offset];
+
+	String args_src = "";
+	if (is_call_form) {
+		if (inner_args_hi > doc.content.len) return null;
+		args_src = doc.content[inner_args_lo:inner_args_hi - inner_args_lo];
+		// Strip leading whitespace from args – the original source had a
+		// space before the lambda, but we want a tight call.
+	}
+
+	DString out;
+	out.tinit();
+	out.append(recv_src);
+	out.append(outer_dot);
+	out.append(member);
+	if (is_call_form) {
+		// Trim leading whitespace from args_src.
+		uint k = 0;
+		while (k < args_src.len) {
+			char ch = args_src[k];
+			if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+				k++;
+			} else {
+				break;
+			}
+		}
+		out.append(args_src[k..]);
+	}
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, call.start_offset, &start_line, &start_col);
+	offset_to_line_col(doc.content, call.end_offset, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Replace 'let' with safe call");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
