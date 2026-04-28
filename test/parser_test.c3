@@ -184,6 +184,48 @@ fn void parse_sealed_interface() @test {
 	};
 }
 
+fn void parse_fun_interface() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun interface Predicate<T> { fun test(t: T): Boolean }"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* iface = child(r, f, 0);
+		assert(iface.kind == INTERFACE_DECL, "expected INTERFACE_DECL");
+		assert(iface.name == "Predicate", "expected 'Predicate', got '%s'", iface.name);
+		assert(iface.mod_flags & ast::MOD_FUN_INTERFACE != 0, "expected MOD_FUN_INTERFACE flag");
+	};
+}
+
+fn void parse_fun_modifier_not_function() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun interface Marker {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* iface = child(r, f, 0);
+		assert(iface.kind == INTERFACE_DECL, "expected INTERFACE_DECL");
+		assert(iface.mod_flags & ast::MOD_FUN_INTERFACE != 0, "expected MOD_FUN_INTERFACE flag");
+	};
+}
+
+fn void parse_regular_interface_no_fun_flag() @test {
+	@pool() {
+		ParseResult* r = do_parse("interface Foo { fun bar() }"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* iface = child(r, f, 0);
+		assert(iface.kind == INTERFACE_DECL, "expected INTERFACE_DECL");
+		assert(iface.name == "Foo", "expected 'Foo', got '%s'", iface.name);
+		assert(iface.mod_flags & ast::MOD_FUN_INTERFACE == 0, "expected no MOD_FUN_INTERFACE flag");
+	};
+}
+
+fn void parse_fun_function_still_function() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun foo() {}"); defer free_result(r);
+		AstNode* f = file_node(r);
+		AstNode* fun = child(r, f, 0);
+		assert(fun.kind == FUN_DECL, "expected FUN_DECL");
+		assert(fun.name == "foo", "expected 'foo', got '%s'", fun.name);
+	};
+}
+
 fn void parse_abstract_class() @test {
 	@pool() {
 		ParseResult* r = do_parse("abstract class Shape {}"); defer free_result(r);

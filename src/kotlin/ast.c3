@@ -82,39 +82,40 @@ enum NodeKind : int {
 
 // ── Modifier flags (bitfield) ──────────────────────────────────────
 
-const uint MOD_NONE        = 0;
-const uint MOD_ABSTRACT    = 1 << 0;
-const uint MOD_OPEN        = 1 << 1;
-const uint MOD_FINAL       = 1 << 2;
-const uint MOD_SEALED      = 1 << 3;
-const uint MOD_DATA        = 1 << 4;
-const uint MOD_ENUM        = 1 << 5;
-const uint MOD_INNER       = 1 << 6;
-const uint MOD_ANNOTATION  = 1 << 7;
-const uint MOD_VALUE       = 1 << 8;
-const uint MOD_INLINE      = 1 << 9;
-const uint MOD_INFIX       = 1 << 10;
-const uint MOD_OPERATOR    = 1 << 11;
-const uint MOD_SUSPEND     = 1 << 12;
-const uint MOD_TAILREC     = 1 << 13;
-const uint MOD_OVERRIDE    = 1 << 14;
-const uint MOD_LATEINIT    = 1 << 15;
-const uint MOD_CONST       = 1 << 16;
-const uint MOD_EXTERNAL    = 1 << 17;
-const uint MOD_PRIVATE     = 1 << 18;
-const uint MOD_PROTECTED   = 1 << 19;
-const uint MOD_INTERNAL    = 1 << 20;
-const uint MOD_PUBLIC      = 1 << 21;
-const uint MOD_EXPECT      = 1 << 22;
-const uint MOD_ACTUAL      = 1 << 23;
-const uint MOD_VARARG      = 1 << 24;
-const uint MOD_COMPANION   = 1 << 25;
-const uint MOD_NOINLINE    = 1 << 26;
-const uint MOD_CROSSINLINE = 1 << 27;
-const uint MOD_REIFIED     = 1 << 28;
-const uint MOD_VAR         = 1 << 29;  // property declared with 'var' (mutable)
-const uint MOD_IN          = 1 << 30;  // type parameter variance: in
-const uint MOD_OUT         = 1u << 31; // type parameter variance: out
+const uint MOD_NONE         = 0;
+const uint MOD_ABSTRACT     = 1 << 0;
+const uint MOD_OPEN         = 1 << 1;
+const uint MOD_FINAL        = 1 << 2;
+const uint MOD_SEALED       = 1 << 3;
+const uint MOD_DATA         = 1 << 4;
+const uint MOD_ENUM         = 1 << 5;
+const uint MOD_INNER        = 1 << 6;
+const uint MOD_ANNOTATION   = 1 << 7;
+const uint MOD_VALUE        = 1 << 8;
+const uint MOD_INLINE       = 1 << 9;
+const uint MOD_INFIX        = 1 << 10;
+const uint MOD_OPERATOR     = 1 << 11;
+const uint MOD_SUSPEND      = 1 << 12;
+const uint MOD_TAILREC      = 1 << 13;
+const uint MOD_OVERRIDE     = 1 << 14;
+const uint MOD_LATEINIT     = 1 << 15;
+const uint MOD_CONST        = 1 << 16;
+const uint MOD_EXTERNAL     = 1 << 17;
+const uint MOD_PRIVATE      = 1 << 18;
+const uint MOD_PROTECTED    = 1 << 19;
+const uint MOD_INTERNAL     = 1 << 20;
+const uint MOD_PUBLIC       = 1 << 21;
+const uint MOD_EXPECT       = 1 << 22;
+const uint MOD_ACTUAL       = 1 << 23;
+const uint MOD_VARARG       = 1 << 24;
+const uint MOD_COMPANION    = 1 << 25;
+const uint MOD_NOINLINE     = 1 << 26;
+const uint MOD_CROSSINLINE  = 1 << 27;
+const uint MOD_REIFIED      = 1 << 28;
+const uint MOD_VAR          = 1 << 29;  // property declared with 'var' (mutable)
+const uint MOD_IN           = 1 << 30;  // type parameter variance: in
+const uint MOD_OUT          = 1u << 31; // type parameter variance: out
+const uint MOD_FUN_INTERFACE = MOD_REIFIED; // interface declared with preceding 'fun'
 
 // ── AST node ───────────────────────────────────────────────────────
 

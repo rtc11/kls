@@ -968,6 +968,11 @@ fn bool Parser.parse_declaration(Parser* self, uint mods) {
 			return true;
 
 		case KW_FUN:
+			if (self.peek_is(KW_INTERFACE)) {
+				self.advance(); // consume 'fun'
+				self.parse_class_like(mods | ast::MOD_FUN_INTERFACE, INTERFACE_DECL);
+				return true;
+			}
 			self.parse_fun_decl(mods);
 			return true;
 
@@ -4235,7 +4240,7 @@ fn void Parser.parse_property_accessor(Parser* self) {
 
 	// Optional accessor modifiers / annotations (e.g. `private set`, `@JvmName("x") get`).
 	// Reuses parse_modifiers; populates self.last_annotations + returns flag bits.
-	uint accessor_mods = ast::MOD_NONE;
+		uint accessor_mods = ast::MOD_NONE;
 	if (self.at(AT) || is_accessor_modifier_keyword(self.current.kind)) {
 		accessor_mods = self.parse_modifiers();
 	}
