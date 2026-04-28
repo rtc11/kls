@@ -39,6 +39,7 @@ struct ServerConfig {
 	bool redundant_type_check_diagnostic; // emit warnings for `x is T` / `x !is T` where typeof(x) <: T
 	bool unused_private_diagnostic; // emit warnings for unused private top-level fns/properties/classes
 	bool redundant_explicit_type_diagnostic; // emit hints for `val x: Int = 1` where init type matches declared type
+	bool unsafe_nullable_call_diagnostic; // emit warnings for `x.foo` / `x.bar` where x is nullable and not narrowed
 }
 
 // Module-level global with defaults
@@ -64,6 +65,7 @@ ServerConfig g_config = {
 	.redundant_type_check_diagnostic = true,
 	.unused_private_diagnostic = true,
 	.redundant_explicit_type_diagnostic = true,
+	.unsafe_nullable_call_diagnostic = true,
 };
 
 /**
@@ -240,6 +242,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_explicit_type_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unsafeNullableCallDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unsafe_nullable_call_diagnostic = val.b;
+			log::debug("[kls] config: unsafeNullableCallDiagnostic = %s",
+				g_config.unsafe_nullable_call_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -388,6 +398,10 @@ fn bool unused_private_diagnostic_enabled() {
 
 fn bool redundant_explicit_type_diagnostic_enabled() {
 	return g_config.redundant_explicit_type_diagnostic;
+}
+
+fn bool unsafe_nullable_call_diagnostic_enabled() {
+	return g_config.unsafe_nullable_call_diagnostic;
 }
 
 /**

@@ -194,6 +194,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null && config::redundant_explicit_type_diagnostic_enabled()) {
 			add_redundant_explicit_type_diagnostics(diagnostics, ast, type_info);
 		}
+		if (type_info != null && config::unsafe_nullable_call_diagnostic_enabled()) {
+			add_unsafe_nullable_call_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -4372,6 +4375,85 @@ fn void add_redundant_explicit_type_diagnostics(Object* diagnostics, ParseResult
 		Object* tags = object::new_obj(tmem);
 		tags.push(object::new_int(1, tmem)); // Unnecessary
 		diag.set("tags", tags);
+		diagnostics.push(diag);
+	}
+}
+
+/**
+ * Emit warnings for `x.foo` / `x.bar()` where x has a nullable type and is not
+ * narrowed by smart-cast. The Kotlin compiler rejects this with "Only safe (?.)
+ * or non-null asserted (!!.) calls are allowed on a nullable receiver".
+ *
+ * Detection:
+ *  - DOT_EXPR with extra_text != "?." (regular dot, not safe call)
+ *  - Receiver has a known type and that type's `nullable` flag is true after
+ *    flow narrowing (TypeInfo entries reflect smart casts via resolve_types
+ *    phase 10)
+ *  - Skip writes (LHS of assignment)
+ *  - Skip when receiver type is UNKNOWN (avoid false positives)
+ */
+fn void add_unsafe_nullable_call_diagnostics(Object* diagnostics, ParseResult* ast, types::TypeInfo* type_info) {
+	if (!config::unsafe_nullable_call_diagnostic_enabled()) return;
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != DOT_EXPR) continue;
+		if (node.name.len == 0) continue;
+		// Safe call already handles nullable receivers correctly.
+		if (node.extra_text == "?.") continue;
+
+		// Receiver is the lower-indexed child.
+		uint recv_idx = ast::NO_PARENT;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent == i) { recv_idx = j; break; }
+		}
+		if (recv_idx == ast::NO_PARENT) continue;
+
+		if (!type_info.has_type[recv_idx]) continue;
+		types::TypeRef recv_type = type_info.node_types[recv_idx];
+		if (recv_type.kind == types::TypeKind.UNKNOWN) continue;
+		// Class references (e.g. `Color` in `Color.RED`) are not values; the
+		// nullable flag doesn't apply to them as receivers.
+		if (recv_type.is_class_ref) continue;
+		if (!recv_type.nullable) continue;
+
+		// Skip writes: parent is ASSIGNMENT_EXPR and we're its LHS.
+		uint p = node.parent;
+		if (p != ast::NO_PARENT && p < ast.node_count
+			&& ast.nodes[p].kind == ASSIGNMENT_EXPR) {
+			uint first = ast::NO_PARENT;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == p) { first = j; break; }
+			}
+			if (first == i) continue;
+		}
+
+		// Build display name for receiver.
+		String recv_name = recv_type.name;
+		if (recv_name.len == 0) recv_name = "?";
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end = object::new_obj(tmem);
+		end.set("line", (int)node.start_line);
+		end.set("character", (int)(node.start_col + node.name.len));
+		range.set("start", start);
+		range.set("end", end);
+
+		diag.set("range", range);
+		diag.set("severity", 1); // Error - matches kotlinc behaviour
+		diag.set("source", "kls");
+
+		DString message;
+		message.tinit();
+		message.appendf("Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type '%s?'", recv_name);
+		diag.set("message", message.str_view());
+
 		diagnostics.push(diag);
 	}
 }
