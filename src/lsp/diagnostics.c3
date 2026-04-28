@@ -211,6 +211,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null && config::redundant_explicit_type_diagnostic_enabled()) {
 			add_redundant_explicit_type_diagnostics(diagnostics, ast, type_info);
 		}
+		if (type_info != null && config::redundant_return_type_diagnostic_enabled()) {
+			add_redundant_return_type_diagnostics(diagnostics, ast, type_info);
+		}
 		if (type_info != null && config::unsafe_nullable_call_diagnostic_enabled()) {
 			add_unsafe_nullable_call_diagnostics(diagnostics, ast, type_info);
 		}
@@ -5152,6 +5155,76 @@ fn void add_can_be_const_diagnostics(Object* diagnostics, ParseResult* ast) {
 		message.tinit();
 		message.appendf("Property '%s' could be 'const'", n.name);
 		diag.set("message", message.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant explicit return type on functions ────────────────────
+//
+// Hint when a FUN_DECL has explicit return type that matches the inferred
+// type of its expression body. Covers `fun foo(): Int = 42` only; block
+// bodies (`fun foo(): Int { return 42 }`) are deferred.
+//
+// Skip rules (mirror IntelliJ heuristic):
+//   - No body / abstract → can't infer
+//   - override / open → explicit type may be required for ABI clarity
+//   - Body is BLOCK → defer (multi-return analysis)
+//   - Inferred type is UNKNOWN/Nothing → not safe to remove
+//   - Returns Unit → covered by separate Unit-typed-decl diagnostic
+
+fn uint find_fun_expression_body(ParseResult* ast, uint fun_idx) {
+	// Expression body = lone non-{PARAM,TYPE_REF,TYPE_PARAM,FUN_DECL} child
+	// that is not a BLOCK.
+	uint body_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != fun_idx) continue;
+		NodeKind ck = n.kind;
+		if (ck == PARAM || ck == TYPE_REF || ck == TYPE_PARAM) continue;
+		if (ck == FUN_DECL) continue; // get/set accessors (rare on funs)
+		if (ck == BLOCK) return ast::NO_PARENT; // block body — caller defers
+		body_idx = c;
+	}
+	return body_idx;
+}
+
+fn void add_redundant_return_type_diagnostics(Object* diagnostics, ParseResult* ast,
+		types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != FUN_DECL) continue;
+		if (n.name.len == 0) continue;
+		if (n.type_text.len == 0) continue;
+		if ((n.mod_flags & ast::MOD_ABSTRACT) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OPEN) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXTERNAL) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXPECT) != 0) continue;
+
+		uint body_idx = find_fun_expression_body(ast, i);
+		if (body_idx == ast::NO_PARENT) continue;
+		if (!type_info.has_type[body_idx]) continue;
+
+		types::TypeRef declared = types::parse_type_text(n.type_text);
+		types::TypeRef body_t = type_info.node_types[body_idx];
+
+		if (body_t.kind == types::TypeKind.UNKNOWN) continue;
+		// Skip Nothing — caller likely wants the explicit annotation
+		if (body_t.kind == types::TypeKind.NOTHING) continue;
+		// Skip Unit — covered by separate diag
+		if (body_t.kind == types::TypeKind.UNIT) continue;
+		if (declared.name == "Unit") continue;
+
+		if (!typerefs_equivalent_for_redundancy(&declared, &body_t)) continue;
+
+		Object* diag = make_diagnostic(n.name_line, n.name_col,
+			n.name_line, n.name_col + n.name_len, 4, // Hint
+			"Explicitly given return type is redundant");
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
 		diagnostics.push(diag);
 	}
 }

@@ -47,6 +47,7 @@ struct ServerConfig {
 	bool redundant_when_else_only_diagnostic; // hint when `when { else -> X }` collapses to `X`
 	bool missing_override_diagnostic; // warn when fun matches supertype member but lacks `override`
 	bool can_be_const_diagnostic; // hint when val with literal initializer could be const val
+	bool redundant_return_type_diagnostic; // hint when fun expression body's type matches declared return type
 }
 
 // Module-level global with defaults
@@ -80,6 +81,7 @@ ServerConfig g_config = {
 	.redundant_when_else_only_diagnostic = true,
 	.missing_override_diagnostic = true,
 	.can_be_const_diagnostic = true,
+	.redundant_return_type_diagnostic = true,
 };
 
 /**
@@ -320,6 +322,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.can_be_const_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantReturnTypeDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_return_type_diagnostic = val.b;
+			log::debug("[kls] config: redundantReturnTypeDiagnostic = %s",
+				g_config.redundant_return_type_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -522,4 +532,13 @@ fn bool missing_override_diagnostic_enabled() {
  */
 fn bool can_be_const_diagnostic_enabled() {
 	return g_config.can_be_const_diagnostic;
+}
+
+/**
+ * Whether to emit "Explicitly given return type is redundant" hints
+ * for fun expression bodies whose inferred type matches the declared
+ * return type.
+ */
+fn bool redundant_return_type_diagnostic_enabled() {
+	return g_config.redundant_return_type_diagnostic;
 }
