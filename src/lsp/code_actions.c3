@@ -352,6 +352,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (let_id != null) {
 			actions.push(let_id);
 		}
+		Object* obj_to_lambda = try_object_literal_to_sam_lambda(uri, doc, ast, params);
+		if (obj_to_lambda != null) {
+			actions.push(obj_to_lambda);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -7088,6 +7092,192 @@ fn Object* try_add_const(String uri, Document* doc, ParseResult* ast, Object* di
 	Object* action_diags = object::new_obj(tmem);
 	action_diags.push(diag);
 	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Refactor: convert object literal to SAM lambda ────────────────
+//
+// `object : Listener { override fun onClick(v: View) { … } }` →
+// `Listener { v -> … }`
+//
+// Cursor must be on/in an OBJECT_EXPR with exactly one supertype
+// TYPE_REF and exactly one member which is a FUN_DECL with `override`.
+// Skips when the body has multiple methods, properties, init blocks,
+// or when the override fun has comments / TYPE_PARAMs.
+//
+// Replacement uses the override fun's parameter names; with 0 or 1
+// param Kotlin's `it` is NOT introduced (we always emit explicit
+// parameter list to keep semantics identical and avoid name shadowing
+// bugs). Block bodies become `{ … stmts … }`; expression bodies
+// become `{ … expr }`.
+
+fn Object* try_object_literal_to_sam_lambda(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Find smallest OBJECT_EXPR containing cursor
+	uint obj_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != OBJECT_EXPR) continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			obj_idx = i;
+		}
+	}
+	if (obj_idx == uint.max) return null;
+
+	AstNode* obj = &ast.nodes[obj_idx];
+
+	// Collect direct children: TYPE_REFs (supertypes) + FUN/PROPERTY/INIT members
+	uint type_ref_idx = ast::NO_PARENT;
+	uint type_ref_count = 0;
+	uint fun_decl_idx = ast::NO_PARENT;
+	uint other_member_count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != obj_idx) continue;
+		NodeKind ck = ast.nodes[c].kind;
+		if (ck == TYPE_REF) {
+			type_ref_count++;
+			type_ref_idx = c;
+			continue;
+		}
+		if (ck == FUN_DECL) {
+			if (fun_decl_idx != ast::NO_PARENT) {
+				other_member_count++; // multiple funs
+			} else {
+				fun_decl_idx = c;
+			}
+			continue;
+		}
+		// Any other member (PROPERTY_DECL, INIT_BLOCK, nested decls) disqualifies
+		other_member_count++;
+	}
+
+	if (type_ref_count != 1) return null;
+	if (fun_decl_idx == ast::NO_PARENT) return null;
+	if (other_member_count != 0) return null;
+
+	AstNode* fun_node = &ast.nodes[fun_decl_idx];
+	if ((fun_node.mod_flags & ast::MOD_OVERRIDE) == 0) return null;
+	if (fun_node.name.len == 0) return null;
+
+	// Skip funs with type parameters (lambda doesn't carry them)
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != fun_decl_idx) continue;
+		if (ast.nodes[c].kind == TYPE_PARAM) return null;
+	}
+
+	// Refuse if comments inside the OBJECT_EXPR span (preserve them)
+	if (range_has_comment(doc.content, obj.start_offset, obj.end_offset)) return null;
+
+	// Collect param names (in declaration order)
+	String[16] param_names;
+	uint param_count = 0;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != fun_decl_idx) continue;
+		if (ast.nodes[c].kind != PARAM) continue;
+		if (param_count >= 16) return null;
+		AstNode* p = &ast.nodes[c];
+		if (p.name.len == 0) return null;
+		param_names[param_count++] = p.name;
+	}
+
+	// Find body: lone non-{PARAM,TYPE_REF,TYPE_PARAM,FUN_DECL} child
+	uint body_idx = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != fun_decl_idx) continue;
+		NodeKind ck = ast.nodes[c].kind;
+		if (ck == PARAM || ck == TYPE_REF || ck == TYPE_PARAM) continue;
+		if (ck == FUN_DECL) continue;
+		body_idx = c;
+	}
+	if (body_idx == ast::NO_PARENT) return null;
+
+	AstNode* body = &ast.nodes[body_idx];
+	AstNode* type_ref = &ast.nodes[type_ref_idx];
+
+	// Build replacement: TypeName { p1, p2, ... -> body }
+	// Body source: if BLOCK, take its inner statements via raw text between '{' and '}';
+	// else take the expression text.
+	DString out;
+	out.tinit();
+
+	// Type name — use type_ref's source slice (handles generics)
+	String type_text = doc.content[(usz)type_ref.start_offset..(usz)type_ref.end_offset - 1];
+	out.appendf("%s { ", type_text);
+
+	if (param_count > 0) {
+		for (uint p = 0; p < param_count; p++) {
+			if (p > 0) out.append(", ");
+			out.append(param_names[p]);
+		}
+		out.append(" -> ");
+	}
+
+	if (body.kind == BLOCK) {
+		// Strip the outer { } from block source and trim
+		String block_text = doc.content[(usz)body.start_offset..(usz)body.end_offset - 1];
+		if (block_text.len >= 2 && block_text[0] == '{' && block_text[block_text.len - 1] == '}') {
+			String inner = block_text[1..block_text.len - 2];
+			// Trim leading/trailing whitespace
+			usz lo = 0;
+			usz hi = inner.len;
+			while (lo < hi && (inner[lo] == ' ' || inner[lo] == '\t' || inner[lo] == '\n' || inner[lo] == '\r')) lo++;
+			while (hi > lo && (inner[hi - 1] == ' ' || inner[hi - 1] == '\t' || inner[hi - 1] == '\n' || inner[hi - 1] == '\r')) hi--;
+			if (hi > lo) {
+				out.append(inner[lo..hi - 1]);
+			}
+		} else {
+			return null; // malformed block
+		}
+	} else {
+		// Expression body — emit directly
+		String expr_text = doc.content[(usz)body.start_offset..(usz)body.end_offset - 1];
+		out.append(expr_text);
+	}
+
+	out.append(" }");
+
+	// Edit: replace OBJECT_EXPR span
+	Object* rep_start = object::new_obj(tmem);
+	rep_start.set("line", (int)obj.start_line);
+	rep_start.set("character", (int)obj.start_col);
+	Object* rep_end = object::new_obj(tmem);
+	rep_end.set("line", (int)obj.end_line);
+	rep_end.set("character", (int)obj.end_col);
+	Object* rep_range = object::new_obj(tmem);
+	rep_range.set("start", rep_start);
+	rep_range.set("end", rep_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", rep_range);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Convert object literal to lambda");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
 
 	return action;
 }
