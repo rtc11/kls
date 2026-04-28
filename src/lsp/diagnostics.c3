@@ -2233,16 +2233,68 @@ fn bool param_in_skip_context(ParseResult* ast, uint param_idx) {
 	return true;
 }
 
+// Find the function-like / scope-introducing ancestor that "owns" this PARAM.
+fn uint param_owner(ParseResult* ast, uint param_idx) {
+	uint cur = ast.nodes[param_idx].parent;
+	while (cur != ast::NO_PARENT) {
+		NodeKind k = ast.nodes[cur].kind;
+		if (k == FUN_DECL || k == CONSTRUCTOR_DECL || k == LAMBDA_EXPR
+			|| k == ANONYMOUS_FUN_EXPR || k == CATCH_CLAUSE || k == FOR_STMT) {
+			return cur;
+		}
+		cur = ast.nodes[cur].parent;
+	}
+	return ast::NO_PARENT;
+}
+
+// True if a closer scope between `use_idx` and `owner` rebinds `name`.
+fn bool name_shadowed_between(ParseResult* ast, uint use_idx, uint owner, String name) {
+	AstNode* use_n = &ast.nodes[use_idx];
+	uint cur = use_n.parent;
+	while (cur != ast::NO_PARENT && cur != owner) {
+		AstNode* n = &ast.nodes[cur];
+		switch (n.kind) {
+			case FUN_DECL:
+			case CONSTRUCTOR_DECL:
+			case LAMBDA_EXPR:
+			case ANONYMOUS_FUN_EXPR:
+			case CATCH_CLAUSE:
+			case FOR_STMT:
+				for (uint c = 0; c < ast.node_count; c++) {
+					if (ast.nodes[c].parent != cur) continue;
+					NodeKind ck = ast.nodes[c].kind;
+					if (ck == PARAM && ast.nodes[c].name == name) return true;
+					if (ck == PROPERTY_DECL && ast.nodes[c].name == name
+						&& ast.nodes[c].start_offset < use_n.start_offset) return true;
+				}
+			case BLOCK:
+				for (uint c = 0; c < ast.node_count; c++) {
+					if (ast.nodes[c].parent != cur) continue;
+					if (ast.nodes[c].kind != PROPERTY_DECL) continue;
+					if (ast.nodes[c].name != name) continue;
+					if (ast.nodes[c].start_offset < use_n.start_offset) return true;
+				}
+			default:
+				break;
+		}
+		cur = n.parent;
+	}
+	return false;
+}
+
 fn bool is_param_name_used(ParseResult* ast, uint param_idx) {
 	AstNode* p = &ast.nodes[param_idx];
 	String name = p.name;
 	if (name.len == 0) return true;
+	uint owner = param_owner(ast, param_idx);
 	for (uint i = 0; i < ast.node_count; i++) {
 		if (i == param_idx) continue;
 		AstNode* n = &ast.nodes[i];
 		if (n.kind != NAME_EXPR) continue;
 		if (n.name != name) continue;
-		if (n.start_offset > p.start_offset) return true;
+		if (n.start_offset <= p.start_offset) continue;
+		if (owner != ast::NO_PARENT && name_shadowed_between(ast, i, owner, name)) continue;
+		return true;
 	}
 	return false;
 }
