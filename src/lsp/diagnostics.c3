@@ -161,7 +161,7 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 				add_redundant_else_when_diagnostics(diagnostics, ast, type_info, workspace);
 			}
 		}
-		add_unreachable_code_diagnostics(diagnostics, ast);
+		add_unreachable_code_diagnostics(diagnostics, ast, type_info);
 		if (type_info != null) {
 			add_unreachable_cfg_diagnostics(diagnostics, ast, type_info);
 		}
@@ -979,9 +979,10 @@ fn void check_workspace_arg_mismatch(Object* diagnostics, ParseResult* ast, Type
 // ── Unreachable code diagnostic ───────────────────────────────────
 
 /**
- * Flag statements after return/throw in the same block.
+ * Flag statements after return/throw/break/continue (or any expression of
+ * type Nothing) in the same block.
  */
-fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) {
+fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast, TypeInfo* type_info) {
 	// For each BLOCK, find return/throw and flag subsequent siblings
 	for (uint i = 0; i < ast.node_count; i++) {
 		AstNode* n = &ast.nodes[i];
@@ -998,7 +999,7 @@ fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) 
 			}
 		}
 
-		// Find first return/throw and flag everything after it
+		// Find first divergent stmt and flag everything after it
 		bool found_terminator = false;
 		for (usz c = 0; c < child_count; c++) {
 			uint child_idx = children[c];
@@ -1018,6 +1019,11 @@ fn void add_unreachable_code_diagnostics(Object* diagnostics, ParseResult* ast) 
 			if (child.kind == RETURN_EXPR || child.kind == THROW_EXPR ||
 			    child.kind == BREAK_EXPR || child.kind == CONTINUE_EXPR) {
 				found_terminator = true;
+			} else if (type_info != null && type_info.has_type[child_idx]) {
+				// Any expression of type Nothing diverges (e.g. error("..."), TODO()).
+				if (type_info.node_types[child_idx].kind == types::TypeKind.NOTHING) {
+					found_terminator = true;
+				}
 			}
 		}
 	}
