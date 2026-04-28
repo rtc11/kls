@@ -138,6 +138,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 			add_unused_private_decl_diagnostics(diagnostics, content, ast);
 		}
 		add_unit_typed_decl_diagnostics(diagnostics, ast);
+		if (config::can_be_const_diagnostic_enabled()) {
+			add_can_be_const_diagnostics(diagnostics, ast);
+		}
 	}
 
 	// ── Val reassignment (Error) ─────────────────────────────────
@@ -5045,6 +5048,109 @@ fn void add_missing_override_diagnostics(Object* diagnostics, ParseResult* ast,
 		DString message;
 		message.tinit();
 		message.appendf("Function '%s' overrides supertype member but lacks 'override'", fn_node.name);
+		diag.set("message", message.str_view());
+		diagnostics.push(diag);
+	}
+}
+
+// ── Can-be-const diagnostic ────────────────────────────────────────
+//
+// Emit Hint when a `val` could be `const val`. Kotlin spec §16.30:
+// `const` is allowed on top-level or `object` members with primitive /
+// String type and compile-time-constant initializer.
+//
+// Heuristic:
+//   - PROPERTY_DECL with `val` (no MOD_VAR), no MOD_CONST, no MOD_LATEINIT
+//   - No custom getter, not delegated
+//   - Parent is FILE (top-level) OR OBJECT_DECL (object member)
+//     (NOT CLASS_DECL — `const` not allowed inside class)
+//     (NOT COMPANION_OBJECT_DECL is allowed — it's an OBJECT_DECL nested in CLASS_DECL,
+//      check that the COMPANION_OBJECT_DECL itself is the parent)
+//   - Initializer must be:
+//     * LITERAL_EXPR (number, true, false; `null` excluded)
+//     * STRING_TEMPLATE_EXPR with no children (pure string literal)
+//
+// Limitations (deferred): no constant-folding (e.g. `1 + 2`, ref to other const val).
+
+fn bool is_compile_time_constant(ParseResult* ast, uint init_idx) {
+	AstNode* init = &ast.nodes[init_idx];
+	if (init.kind == LITERAL_EXPR) {
+		// Exclude null
+		if (init.extra_text == "null") return false;
+		return true;
+	}
+	if (init.kind == STRING_TEMPLATE_EXPR) {
+		// Pure literal — no template parts
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent == init_idx) return false;
+		}
+		return true;
+	}
+	return false;
+}
+
+fn uint find_property_initializer_for_const(ParseResult* ast, uint prop_idx) {
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != prop_idx) continue;
+		NodeKind ck = ast.nodes[c].kind;
+		if (ck == FUN_DECL) continue;       // get()/set() accessors
+		if (ck == PARAM) continue;
+		if (ck == TYPE_REF) continue;
+		if (ck == TYPE_PARAM) continue;
+		return c;
+	}
+	return ast::NO_PARENT;
+}
+
+fn void add_can_be_const_diagnostics(Object* diagnostics, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if (n.name.len == 0) continue;
+		if ((n.mod_flags & ast::MOD_VAR) != 0) continue;
+		if ((n.mod_flags & ast::MOD_CONST) != 0) continue;
+		if ((n.mod_flags & ast::MOD_LATEINIT) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+
+		// Parent must be FILE or OBJECT_DECL
+		if (n.parent == ast::NO_PARENT) continue;
+		AstNode* parent = &ast.nodes[n.parent];
+		if (parent.kind != FILE && parent.kind != OBJECT_DECL
+			&& parent.kind != COMPANION_OBJECT_DECL) continue;
+
+		// Custom getter or delegate disqualifies
+		bool has_getter = false;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent != i) continue;
+			if (ast.nodes[c].kind == FUN_DECL && ast.nodes[c].name == "get") {
+				has_getter = true;
+				break;
+			}
+		}
+		if (has_getter) continue;
+
+		// Find initializer
+		uint init_idx = find_property_initializer_for_const(ast, i);
+		if (init_idx == ast::NO_PARENT) continue;
+		if (!is_compile_time_constant(ast, init_idx)) continue;
+
+		// Emit Hint at name range
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.name_line);
+		start.set("character", (int)n.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.name_line);
+		end_pos.set("character", (int)(n.name_col + n.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+		diag.set("range", range);
+		diag.set("severity", 4); // Hint
+		diag.set("source", "kls");
+		DString message;
+		message.tinit();
+		message.appendf("Property '%s' could be 'const'", n.name);
 		diag.set("message", message.str_view());
 		diagnostics.push(diag);
 	}

@@ -46,6 +46,7 @@ struct ServerConfig {
 	bool unrelated_equality_diagnostic;   // warn on `==` / `!=` between unrelated types
 	bool redundant_when_else_only_diagnostic; // hint when `when { else -> X }` collapses to `X`
 	bool missing_override_diagnostic; // warn when fun matches supertype member but lacks `override`
+	bool can_be_const_diagnostic; // hint when val with literal initializer could be const val
 }
 
 // Module-level global with defaults
@@ -78,6 +79,7 @@ ServerConfig g_config = {
 	.unrelated_equality_diagnostic = true,
 	.redundant_when_else_only_diagnostic = true,
 	.missing_override_diagnostic = true,
+	.can_be_const_diagnostic = true,
 };
 
 /**
@@ -310,6 +312,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.missing_override_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("canBeConstDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.can_be_const_diagnostic = val.b;
+			log::debug("[kls] config: canBeConstDiagnostic = %s",
+				g_config.can_be_const_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -504,4 +514,12 @@ fn void apply_settings(Object* params) {
  */
 fn bool missing_override_diagnostic_enabled() {
 	return g_config.missing_override_diagnostic;
+}
+
+/**
+ * Whether to emit "Property 'foo' could be 'const'" hints for top-level
+ * or object-member val with compile-time-constant initializer.
+ */
+fn bool can_be_const_diagnostic_enabled() {
+	return g_config.can_be_const_diagnostic;
 }

@@ -86,6 +86,16 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: add `const` modifier to val with literal initializer
+		if (message.starts_with("Property '") && message.contains("could be 'const'")
+			&& doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_add_const(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: remove unnecessary `!!`
 		if (message.starts_with("Unnecessary '!!'")
 			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
@@ -7003,6 +7013,74 @@ fn Object* try_add_override(String uri, Document* doc, ParseResult* ast, Object*
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Add 'override' modifier");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Quickfix: add `const` modifier ─────────────────────────────────
+//
+// For "Property 'foo' could be 'const'" diagnostic, insert `const ` at
+// the start of the PROPERTY_DECL.
+
+fn Object* try_add_const(String uri, Document* doc, ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+
+	int line;
+	int col;
+	if (try sl = start.get_int("line")) { line = sl; } else { return null; }
+	if (try sc = start.get_int("character")) { col = sc; } else { return null; }
+
+	// Find PROPERTY_DECL whose name_line/name_col match
+	uint prop_idx = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != PROPERTY_DECL) continue;
+		if ((int)n.name_line == line && (int)n.name_col == col) {
+			prop_idx = i;
+			break;
+		}
+	}
+	if (prop_idx == uint.max) return null;
+
+	AstNode* prop = &ast.nodes[prop_idx];
+
+	// Insert `const ` at prop.start_line/start_col
+	Object* ins_start = object::new_obj(tmem);
+	ins_start.set("line", (int)prop.start_line);
+	ins_start.set("character", (int)prop.start_col);
+	Object* ins_end = object::new_obj(tmem);
+	ins_end.set("line", (int)prop.start_line);
+	ins_end.set("character", (int)prop.start_col);
+	Object* ins_range = object::new_obj(tmem);
+	ins_range.set("start", ins_start);
+	ins_range.set("end", ins_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", ins_range);
+	edit.set("newText", "const ");
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Add 'const' modifier");
 	action.set("kind", "quickfix");
 	action.set("isPreferred", true);
 	action.set("edit", workspace_edit);
