@@ -400,8 +400,16 @@ fn uint lower_while(Cfg* cfg, ParseResult* pr, uint while_idx, uint pred, LoopSt
 
 	if (pred != NO_CFG) cfg.add_edge(pred, head);
 	cfg.add_edge(head, cond_node);
-	// Cond false: exit loop
-	cfg.add_edge(cond_node, loop_exit);
+
+	// Detect `while (true)` divergent loop: literal-true condition, no break
+	// targeting this loop in body. Skip false-exit edge so CFG sees post-loop
+	// code as unreachable (Kotlin spec §16.30.5).
+	bool divergent = is_literal_true_cond(pr, cond)
+		&& !contains_break(pr, body);
+	if (!divergent) {
+		// Cond false: exit loop
+		cfg.add_edge(cond_node, loop_exit);
+	}
 
 	loops.push(head, loop_exit);
 	uint body_after = body != ast::NO_PARENT
@@ -411,6 +419,41 @@ fn uint lower_while(Cfg* cfg, ParseResult* pr, uint while_idx, uint pred, LoopSt
 	if (body_after != NO_CFG) cfg.add_edge(body_after, head); // back-edge
 
 	return loop_exit;
+}
+
+// ── while(true) helpers ─────────────────────────────────────────────
+
+// True iff `cond_idx` is the literal `true` (peering through PAREN_EXPR).
+fn bool is_literal_true_cond(ParseResult* pr, uint cond_idx) {
+	if (cond_idx == ast::NO_PARENT || cond_idx >= pr.node_count) return false;
+	uint i = cond_idx;
+	// Peer through any number of PAREN_EXPR wrappers.
+	while (pr.nodes[i].kind == PAREN_EXPR) {
+		uint inner = ast::NO_PARENT;
+		for (uint c = pr.nodes[i].children_start; c < pr.node_count; c++) {
+			if (pr.nodes[c].parent != i) continue;
+			inner = c;
+			break;
+		}
+		if (inner == ast::NO_PARENT) return false;
+		i = inner;
+	}
+	return pr.nodes[i].kind == LITERAL_EXPR && pr.nodes[i].extra_text == "true";
+}
+
+// True iff the subtree rooted at `root_idx` contains a BREAK_EXPR. Uses
+// source-offset bounds (O(n)) instead of recursive parent walk.
+fn bool contains_break(ParseResult* pr, uint root_idx) {
+	if (root_idx == ast::NO_PARENT || root_idx >= pr.node_count) return false;
+	AstNode* root = &pr.nodes[root_idx];
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != BREAK_EXPR) continue;
+		if (n.start_offset >= root.start_offset && n.end_offset <= root.end_offset) {
+			return true;
+		}
+	}
+	return false;
 }
 
 fn uint lower_do_while(Cfg* cfg, ParseResult* pr, uint do_idx, uint pred, LoopStack* loops) {
