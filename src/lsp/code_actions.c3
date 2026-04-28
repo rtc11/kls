@@ -323,6 +323,10 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 		if (null_pass != null) {
 			actions.push(null_pass);
 		}
+		Object* pair_to = try_pair_to_infix(uri, doc, ast, params);
+		if (pair_to != null) {
+			actions.push(pair_to);
+		}
 		Object* when_to_if = try_convert_when_to_if_chain(uri, doc, ast, params);
 		if (when_to_if != null) {
 			actions.push(when_to_if);
@@ -6446,6 +6450,166 @@ fn Object* try_simplify_null_passthrough(String uri, Document* doc, ParseResult*
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Simplify null pass-through to expression");
+	action.set("kind", "refactor.rewrite");
+	action.set("edit", workspace_edit);
+	return action;
+}
+
+// ─── Refactor: `Pair(a, b)` → `a to b` ───────────────────────────
+//
+// Cursor-based refactor.rewrite. The Pair constructor has an idiomatic
+// infix replacement `to` that produces the same value with less noise.
+//
+// Skips:
+//   - Other arity (Pair takes exactly 2 args)
+//   - Named args (`Pair(first = a, second = b)` is more explicit and
+//     intentional — leave alone)
+//   - Spread arg (`*xs`) — meaningless for Pair but defensive
+//   - Trailing-lambda call (Pair has no lambda overload — defensive)
+//   - Cursor inside a generic type argument, e.g. `Pair<A, B>(a, b)` is
+//     still rewritten — the `to` infix still resolves to the same thing
+//   - Comment inside the call expression span
+//
+// `to` has very low precedence so most arg expressions need parens to
+// preserve meaning. Be conservative: wrap unless the arg is a simple
+// NAME_EXPR / LITERAL_EXPR / DOT_EXPR / CALL_EXPR / THIS_EXPR / SUPER_EXPR
+// / PAREN_EXPR / INDEX_EXPR.
+fn bool arg_needs_parens_for_to(NodeKind k) {
+	switch (k) {
+		case NAME_EXPR:
+		case LITERAL_EXPR:
+		case STRING_TEMPLATE_EXPR:
+		case DOT_EXPR:
+		case CALL_EXPR:
+		case THIS_EXPR:
+		case SUPER_EXPR:
+		case PAREN_EXPR:
+		case INDEX_EXPR:
+			return false;
+		default:
+			return true;
+	}
+}
+
+fn Object* try_pair_to_infix(String uri, Document* doc, ParseResult* ast, Object* params) {
+	if (doc == null || ast == null) return null;
+	Object* range = params.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	uint cursor_line = (uint)(start.get_int("line") ?? 0);
+	uint cursor_col = (uint)(start.get_int("character") ?? 0);
+	long cursor_offset = document::position_to_byte_offset(doc.content, cursor_line, cursor_col);
+	if (cursor_offset < 0) return null;
+
+	// Smallest CALL_EXPR named "Pair" containing the cursor.
+	uint call_idx = uint.max;
+	uint best_span = uint.max;
+	for (uint i = 1; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		if (n.name != "Pair") continue;
+		if ((uint)cursor_offset < n.start_offset || (uint)cursor_offset >= n.end_offset) continue;
+		uint span = n.end_offset - n.start_offset;
+		if (span < best_span) {
+			best_span = span;
+			call_idx = i;
+		}
+	}
+	if (call_idx == uint.max) return null;
+	AstNode* call = &ast.nodes[call_idx];
+
+	// Walk children: callee (kind != VALUE_ARGUMENT) + VALUE_ARGUMENTs.
+	uint[8] arg_idxs;
+	usz arg_count = 0;
+	bool seen_callee = false;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != call_idx) continue;
+		AstNode* ch = &ast.nodes[c];
+		if (ch.kind == ANNOTATION_ENTRY) continue;
+		if (ch.kind == VALUE_ARGUMENT) {
+			if (ch.extra_text == "trailing") return null;     // trailing lambda — bail
+			if (ch.extra_text == "*") return null;            // spread — bail
+			if (ch.name.len > 0) return null;                 // named arg — bail
+			if (arg_count >= 8) return null;
+			arg_idxs[arg_count++] = c;
+		} else if (!seen_callee) {
+			seen_callee = true;
+		}
+	}
+	if (arg_count != 2) return null;
+
+	// Comment guard.
+	if (range_has_comment(doc.content, call.start_offset, call.end_offset)) return null;
+
+	// Extract the actual arg expressions (single child of each VALUE_ARGUMENT).
+	uint a_arg = arg_idxs[0];
+	uint b_arg = arg_idxs[1];
+	uint a_expr = ast::NO_PARENT;
+	uint b_expr = ast::NO_PARENT;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent == a_arg && a_expr == ast::NO_PARENT) a_expr = c;
+		if (ast.nodes[c].parent == b_arg && b_expr == ast::NO_PARENT) b_expr = c;
+	}
+	if (a_expr == ast::NO_PARENT) return null;
+	if (b_expr == ast::NO_PARENT) return null;
+
+	AstNode* a_n = &ast.nodes[a_expr];
+	AstNode* b_n = &ast.nodes[b_expr];
+	if (a_n.start_offset >= a_n.end_offset) return null;
+	if (b_n.start_offset >= b_n.end_offset) return null;
+	if (a_n.end_offset > doc.content.len) return null;
+	if (b_n.end_offset > doc.content.len) return null;
+
+	String a_src = doc.content[a_n.start_offset:a_n.end_offset - a_n.start_offset];
+	String b_src = doc.content[b_n.start_offset:b_n.end_offset - b_n.start_offset];
+
+	DString out;
+	out.tinit();
+	if (arg_needs_parens_for_to(a_n.kind)) {
+		out.append("(");
+		out.append(a_src);
+		out.append(")");
+	} else {
+		out.append(a_src);
+	}
+	out.append(" to ");
+	if (arg_needs_parens_for_to(b_n.kind)) {
+		out.append("(");
+		out.append(b_src);
+		out.append(")");
+	} else {
+		out.append(b_src);
+	}
+
+	uint start_line; uint start_col;
+	uint end_line; uint end_col;
+	offset_to_line_col(doc.content, call.start_offset, &start_line, &start_col);
+	offset_to_line_col(doc.content, call.end_offset, &end_line, &end_col);
+
+	Object* edit_range = object::new_obj(tmem);
+	Object* es = object::new_obj(tmem);
+	es.set("line", (int)start_line);
+	es.set("character", (int)start_col);
+	Object* ee = object::new_obj(tmem);
+	ee.set("line", (int)end_line);
+	ee.set("character", (int)end_col);
+	edit_range.set("start", es);
+	edit_range.set("end", ee);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", out.str_view());
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Replace 'Pair(a, b)' with 'a to b'");
 	action.set("kind", "refactor.rewrite");
 	action.set("edit", workspace_edit);
 	return action;
