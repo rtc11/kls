@@ -1713,6 +1713,10 @@ fn Object* try_convert_fun_to_expression_body(String uri, Document* doc, ParseRe
 	}
 	if (stmt_count != 1 || single_stmt_idx == uint.max) return null;
 
+	// If block contains any comment between '{' and '}' (other than inside the
+	// statement itself), refuse — converting would silently drop the comment.
+	if (block_contains_comment_outside(doc.content, block, &ast.nodes[single_stmt_idx])) return null;
+
 	AstNode* stmt = &ast.nodes[single_stmt_idx];
 
 	// Must be a RETURN_EXPR or a simple expression
@@ -4896,6 +4900,32 @@ fn bool cond_text_needs_parens(String s) {
 			default:
 				break;
 		}
+	}
+	return false;
+}
+
+// Scan block source bytes for // or /* OUTSIDE the single statement range.
+// Returns true if any comment marker found in the block prelude/postlude.
+fn bool block_contains_comment_outside(String content, AstNode* block, AstNode* stmt) {
+	usz bs = (usz)block.start_offset;
+	usz be = (usz)block.end_offset;
+	usz ss = (usz)stmt.start_offset;
+	usz se = (usz)stmt.end_offset;
+	if (bs >= content.len || be > content.len) return false;
+	// Check prelude: bs..ss and postlude: se..be
+	if (range_has_comment(content, bs, ss)) return true;
+	if (range_has_comment(content, se, be)) return true;
+	return false;
+}
+
+fn bool range_has_comment(String content, usz lo, usz hi) {
+	if (hi > content.len) hi = content.len;
+	usz i = lo;
+	while (i + 1 < hi) {
+		char c0 = content[i];
+		char c1 = content[i+1];
+		if (c0 == '/' && (c1 == '/' || c1 == '*')) return true;
+		i++;
 	}
 	return false;
 }
