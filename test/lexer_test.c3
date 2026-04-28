@@ -45,6 +45,27 @@ fn void newlines_only() @test {
 	assert(tok.kind == EOF, "expected EOF after newlines");
 }
 
+fn void shebang_at_file_start_skipped() @test {
+	Token[] toks = all_tokens("#!/usr/bin/env kotlin\nfun main() {}\n");
+	assert(toks.len >= 4, "expected tokens after shebang, got %d", (int)toks.len);
+	assert(toks[0].kind == KW_FUN, "expected KW_FUN after shebang, got %d", (int)toks[0].kind);
+	assert(toks[1].kind == IDENTIFIER, "expected IDENTIFIER for main");
+	assert(toks[2].kind == LPAREN, "expected LPAREN after main");
+	assert(toks[3].kind == RPAREN, "expected RPAREN after main");
+}
+
+fn void shebang_only_at_file_start() @test {
+	Token[] toks = all_tokens("fun main() {}\n#!notashebang");
+	bool found_hash = false;
+	for (usz i = 0; i < toks.len; i++) {
+		if (toks[i].kind == HASH) {
+			found_hash = true;
+			break;
+		}
+	}
+	assert(found_hash, "expected mid-file # to lex as HASH");
+}
+
 // ── Hard Keywords ───────────────────────────────────────────────────
 
 fn void keyword_fun() @test {
@@ -317,10 +338,28 @@ fn void float_with_f_suffix() @test {
 	assert(tok.text == "3.14f");
 }
 
+fn void float_with_d_suffix_lower() @test {
+	Token tok = first("1.0d");
+	assert(tok.kind == FLOAT_LITERAL);
+	assert(tok.text == "1.0d");
+}
+
+fn void float_with_d_suffix_upper() @test {
+	Token tok = first("2.5D");
+	assert(tok.kind == FLOAT_LITERAL);
+	assert(tok.text == "2.5D");
+}
+
 fn void scientific_notation() @test {
 	Token tok = first("1e10");
 	assert(tok.kind == FLOAT_LITERAL);
 	assert(tok.text == "1e10");
+}
+
+fn void scientific_with_d_suffix_lower() @test {
+	Token tok = first("1e10d");
+	assert(tok.kind == FLOAT_LITERAL);
+	assert(tok.text == "1e10d");
 }
 
 fn void scientific_negative_exp() @test {
@@ -347,6 +386,12 @@ fn void scientific_underscore_in_signed_exponent() @test {
 	Token tok = first("2.5E-1_2");
 	assert(tok.kind == FLOAT_LITERAL);
 	assert(tok.text == "2.5E-1_2");
+}
+
+fn void integer_shape_with_d_suffix_upper() @test {
+	Token tok = first("3D");
+	assert(tok.kind == FLOAT_LITERAL);
+	assert(tok.text == "3D");
 }
 
 // ── String Literals ─────────────────────────────────────────────────
@@ -494,6 +539,19 @@ fn void double_arrow() @test {
 fn void range_op() @test {
 	Token tok = first("..");
 	assert(tok.kind == RANGE);
+}
+
+fn void reserved_ellipsis() @test {
+	Token[] toks = all_tokens("...");
+	assert(toks.len == 1, "expected 1 token, got %d", (int)toks.len);
+	assert(toks[0].kind == RESERVED);
+	assert(toks[0].text == "...");
+}
+
+fn void range_until_op() @test {
+	Token[] toks = all_tokens("..<");
+	assert(toks.len == 1, "expected 1 token, got %d", (int)toks.len);
+	assert(toks[0].kind == RANGE_UNTIL);
 }
 
 fn void coloncolon() @test {

@@ -49,6 +49,8 @@ fn Lexer init_at(String source, usz start_pos, uint start_line, uint start_col) 
 }
 
 fn Token Lexer.next(Lexer* self) {
+	self.skip_shebang_if_at_bof();
+
 	// If we're inside a string template expression (${ ... }),
 	// lex normally but track brace nesting.
 	if (self.string_depth > 0 && self.brace_depth[self.string_depth - 1] > 0) {
@@ -298,6 +300,23 @@ fn void Lexer.skip_whitespace_and_comments(Lexer* self) {
 	}
 }
 
+fn void Lexer.skip_shebang_if_at_bof(Lexer* self) {
+	if (self.pos != 0 || self.line != 0 || self.col != 0) {
+		return;
+	}
+	if (self.source.len < 2 || self.source[0] != '#' || self.source[1] != '!') {
+		return;
+	}
+	while (self.pos < self.source.len && self.peek() != '\n') {
+		self.advance();
+	}
+	if (self.pos < self.source.len && self.peek() == '\n') {
+		self.advance();
+		self.line++;
+		self.col = 0;
+	}
+}
+
 fn void Lexer.skip_block_comment(Lexer* self) {
 	self.advance(); // skip /
 	self.advance(); // skip *
@@ -450,7 +469,7 @@ fn Token Lexer.lex_number(Lexer* self, usz start, uint start_line, uint start_co
 	}
 
 	// Float suffix
-	if (self.pos < self.source.len && (self.peek() == 'f' || self.peek() == 'F')) {
+	if (self.pos < self.source.len && (self.peek() == 'f' || self.peek() == 'F' || self.peek() == 'd' || self.peek() == 'D')) {
 		kind = FLOAT_LITERAL;
 		self.advance();
 	}
@@ -687,13 +706,14 @@ fn Token Lexer.lex_operator(Lexer* self, usz start, uint start_line, uint start_
 	char c = self.peek();
 	self.advance();
 
-	switch (c) {
-		case '.':
-			if (self.peek() == '.') {
-				self.advance();
-				if (self.peek() == '<') { self.advance(); return self.make_token_at(RANGE_UNTIL, start, start_line, start_col); }
-				return self.make_token_at(RANGE, start, start_line, start_col);
-			}
+		switch (c) {
+			case '.':
+				if (self.peek() == '.') {
+					self.advance();
+					if (self.peek() == '.') { self.advance(); return self.make_token_at(RESERVED, start, start_line, start_col); }
+					if (self.peek() == '<') { self.advance(); return self.make_token_at(RANGE_UNTIL, start, start_line, start_col); }
+					return self.make_token_at(RANGE, start, start_line, start_col);
+				}
 			return self.make_token_at(DOT, start, start_line, start_col);
 		case ',': return self.make_token_at(COMMA, start, start_line, start_col);
 		case '(': return self.make_token_at(LPAREN, start, start_line, start_col);
