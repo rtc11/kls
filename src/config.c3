@@ -37,6 +37,7 @@ struct ServerConfig {
 	bool catch_swallows_diagnostic; // emit hints for non-empty catch blocks that ignore the exception
 	bool redundant_bool_comparison_diagnostic; // emit warnings for `b == true` / `b != false` etc.
 	bool redundant_type_check_diagnostic; // emit warnings for `x is T` / `x !is T` where typeof(x) <: T
+	bool unused_private_diagnostic; // emit warnings for unused private top-level fns/properties/classes
 }
 
 // Module-level global with defaults
@@ -60,6 +61,7 @@ ServerConfig g_config = {
 	.catch_swallows_diagnostic = true,
 	.redundant_bool_comparison_diagnostic = true,
 	.redundant_type_check_diagnostic = true,
+	.unused_private_diagnostic = true,
 };
 
 /**
@@ -220,6 +222,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_type_check_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("unusedPrivateDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.unused_private_diagnostic = val.b;
+			log::debug("[kls] config: unusedPrivateDiagnostic = %s",
+				g_config.unused_private_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -360,6 +370,10 @@ fn bool redundant_bool_comparison_diagnostic_enabled() {
 
 fn bool redundant_type_check_diagnostic_enabled() {
 	return g_config.redundant_type_check_diagnostic;
+}
+
+fn bool unused_private_diagnostic_enabled() {
+	return g_config.unused_private_diagnostic;
 }
 
 /**

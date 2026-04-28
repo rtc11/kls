@@ -131,6 +131,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::var_can_be_val_diagnostic_enabled()) {
 			add_var_can_be_val_diagnostics(diagnostics, content, ast);
 		}
+		if (config::unused_private_diagnostic_enabled()) {
+			add_unused_private_decl_diagnostics(diagnostics, content, ast);
+		}
 	}
 
 	// ── Val reassignment (Error) ─────────────────────────────────
@@ -4172,4 +4175,122 @@ fn uint last_child_of(ParseResult* ast, uint parent_idx) {
 		last = c;
 	}
 	return last;
+}
+
+// ── Unused private declarations ──────────────────────────────────
+
+// True if FUN_DECL/PROPERTY_DECL/CLASS_DECL/OBJECT_DECL is at top-level
+// (direct child of FILE) — not nested inside a class/object/fn.
+fn bool decl_is_top_level(ParseResult* ast, uint idx) {
+	uint p = ast.nodes[idx].parent;
+	if (p == ast::NO_PARENT) return false;
+	return ast.nodes[p].kind == FILE;
+}
+
+// Conservative whole-file name reference scan. Returns true if any
+// NAME_EXPR (other than the decl itself) matches `name`. This finds
+// bare-name calls, qualified-call member names, type-name references
+// (since type-text is searched separately), and constructor calls.
+fn bool name_referenced_in_file(ParseResult* ast, uint decl_idx, String name) {
+	if (name.len == 0) return true;
+	for (uint i = 0; i < ast.node_count; i++) {
+		if (i == decl_idx) continue;
+		AstNode* n = &ast.nodes[i];
+		// NAME_EXPR — direct identifier reference (calls, reads, ctor calls).
+		if (n.kind == NAME_EXPR && n.name == name) return true;
+		// DOT_EXPR — member name match (e.g. `obj.helper`).
+		if (n.kind == DOT_EXPR && n.name == name) return true;
+		// Any decl with type_text containing the name as a token (class refs
+		// in property/param type annotations, return-type, etc.).
+		if (n.type_text.len > 0 && type_text_mentions(n.type_text, name)) return true;
+	}
+	return false;
+}
+
+// Cheap word-boundary check on type_text strings like "Foo", "Foo?",
+// "List<Foo>", "Map<String, Foo?>".
+fn bool type_text_mentions(String haystack, String needle) {
+	if (needle.len == 0 || haystack.len < needle.len) return false;
+	for (usz i = 0; i + needle.len <= haystack.len; i++) {
+		// Match candidate
+		bool eq = true;
+		for (usz j = 0; j < needle.len; j++) {
+			if (haystack[i+j] != needle[j]) { eq = false; break; }
+		}
+		if (!eq) continue;
+		// Left boundary
+		if (i > 0) {
+			char c = haystack[i-1];
+			if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+				|| (c >= '0' && c <= '9') || c == '_') continue;
+		}
+		// Right boundary
+		usz r = i + needle.len;
+		if (r < haystack.len) {
+			char c = haystack[r];
+			if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+				|| (c >= '0' && c <= '9') || c == '_') continue;
+		}
+		return true;
+	}
+	return false;
+}
+
+fn void add_unused_private_decl_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		NodeKind k = n.kind;
+		if (k != FUN_DECL && k != PROPERTY_DECL && k != CLASS_DECL && k != OBJECT_DECL) continue;
+		if ((n.mod_flags & ast::MOD_PRIVATE) == 0) continue;
+		if (!decl_is_top_level(ast, i)) continue;
+		if (n.name.len == 0) continue;
+		if (n.name[0] == '_') continue;
+		if (n.name == "main") continue;
+
+		// Skip overrides (contract-driven), operator funs (called via syntax),
+		// expect/external (no body in this file), and delegated properties.
+		if ((n.mod_flags & ast::MOD_OVERRIDE) != 0) continue;
+		if ((n.mod_flags & ast::MOD_OPERATOR) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXPECT) != 0) continue;
+		if ((n.mod_flags & ast::MOD_EXTERNAL) != 0) continue;
+		if (k == PROPERTY_DECL && property_is_delegated(ast, i)) continue;
+
+		if (name_referenced_in_file(ast, i, n.name)) continue;
+
+		Object* diag = object::new_obj(tmem);
+
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)n.name_line);
+		start.set("character", (int)n.name_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)n.name_line);
+		end_pos.set("character", (int)(n.name_col + n.name_len));
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		String kind_label;
+		switch (k) {
+			case FUN_DECL:      kind_label = "Function";
+			case PROPERTY_DECL: kind_label = "Property";
+			case CLASS_DECL:    kind_label = "Class";
+			case OBJECT_DECL:   kind_label = "Object";
+			default:            kind_label = "Declaration";
+		}
+
+		DString message;
+		message.tinit();
+		message.appendf("%s '%s' is never used", kind_label, n.name);
+		diag.set("message", message.str_view());
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		diagnostics.push(diag);
+	}
 }
