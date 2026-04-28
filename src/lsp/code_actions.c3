@@ -139,6 +139,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: replace redundant `x is T` / `x !is T` with literal
+		if (message.starts_with("Type check is always") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_replace_type_check_with_literal(uri, doc, ast, diag, message);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -4558,6 +4567,106 @@ fn Object* try_remove_useless_cast(String uri, Document* doc, ParseResult* ast, 
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Remove useless cast");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Quickfix: replace redundant type check with literal ─────────
+//
+// Pairs with diagnostic from add_redundant_type_check_diagnostics.
+// Rewrites TYPE_CHECK_EXPR ('x is T' / 'x !is T') to the constant
+// 'true' or 'false' depending on which form the diagnostic message
+// reports.
+//
+// Conservative: only offered when the subject expression has no
+// observable side effects (NAME_EXPR, DOT_EXPR, THIS_EXPR, SUPER_EXPR,
+// LITERAL_EXPR, PAREN_EXPR). For CALL_EXPR / other complex subjects
+// the rewrite would silently discard the call, so skip — user can
+// manually decide whether the call is needed for its side effect.
+fn Object* try_replace_type_check_with_literal(String uri, Document* doc, ParseResult* ast,
+		Object* diag, String message) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate TYPE_CHECK_EXPR matching diag start position.
+	uint tc_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != TYPE_CHECK_EXPR) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			tc_idx = i;
+			break;
+		}
+	}
+	if (tc_idx == (uint)-1) return null;
+	AstNode* tc = &ast.nodes[tc_idx];
+
+	// Find subject child (TYPE_CHECK_EXPR re-parents left).
+	uint subj_idx = (uint)-1;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != tc_idx) continue;
+		subj_idx = c;
+		break;
+	}
+	if (subj_idx == (uint)-1) return null;
+	AstNode* subj = &ast.nodes[subj_idx];
+
+	// Side-effect gate: only offer rewrite for clearly pure subjects.
+	switch (subj.kind) {
+		case NAME_EXPR:
+		case DOT_EXPR:
+		case THIS_EXPR:
+		case SUPER_EXPR:
+		case LITERAL_EXPR:
+		case PAREN_EXPR:
+			break;
+		default:
+			return null;
+	}
+
+	bool always_true = message.contains("always true");
+	String literal = always_true ? "true" : "false";
+
+	// Build replacement range spanning full TYPE_CHECK_EXPR.
+	Object* edit_range = object::new_obj(tmem);
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)tc.start_line);
+	edit_start.set("character", (int)tc.start_col);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", (int)tc.end_line);
+	edit_end.set("character", (int)tc.end_col);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", literal);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", always_true ? "Replace with 'true'" : "Replace with 'false'");
 	action.set("kind", "quickfix");
 	action.set("isPreferred", true);
 	action.set("edit", workspace_edit);
