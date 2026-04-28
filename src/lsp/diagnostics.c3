@@ -4199,6 +4199,19 @@ fn bool decl_is_top_level(ParseResult* ast, uint idx) {
 	return ast.nodes[p].kind == FILE;
 }
 
+// Returns true when the declaration's enclosing scope is a context where a
+// "private" modifier means file-private (top-level) or class-private (member
+// of class/interface/object/companion). These are the scopes where we can
+// soundly run a whole-file name-reference scan to detect dead code: the
+// declaration is invisible outside the file/class anyway.
+fn bool decl_is_private_capable_scope(ParseResult* ast, uint idx) {
+	uint p = ast.nodes[idx].parent;
+	if (p == ast::NO_PARENT) return false;
+	NodeKind pk = ast.nodes[p].kind;
+	return pk == FILE || pk == CLASS_DECL || pk == INTERFACE_DECL
+		|| pk == OBJECT_DECL || pk == COMPANION_OBJECT_DECL;
+}
+
 // Conservative whole-file name reference scan. Returns true if any
 // NAME_EXPR (other than the decl itself) matches `name`. This finds
 // bare-name calls, qualified-call member names, type-name references
@@ -4254,7 +4267,7 @@ fn void add_unused_private_decl_diagnostics(Object* diagnostics, String content,
 		NodeKind k = n.kind;
 		if (k != FUN_DECL && k != PROPERTY_DECL && k != CLASS_DECL && k != OBJECT_DECL) continue;
 		if ((n.mod_flags & ast::MOD_PRIVATE) == 0) continue;
-		if (!decl_is_top_level(ast, i)) continue;
+		if (!decl_is_private_capable_scope(ast, i)) continue;
 		if (n.name.len == 0) continue;
 		if (n.name[0] == '_') continue;
 		if (n.name == "main") continue;

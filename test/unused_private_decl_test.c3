@@ -174,8 +174,8 @@ fn void unused_private_member_fn_not_flagged() @test {
 }
 `;
 		Object* diags = build_diags(content);
-		// Member-private decls are out of scope for this diagnostic.
-		assert(!has(diags, "'helper' is never used"), "member-private helper not in scope");
+		// Member-private decls are now in scope (extended in feature 28).
+		assert(has(diags, "'helper' is never used"), "private class member helper should be flagged");
 	};
 }
 
