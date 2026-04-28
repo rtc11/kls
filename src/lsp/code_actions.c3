@@ -130,6 +130,15 @@ fn Object*? handle_code_action(DocumentStore* store, WorkspaceIndex* workspace, 
 			}
 		}
 
+		// Quick fix: remove useless cast `x as T`
+		if (message.starts_with("Useless cast") && doc != null && ast != null
+			&& is_kind_wanted("quickfix", only_kinds[:only_count])) {
+			Object* action = try_remove_useless_cast(uri, doc, ast, diag);
+			if (action != null) {
+				actions.push(action);
+			}
+		}
+
 		// Quick fix: replace & with && or | with ||
 		if (message.starts_with("Unexpected character:") && is_kind_wanted("quickfix", only_kinds[:only_count])) {
 			Object* action = try_fix_operator(uri, diag, message);
@@ -4463,6 +4472,92 @@ fn Object* try_simplify_redundant_bool_cmp(String uri, Document* doc, ParseResul
 
 	Object* action = object::new_obj(tmem);
 	action.set("title", "Simplify boolean comparison");
+	action.set("kind", "quickfix");
+	action.set("isPreferred", true);
+	action.set("edit", workspace_edit);
+
+	Object* action_diags = object::new_obj(tmem);
+	action_diags.push(diag);
+	action.set("diagnostics", action_diags);
+
+	return action;
+}
+
+// ── Quickfix: remove useless cast ─────────────────────────────
+//
+// Pairs with diagnostic `useless_cast_diagnostic`. Replaces the entire
+// TYPE_CAST_EXPR span (`x as T`) with the source expression text (`x`).
+// No additional parenthesization required because the source expression
+// is itself a valid expression at the original cast's grammatical
+// position (a TYPE_CAST_EXPR appears wherever a postfix expression is
+// allowed, and any expression that fits as the LHS of `as` already
+// fits in the same slot without it).
+fn Object* try_remove_useless_cast(String uri, Document* doc, ParseResult* ast, Object* diag) {
+	if (doc == null || ast == null) return null;
+
+	Object* range = diag.get("range") ?? null;
+	if (range == null) return null;
+	Object* start = range.get("start") ?? null;
+	if (start == null) return null;
+	int diag_line;
+	int diag_col;
+	if (try v = start.get_int("line")) { diag_line = v; } else { return null; }
+	if (try v = start.get_int("character")) { diag_col = v; } else { return null; }
+
+	// Locate TYPE_CAST_EXPR matching diag start position
+	uint cast_idx = (uint)-1;
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		if (n.kind != TYPE_CAST_EXPR) continue;
+		if ((int)n.start_line == diag_line && (int)n.start_col == diag_col) {
+			cast_idx = i;
+			break;
+		}
+	}
+	if (cast_idx == (uint)-1) return null;
+	AstNode* cast = &ast.nodes[cast_idx];
+
+	// Find source expression: first child. TYPE_CAST_EXPR re-parents an
+	// already-parsed left expression, so the child may have a lower index.
+	uint src_idx = (uint)-1;
+	for (uint c = 0; c < ast.node_count; c++) {
+		if (ast.nodes[c].parent != cast_idx) continue;
+		src_idx = c;
+		break;
+	}
+	if (src_idx == (uint)-1) return null;
+	AstNode* src = &ast.nodes[src_idx];
+
+	String content = doc.content;
+	if (src.start_offset >= content.len || src.end_offset > content.len) return null;
+	if (src.end_offset <= src.start_offset) return null;
+	String src_text = content[src.start_offset:src.end_offset - src.start_offset];
+
+	// Build replacement range spanning full TYPE_CAST_EXPR.
+	Object* edit_range = object::new_obj(tmem);
+	Object* edit_start = object::new_obj(tmem);
+	edit_start.set("line", (int)cast.start_line);
+	edit_start.set("character", (int)cast.start_col);
+	Object* edit_end = object::new_obj(tmem);
+	edit_end.set("line", (int)cast.end_line);
+	edit_end.set("character", (int)cast.end_col);
+	edit_range.set("start", edit_start);
+	edit_range.set("end", edit_end);
+
+	Object* edit = object::new_obj(tmem);
+	edit.set("range", edit_range);
+	edit.set("newText", src_text);
+
+	Object* edits = object::new_obj(tmem);
+	edits.push(edit);
+
+	Object* changes = object::new_obj(tmem);
+	changes.set(uri, edits);
+	Object* workspace_edit = object::new_obj(tmem);
+	workspace_edit.set("changes", changes);
+
+	Object* action = object::new_obj(tmem);
+	action.set("title", "Remove useless cast");
 	action.set("kind", "quickfix");
 	action.set("isPreferred", true);
 	action.set("edit", workspace_edit);
