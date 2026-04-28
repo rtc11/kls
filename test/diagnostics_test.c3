@@ -2213,3 +2213,132 @@ fn void private_var_in_object_can_be_val() @test {
 		assert(flagged, "private var in object (singleton) should also be flagged");
 	};
 }
+
+fn void redund_type_check_is_int_always_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is Int) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always true") && msg.contains("Int")) flagged = true;
+		}
+		assert(flagged, "x: Int 'is Int' should be flagged always true");
+	};
+}
+
+fn void redund_type_check_subtype_always_true() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is Number) println("y")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always true") && msg.contains("Number")) flagged = true;
+		}
+		assert(flagged, "x: Int 'is Number' should be flagged always true (Int <: Number)");
+	};
+}
+
+fn void redund_type_check_neg_is_always_false() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x !is Int) println("never")
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always false") && msg.contains("Int")) flagged = true;
+		}
+		assert(flagged, "x: Int '!is Int' should be flagged always false");
+	};
+}
+
+fn void redund_type_check_downcast_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Any) {
+    if (x is Int) println("y")
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"x: Any 'is Int' should NOT be flagged (downcast is meaningful)");
+	};
+}
+
+fn void redund_type_check_nullable_to_nonnull_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo(x: Int?) {
+    if (x is Int) println("y")
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"x: Int? 'is Int' should NOT be flagged (filters out null)");
+	};
+}
+
+fn void redund_type_check_unrelated_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is String) println("never")
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Type check is always")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"x: Int 'is String' should NOT be flagged (unrelated, separate concern)");
+	};
+}
+
+fn void redund_type_check_carries_unnecessary_tag() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`fun foo() {
+    val x: Int = 1
+    if (x is Int) println("y")
+}`
+		);
+		bool found_with_tag = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			Object* d = result.get_at(i);
+			String msg = d.get_string("message") ?? "";
+			if (!msg.contains("Type check is always")) continue;
+			Object* tags = d.get("tags") ?? null;
+			if (tags == null) continue;
+			for (usz t = 0; t < tags.get_len(); t++) {
+				int tag_val = tags.get_int_at(t) ?? 0;
+				if (tag_val == 1) { found_with_tag = true; break; }
+			}
+			if (found_with_tag) break;
+		}
+		assert(found_with_tag,
+			"Redundant type check should include Unnecessary tag (1)");
+	};
+}

@@ -184,6 +184,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (config::redundant_bool_comparison_diagnostic_enabled()) {
 			add_redundant_bool_comparison_diagnostics(diagnostics, ast);
 		}
+		if (type_info != null && config::redundant_type_check_diagnostic_enabled()) {
+			add_redundant_type_check_diagnostics(diagnostics, ast, type_info);
+		}
 	}
 
 	return diagnostics;
@@ -3921,6 +3924,87 @@ fn void add_redundant_bool_comparison_diagnostics(Object* diagnostics, ParseResu
 		diag.set("message", simplifies_to_negation
 			? "Redundant comparison to boolean literal: replace with negated expression"
 			: "Redundant comparison to boolean literal: replace with expression");
+
+		diagnostics.push(diag);
+	}
+}
+
+// ── Redundant type check (`x is T` / `x !is T`) ──────────────────
+//
+// Per Kotlin spec §11.3 type-check operators are statically decidable
+// when the subject's type is provably assignable to the test type:
+//   `x is T`  → always true   when typeof(x) <: T
+//   `x !is T` → always false  when typeof(x) <: T
+//
+// Skips:
+//   - subject UNKNOWN (no type info to reason from)
+//   - subject nullable + target non-null (the check filters out null,
+//     meaningful runtime behaviour)
+//   - subject is a SUPERTYPE of target (downcast — runtime check
+//     genuinely narrows, NOT redundant)
+fn void add_redundant_type_check_diagnostics(Object* diagnostics, ParseResult* ast,
+		types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != TYPE_CHECK_EXPR) continue;
+		if (node.extra_text != "is" && node.extra_text != "!is") continue;
+		String target_text = node.type_text.trim();
+		if (target_text.len == 0) continue;
+
+		// Find subject (first child).
+		uint subj_idx = uint.max;
+		for (uint c = 0; c < ast.node_count; c++) {
+			if (ast.nodes[c].parent == i) { subj_idx = c; break; }
+		}
+		if (subj_idx == uint.max) continue;
+		if (!type_info.has_type[subj_idx]) continue;
+		types::TypeRef subj = type_info.node_types[subj_idx];
+		if (subj.kind == types::TypeKind.UNKNOWN) continue;
+		if (subj.name.len == 0) continue;
+
+		// Target nullable from text suffix.
+		bool target_nullable = target_text.ends_with("?");
+
+		// Subject nullable + target non-null: meaningful null-filter,
+		// preserves runtime check semantics.
+		if (subj.nullable && !target_nullable) continue;
+
+		types::TypeRef target = types::parse_type_text(target_text);
+		if (target.kind == types::TypeKind.UNKNOWN) continue;
+
+		if (!types::is_assignable_to(subj, target)) continue;
+
+		bool always_true = (node.extra_text == "is");
+
+		Object* diag = object::new_obj(tmem);
+		Object* range = object::new_obj(tmem);
+		Object* start = object::new_obj(tmem);
+		start.set("line", (int)node.start_line);
+		start.set("character", (int)node.start_col);
+		Object* end_pos = object::new_obj(tmem);
+		end_pos.set("line", (int)node.end_line);
+		end_pos.set("character", (int)node.end_col);
+		range.set("start", start);
+		range.set("end", end_pos);
+
+		diag.set("range", range);
+		diag.set("severity", 2); // Warning
+		diag.set("source", "kls");
+
+		Object* tags = object::new_obj(tmem);
+		tags.push(object::new_int(1, tmem)); // Unnecessary
+		diag.set("tags", tags);
+
+		DString message;
+		message.tinit();
+		String subj_display = subj.nullable
+			? string::tformat("%s?", subj.name)
+			: subj.name;
+		message.appendf("Type check is always %s: '%s' is already of type '%s'",
+			always_true ? "true" : "false", subj_display, target_text);
+		diag.set("message", message.str_view());
 
 		diagnostics.push(diag);
 	}

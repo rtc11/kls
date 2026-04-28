@@ -36,6 +36,7 @@ struct ServerConfig {
 	bool redundant_else_when_diagnostic; // emit warnings for `else` arm in already-exhaustive `when`
 	bool catch_swallows_diagnostic; // emit hints for non-empty catch blocks that ignore the exception
 	bool redundant_bool_comparison_diagnostic; // emit warnings for `b == true` / `b != false` etc.
+	bool redundant_type_check_diagnostic; // emit warnings for `x is T` / `x !is T` where typeof(x) <: T
 }
 
 // Module-level global with defaults
@@ -58,6 +59,7 @@ ServerConfig g_config = {
 	.redundant_else_when_diagnostic = true,
 	.catch_swallows_diagnostic = true,
 	.redundant_bool_comparison_diagnostic = true,
+	.redundant_type_check_diagnostic = true,
 };
 
 /**
@@ -210,6 +212,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_bool_comparison_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("redundantTypeCheckDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.redundant_type_check_diagnostic = val.b;
+			log::debug("[kls] config: redundantTypeCheckDiagnostic = %s",
+				g_config.redundant_type_check_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -346,6 +356,10 @@ fn bool catch_swallows_diagnostic_enabled() {
 
 fn bool redundant_bool_comparison_diagnostic_enabled() {
 	return g_config.redundant_bool_comparison_diagnostic;
+}
+
+fn bool redundant_type_check_diagnostic_enabled() {
+	return g_config.redundant_type_check_diagnostic;
 }
 
 /**
