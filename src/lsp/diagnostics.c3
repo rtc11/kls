@@ -214,6 +214,9 @@ fn Object* build_diagnostics_array(String content, ParseResult* ast, WorkspaceIn
 		if (type_info != null && config::redundant_return_type_diagnostic_enabled()) {
 			add_redundant_return_type_diagnostics(diagnostics, ast, type_info);
 		}
+		if (type_info != null && config::arithmetic_op_mismatch_diagnostic_enabled()) {
+			add_arithmetic_op_mismatch_diagnostics(diagnostics, ast, type_info);
+		}
 		if (type_info != null && config::unsafe_nullable_call_diagnostic_enabled()) {
 			add_unsafe_nullable_call_diagnostics(diagnostics, ast, type_info);
 		}
@@ -5225,6 +5228,101 @@ fn void add_redundant_return_type_diagnostics(Object* diagnostics, ParseResult* 
 		Object* tags = object::new_obj(tmem);
 		tags.push(object::new_int(1, tmem)); // Unnecessary
 		diag.set("tags", tags);
+		diagnostics.push(diag);
+	}
+}
+
+// ── Arithmetic operator type mismatch ──────────────────────────────
+//
+// Kotlin spec §11.7-11.8 (operator overloading): `a + b` desugars to
+// `a.plus(b)`. If left operand is a non-numeric / non-String type
+// without an `operator fun plus(...)` (or minus/times/div/rem) the
+// expression is a type error.
+//
+// Conservative: emit only when BOTH operands have known (non-UNKNOWN)
+// types AND
+//   - left is not in numeric tower (Int/Long/Short/Byte/Float/Double/Char/Number)
+//   - left is not String (String + Any always works per Kotlin)
+//   - no operator method found on left (in-file ext, in-file class,
+//     workspace, dep)
+// Skip when type_info missing or types unknown.
+//
+// Range covers the operator token's position-to-end-of-rhs span by
+// using the BINARY_EXPR's own range.
+
+fn bool is_numeric_arith_type(types::TypeRef tr) {
+	if (tr.kind != types::TypeKind.SIMPLE) return false;
+	if (tr.nullable) return false; // nullable arithmetic always errors anyway, separate diag
+	String n = tr.name;
+	return n == "Int" || n == "Long" || n == "Short" || n == "Byte"
+		|| n == "Float" || n == "Double" || n == "Char" || n == "Number"
+		|| n == "UInt" || n == "ULong" || n == "UShort" || n == "UByte";
+}
+
+fn void add_arithmetic_op_mismatch_diagnostics(Object* diagnostics, ParseResult* ast,
+	types::TypeInfo* type_info) {
+	if (type_info == null) return;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* node = &ast.nodes[i];
+		if (node.kind != BINARY_EXPR) continue;
+		String op = node.extra_text;
+		if (op != "+" && op != "-" && op != "*" && op != "/" && op != "%") continue;
+
+		// Find first two children
+		uint lhs_idx = uint.max;
+		uint rhs_idx = uint.max;
+		for (uint j = 0; j < ast.node_count; j++) {
+			if (ast.nodes[j].parent != i) continue;
+			if (lhs_idx == uint.max) {
+				lhs_idx = j;
+			} else if (rhs_idx == uint.max) {
+				rhs_idx = j;
+				break;
+			}
+		}
+		if (lhs_idx == uint.max || rhs_idx == uint.max) continue;
+		if (!type_info.has_type[lhs_idx] || !type_info.has_type[rhs_idx]) continue;
+
+		types::TypeRef lt = type_info.node_types[lhs_idx];
+		types::TypeRef rt = type_info.node_types[rhs_idx];
+		if (lt.kind == types::TypeKind.UNKNOWN || rt.kind == types::TypeKind.UNKNOWN) continue;
+
+		// Skip nullable receivers — they have a separate diag path
+		if (lt.nullable) continue;
+
+		// String "+" handled by Kotlin spec §11.7.1 (toString concat)
+		if (op == "+" && lt.name == "String") continue;
+		// Right-side String concat: `Any + String` doesn't auto-promote in
+		// Kotlin (only `String + Any` does); so still check for plus method.
+
+		// Numeric tower — both sides numeric-compatible: skip.
+		if (is_numeric_arith_type(lt) && is_numeric_arith_type(rt)) continue;
+
+		// Look up operator method on left receiver.
+		String method = types::binary_op_method(op);
+		if (method.len == 0) continue;
+		types::TypeRef looked_up = types::resolve_member_type(lt, method);
+		if (looked_up.kind == types::TypeKind.UNKNOWN) {
+			looked_up = types::lookup_member_anywhere(ast, type_info, lt, method);
+		}
+		if (looked_up.kind != types::TypeKind.UNKNOWN) continue;
+
+		// Skip when left is a type parameter (T) — too permissive to know
+		if (types::is_type_parameter(lt.name)) continue;
+		// Skip Any / Unit / Nothing — not meaningful arithmetic targets but
+		// covered by other diagnostics
+		if (lt.name == "Any" || lt.name == "Unit" || lt.name == "Nothing") continue;
+
+		String lt_text = types::format_type(&lt);
+		String rt_text = types::format_type(&rt);
+		String msg = string::tformat("Operator '%s' is not defined for types '%s' and '%s'",
+			op, lt_text, rt_text);
+
+		Object* diag = make_diagnostic(
+			node.start_line, node.start_col,
+			node.end_line, node.end_col,
+			2, msg);
 		diagnostics.push(diag);
 	}
 }

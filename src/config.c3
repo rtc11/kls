@@ -48,6 +48,7 @@ struct ServerConfig {
 	bool missing_override_diagnostic; // warn when fun matches supertype member but lacks `override`
 	bool can_be_const_diagnostic; // hint when val with literal initializer could be const val
 	bool redundant_return_type_diagnostic; // hint when fun expression body's type matches declared return type
+	bool arithmetic_op_mismatch_diagnostic; // warn on +/-/*//% between non-numeric/String types with no operator method
 }
 
 // Module-level global with defaults
@@ -82,6 +83,7 @@ ServerConfig g_config = {
 	.missing_override_diagnostic = true,
 	.can_be_const_diagnostic = true,
 	.redundant_return_type_diagnostic = true,
+	.arithmetic_op_mismatch_diagnostic = true,
 };
 
 /**
@@ -330,6 +332,14 @@ fn void apply_init_options(Object* opts) {
 				g_config.redundant_return_type_diagnostic ? "true" : "false");
 		}
 	}
+
+	if (try val = opts.get("arithmeticOpMismatchDiagnostic")) {
+		if (val.is_bool()) {
+			g_config.arithmetic_op_mismatch_diagnostic = val.b;
+			log::debug("[kls] config: arithmeticOpMismatchDiagnostic = %s",
+				g_config.arithmetic_op_mismatch_diagnostic ? "true" : "false");
+		}
+	}
 }
 
 /**
@@ -541,4 +551,14 @@ fn bool can_be_const_diagnostic_enabled() {
  */
 fn bool redundant_return_type_diagnostic_enabled() {
 	return g_config.redundant_return_type_diagnostic;
+}
+
+/**
+ * Whether to emit "Operator '+' is not defined for types A and B"
+ * warnings for arithmetic binary expressions where both operands have
+ * known non-numeric/non-String types and no matching operator method
+ * exists on the left receiver.
+ */
+fn bool arithmetic_op_mismatch_diagnostic_enabled() {
+	return g_config.arithmetic_op_mismatch_diagnostic;
 }
