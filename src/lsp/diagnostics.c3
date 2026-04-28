@@ -2002,24 +2002,44 @@ fn bool is_var_reassigned(ParseResult* ast, uint decl_idx) {
 /**
  * Scan local `var` declarations in function bodies that are never
  * reassigned and emit Hint diagnostics suggesting they be `val`.
+ * Also scan `private var` properties at class/object body level —
+ * private encapsulates mutation to the declaring class, so absence
+ * of in-class reassignment proves the property is effectively `val`.
  *
  * Skips: top-level/member properties (only locals are safe to flip
  * without API impact), unused properties (already covered by the
  * unused-local hint), destructuring decls, names starting with '_'.
+ * For private members also skips: lateinit, open, override, abstract,
+ * external, expect, const, has-custom-setter, delegated (`by`).
  */
 fn void add_var_can_be_val_diagnostics(Object* diagnostics, String content, ParseResult* ast) {
 	for (uint i = 0; i < ast.node_count; i++) {
 		AstNode* n = &ast.nodes[i];
-		if (!is_local_property(ast, i)) continue;
+		if (n.kind != PROPERTY_DECL) continue;
 		if ((n.mod_flags & ast::MOD_VAR) == 0) continue;
 		if (n.name.len == 0) continue;
 		if (n.name == "(destructuring)") continue;
 		if (n.name[0] == '_') continue;
 
-		// Skip if also unused — let unused-local diagnostic carry it
-		if (!is_local_name_used(ast, i)) continue;
+		bool is_local = is_local_property(ast, i);
+		bool is_private_member = !is_local && is_private_class_member(ast, i);
+		if (!is_local && !is_private_member) continue;
 
-		if (is_var_reassigned(ast, i)) continue;
+		// Local: skip if also unused — let unused-local diagnostic carry it
+		if (is_local && !is_local_name_used(ast, i)) continue;
+
+		// Private member: skip on intent-of-mutability flags
+		if (is_private_member) {
+			uint exclude = ast::MOD_LATEINIT | ast::MOD_OPEN | ast::MOD_OVERRIDE
+				| ast::MOD_ABSTRACT | ast::MOD_EXTERNAL | ast::MOD_EXPECT
+				| ast::MOD_CONST;
+			if ((n.mod_flags & exclude) != 0) continue;
+			if (property_has_custom_setter(ast, i)) continue;
+			if (property_is_delegated(ast, i)) continue;
+			if (is_private_member_reassigned(ast, i)) continue;
+		} else {
+			if (is_var_reassigned(ast, i)) continue;
+		}
 
 		Object* diag = object::new_obj(tmem);
 
@@ -2044,6 +2064,114 @@ fn void add_var_can_be_val_diagnostics(Object* diagnostics, String content, Pars
 
 		diagnostics.push(diag);
 	}
+}
+
+// True if PROPERTY_DECL is a member of a class/object/companion (not top-level,
+// not local, not interface) AND has MOD_PRIVATE set.
+fn bool is_private_class_member(ParseResult* ast, uint node_idx) {
+	AstNode* n = &ast.nodes[node_idx];
+	if (n.kind != PROPERTY_DECL) return false;
+	if ((n.mod_flags & ast::MOD_PRIVATE) == 0) return false;
+
+	// Walk parent chain: must hit class-like before FILE or function-like.
+	uint cur = n.parent;
+	while (cur != ast::NO_PARENT) {
+		AstNode* p = &ast.nodes[cur];
+		switch (p.kind) {
+			case CLASS_DECL:
+			case OBJECT_DECL:
+			case COMPANION_OBJECT_DECL:
+				return true;
+			case INTERFACE_DECL:
+				return false; // interface vars semantically open
+			case FILE:
+			case FUN_DECL:
+			case LAMBDA_EXPR:
+			case INIT_BLOCK:
+				return false;
+			default:
+				break;
+		}
+		cur = p.parent;
+	}
+	return false;
+}
+
+// True if PROPERTY_DECL has a child FUN_DECL named "set" (custom setter).
+fn bool property_has_custom_setter(ParseResult* ast, uint prop_idx) {
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != prop_idx) continue;
+		if (n.kind != FUN_DECL) continue;
+		if (n.name == "set") return true;
+	}
+	return false;
+}
+
+// True if PROPERTY_DECL has a child marked as `by` delegate root.
+fn bool property_is_delegated(ParseResult* ast, uint prop_idx) {
+	for (uint c = 0; c < ast.node_count; c++) {
+		AstNode* n = &ast.nodes[c];
+		if (n.parent != prop_idx) continue;
+		if (n.extra_text == "delegate") return true;
+	}
+	return false;
+}
+
+// True if a private class member `name` is reassigned anywhere in the file
+// via either `name = ...` (bare from inside class) or `this.name = ...`.
+// Conservative: any in-file write counts. This is sound because private
+// scope is per-file (Kotlin treats top-level private as file-private and
+// member private as class-private; both are subsets of file-visible).
+fn bool is_private_member_reassigned(ParseResult* ast, uint decl_idx) {
+	AstNode* decl = &ast.nodes[decl_idx];
+	String name = decl.name;
+	if (name.len == 0) return false;
+
+	for (uint i = 0; i < ast.node_count; i++) {
+		AstNode* n = &ast.nodes[i];
+		uint lhs_idx = uint.max;
+		switch (n.kind) {
+			case ASSIGNMENT_EXPR:
+			case PREFIX_EXPR:
+			case POSTFIX_EXPR:
+				for (uint j = 0; j < ast.node_count; j++) {
+					if (ast.nodes[j].parent == i) {
+						lhs_idx = j;
+						break;
+					}
+				}
+				break;
+			default:
+				continue;
+		}
+
+		if (n.kind == PREFIX_EXPR || n.kind == POSTFIX_EXPR) {
+			if (n.extra_text != "++" && n.extra_text != "--") continue;
+		}
+
+		if (lhs_idx == uint.max) continue;
+		AstNode* lhs = &ast.nodes[lhs_idx];
+
+		// Bare-name LHS
+		if (lhs.kind == NAME_EXPR && lhs.name == name) return true;
+
+		// this.name LHS (DOT_EXPR with THIS_EXPR receiver, dot-name == name)
+		if (lhs.kind == DOT_EXPR && lhs.name == name) {
+			// Find receiver child (DOT_EXPR re-parents left, may be lower idx)
+			uint recv_idx = uint.max;
+			for (uint j = 0; j < ast.node_count; j++) {
+				if (ast.nodes[j].parent == lhs_idx) {
+					recv_idx = j;
+					break;
+				}
+			}
+			if (recv_idx != uint.max && ast.nodes[recv_idx].kind == THIS_EXPR) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 // ── Unused parameter diagnostics ──────────────────────────────────

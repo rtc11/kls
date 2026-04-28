@@ -2073,3 +2073,143 @@ fn void useless_cast_carries_unnecessary_tag() @test {
 			"Useless cast diagnostic should include Unnecessary tag (1) for editor strikethrough");
 	};
 }
+
+fn void private_var_member_can_be_val() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun read(): Int = x
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged = true;
+		}
+		assert(flagged, "private var x (read-only) should be flagged");
+	};
+}
+
+fn void private_var_member_reassigned_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun mutate() { x = 2 }
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0, "private var reassigned bare should NOT be flagged");
+	};
+}
+
+fn void private_var_member_reassigned_via_this_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun mutate() { this.x = 2 }
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0, "private var reassigned via this should NOT be flagged");
+	};
+}
+
+fn void public_var_member_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    var x = 1
+    fun read(): Int = x
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"public var (no private modifier) should NOT be flagged — external mutation possible");
+	};
+}
+
+fn void internal_var_member_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    internal var x = 1
+    fun read(): Int = x
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"internal var should NOT be flagged — module-wide mutation possible");
+	};
+}
+
+fn void private_lateinit_var_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private lateinit var x: String
+    fun read(): String = x
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"private lateinit var should NOT be flagged — lateinit semantic requires var");
+	};
+}
+
+fn void private_var_with_postfix_increment_NOT_flagged() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`class C {
+    private var x = 1
+    fun inc() { x++ }
+}`
+		);
+		int flagged_count = 0;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'x' can be 'val'")) flagged_count++;
+		}
+		assert(flagged_count == 0,
+			"private var with x++ should NOT be flagged — postfix is a write");
+	};
+}
+
+fn void private_var_in_object_can_be_val() @test {
+	@pool() {
+		Object* result = build_test_diagnostics(
+			`object Singleton {
+    private var counter = 0
+    fun get(): Int = counter
+}`
+		);
+		bool flagged = false;
+		for (usz i = 0; i < result.get_len(); i++) {
+			String msg = result.get_at(i).get_string("message") ?? "";
+			if (msg.contains("Variable 'counter' can be 'val'")) flagged = true;
+		}
+		assert(flagged, "private var in object (singleton) should also be flagged");
+	};
+}
