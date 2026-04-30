@@ -93,3 +93,20 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - `ParseResult` still has no stored source field, so helper cannot be `ParseResult*`-only today; caller must pass `String source`. This matches prior A1/B1 finding that ast.c3 renderers needing exact text must receive source explicitly.
 - Source-slice strategy naturally covers plain dotted refs, generic args, function types (`extra_text` markers `function` / `receiver` / `param` / `return`), intersection types (`intersection`), variance (`MOD_IN`/`MOD_OUT`), `suspend`, star projections, and nullable suffixes because parser already set exact TYPE_REF span in producer.
 - Updated snapshot guard to replace TYPE_REF passthrough stub with real renderer call; parity assertion now proves `type_text` remains byte-identical to sub-AST span text for all fixture TYPE_REF nodes.
+
+## 2026-04-30 C2 — type_definition migration
+- Migrated 4 readers in `src/lsp/type_definition.c3:resolve_type_name` (was lines 154/155/163/164) from `n.type_text` to `ast::type_ref_name(pr, type_ref_idx, source, tmem)`.
+- Source threading: added `String source` param to `resolve_type_name`; sole caller `handle_type_definition` already had `doc.content` in scope, zero-friction pass-through.
+- Idx threading: `pr` and loop var `i` already in scope. But helper requires a TYPE_REF idx, while loop visits decl nodes (PARAM/FUN_DECL/PROPERTY_DECL/...). Added two file-local helpers:
+  - `find_type_ref_child(pr, decl_idx)` — first direct TYPE_REF child (covers PARAM type annotations); scans `pr.nodes` for `child.parent == decl_idx && kind == TYPE_REF`.
+  - `find_return_type_ref_child(pr, fun_idx)` — TYPE_REF child of FUN_DECL with `extra_text == "return"` (matches parser marker at `src/kotlin/parser.c3:1243`).
+- Producer gap noted: PROPERTY_DECL at `parser.c3:1382` does NOT call `attach_type_ref_child_from_text` (text-only). My helpers return `ast::NO_PARENT` for PROPERTY_DECL → empty text → fall through to TypeInfo branch. Dual-storage invariant preserves field for any future producer-side completion before Wave D removes text path.
+- Pattern note: when caller-loop visits decls but reader needs a TYPE_REF, prefer two narrow finder helpers per call site (annotation vs return) over a generic "any TYPE_REF child" helper — semantics differ (annotation vs return marker).
+- Concurrency: encountered unrelated WIP in `src/lsp/execute_command.c3` + test that broke baseline (`Implicitly casting WorkspaceIndex* to DocumentStore*`). Stashed via path-scoped `git stash push -- src/lsp/execute_command.c3 test/execute_command_test.c3` before testing my isolated change. Reapplied after commit. Lesson: ALWAYS `git status` first; path-scoped stash beats full-tree stash when foreign WIP is present.
+- `c3c test`: 2802 PASSED, 0 failed, 0 skipped.
+- Commit: `0f9bcbb`.
+
+## 2026-04-30 C4 — execute_command migration
+- `execute_query_index` now threads `store` and resolves member `type` via cached AST + `ast::type_ref_name(pr, ast::node_index(pr, type_node), source, tmem)`; fallback stays `member.type_text` when cache/source missing.
+- `execute_ast_at` now uses `source` for offset lookup and `ast::type_ref_name(pr, cur, source, tmem)` for chain entries; helper reuses existing `ast::find_child` + `ast::node_index` path.
+- `c3c test`: 2802 PASS, 0 FAIL.

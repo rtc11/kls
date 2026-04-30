@@ -20,6 +20,31 @@ import kls::lsp::definition;
 import kls::lsp::references;
 import kls::lsp::diagnostics;
 
+fn String resolved_member_type_text(DocumentStore* store, WorkspaceIndex* workspace, MemberDecl* member) {
+	if (store == null) return member.type_text;
+
+	ParseResult* pr = workspace.get_cached_ast(member.uri) ?? null;
+	if (pr == null) return member.type_text;
+
+	String source = "";
+	if (try doc = store.get(member.uri)) source = doc.content;
+	if (source.len == 0) return member.type_text;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name != member.name) continue;
+		if (n.name_line != member.line || n.name_col != member.col) continue;
+		if (n.kind != member.node_kind) continue;
+		if (n.type_text.len == 0) continue;
+		AstNode* type_node = ast::find_child(pr, n, TYPE_REF) ?? null;
+		if (type_node != null) {
+			return ast::type_ref_name(pr, ast::node_index(pr, type_node), source, tmem);
+		}
+	}
+
+	return member.type_text;
+}
+
 // ── Command IDs (must match code_lens.c3) ──────────────────────────
 
 const String CMD_RUN_MAIN = "kotlin.runMain";
@@ -79,7 +104,7 @@ fn Object*? handle_execute_command(DocumentStore* store, WorkspaceIndex* workspa
 		case CMD_RUN_TEST:
 			execute_run_test(workspace, args);
 		case CMD_QUERY_INDEX:
-			return execute_query_index(workspace, args);
+			return execute_query_index_with_store(store, workspace, args);
 		case CMD_LIST_DOCUMENTS:
 			return execute_list_documents(store);
 		case CMD_DIAGNOSTICS_FOR:
@@ -256,7 +281,29 @@ fn void execute_run_test(WorkspaceIndex* workspace, Object* args) {
  * No args: returns summary (counts + file list).
  * args[0] = name: returns full symbol details for matching symbols.
  */
-fn Object* execute_query_index(WorkspaceIndex* workspace, Object* args) {
+fn String member_type_text(DocumentStore* store, WorkspaceIndex* workspace, MemberDecl* member) {
+	ParseResult* pr = workspace.get_cached_ast(member.uri) ?? null;
+	if (pr == null) return member.type_text;
+
+	String source = "";
+	if (try doc = store.get(member.uri)) source = doc.content;
+	if (source.len == 0) return member.type_text;
+
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.name != member.name) continue;
+		if (n.name_line != member.line || n.name_col != member.col) continue;
+		if (n.kind != member.node_kind) continue;
+		AstNode* type_node = ast::find_child(pr, n, TYPE_REF) ?? null;
+		if (type_node != null) {
+			return ast::type_ref_name(pr, ast::node_index(pr, type_node), source, tmem);
+		}
+	}
+
+	return member.type_text;
+}
+
+fn Object* execute_query_index_with_store(DocumentStore* store, WorkspaceIndex* workspace, Object* args) {
 	String query = "";
 	if (args != null && args.get_len() >= 1) {
 		query = args.get_at(0).s;
@@ -312,7 +359,7 @@ fn Object* execute_query_index(WorkspaceIndex* workspace, Object* args) {
 				MemberDecl* m = &(*members)[i];
 				Object* mj = object::new_obj(tmem);
 				mj.set("name", m.name);
-				mj.set("type", m.type_text);
+				mj.set("type", resolved_member_type_text(store, workspace, m));
 				mj.set("uri", m.uri);
 				mj.set("line", (int)m.line);
 				mj.set("col", (int)m.col);
@@ -326,6 +373,10 @@ fn Object* execute_query_index(WorkspaceIndex* workspace, Object* args) {
 	}
 
 	return result;
+}
+
+fn Object* execute_query_index(WorkspaceIndex* workspace, Object* args) {
+	return execute_query_index_with_store(null, workspace, args);
 }
 
 fn Object* build_symbol_json(WorkspaceSymbol* sym) {
@@ -546,9 +597,9 @@ fn Object* execute_ast_at(DocumentStore* store, Object* args) {
 	if (try a = store.get_ast(uri)) pr = a;
 	if (pr == null) return wrap_err("failed to parse document");
 
-	String content = "";
-	if (try doc = store.get(uri)) content = doc.content;
-	long offset = hover::position_to_offset(content, (uint)line, (uint)character);
+	String source = "";
+	if (try doc = store.get(uri)) source = doc.content;
+	long offset = hover::position_to_offset(source, (uint)line, (uint)character);
 	if (offset < 0) return wrap_err("position out of range");
 
 	// Find innermost AST node whose [start, end) span contains offset.
@@ -593,7 +644,8 @@ fn Object* execute_ast_at(DocumentStore* store, Object* args) {
 		node.set("end", (int)n.end_offset);
 		node.set("name_line", (int)n.name_line);
 		node.set("name_col", (int)n.name_col);
-		if (n.type_text.len > 0) node.set("type_text", n.type_text);
+		String text = ast::type_ref_name(pr, cur, source, tmem);
+		if (text.len > 0) node.set("type_text", text);
 		node.set("mod_flags", (long)n.mod_flags);
 		chain.push(node);
 		if (n.parent == cur) break; // root
