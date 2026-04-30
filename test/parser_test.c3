@@ -4671,9 +4671,132 @@ fn void type_ref_generic_return_dual_storage() @test {
 	};
 }
 
-// T11 deferred — function-type TYPE_REF shape WIP.
+// PROBE: dump trees for T11b deferred cases.
+fn void probe_t11b_function_types() @test {
+	@pool() {
+		String[] sources = {
+			"fun f(): ((Int) -> String)? = null",
+			"fun f(cb: suspend (A, B) -> C?) {}",
+			"fun f(): Map<String, List<Pair<Int, Boolean>>> = mapOf()",
+		};
+		File fh = file::open("/tmp/probe_t11b.txt", "w")!!;
+		defer (void)fh.close();
+		foreach (src : sources) {
+			io::fprintn(&fh, "\n=== SOURCE ===")!!;
+			io::fprintn(&fh, src)!!;
+			ParseResult* r = do_parse(src); defer free_result(r);
+			io::fprintfn(&fh, "error_count=%d node_count=%d", (int)r.error_count, (int)r.node_count)!!;
+			for (uint i = 0; i < r.node_count; i++) {
+				AstNode* n = &r.nodes[i];
+				io::fprintfn(&fh,
+					"  [%d] parent=%d kind=%d name='%s' type_text='%s' extra='%s' mods=0x%x",
+					(int)i, (int)n.parent, (int)n.kind, n.name, n.type_text,
+					n.extra_text, (uint)n.mod_flags)!!;
+			}
+		}
+	};
+}
 
-// T11 deferred — suspend function-type TYPE_REF shape WIP.
+// ── T11b: function-type / suspend / deeply nested TYPE_REF dual-storage ──
+
+fn void type_ref_nullable_function_type_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(): ((Int) -> String)? = null"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		assert(fun.type_text == "((Int) -> String)?",
+			"expected fun type_text '((Int) -> String)?', got '%s'", fun.type_text);
+		AstNode* tr = first_type_ref_child(r, fun);
+		assert(tr.extra_text == "function nullable",
+			"expected 'function nullable' marker, got '%s'", tr.extra_text);
+		assert(tr.type_text == "((Int) -> String)?",
+			"expected tr type_text '((Int) -> String)?', got '%s'", tr.type_text);
+		assert(count_kind(r, tr, TYPE_REF) == 2,
+			"expected 2 TYPE_REF children (param+return), got %d",
+			(int)count_kind(r, tr, TYPE_REF));
+		AstNode* p = nth_kind(r, tr, TYPE_REF, 0);
+		assert(p.name == "Int", "expected param name 'Int', got '%s'", p.name);
+		assert(p.extra_text == "param", "expected 'param' marker, got '%s'", p.extra_text);
+		AstNode* ret = nth_kind(r, tr, TYPE_REF, 1);
+		assert(ret.name == "String", "expected return name 'String', got '%s'", ret.name);
+		assert(ret.extra_text == "return", "expected 'return' marker, got '%s'", ret.extra_text);
+	};
+}
+
+fn void type_ref_suspend_function_type_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(cb: suspend (A, B) -> C?) {}"); defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		AstNode* param = nth_kind(r, fun, PARAM, 0);
+		assert(param.type_text == "suspend (A, B) -> C?",
+			"expected param type_text 'suspend (A, B) -> C?', got '%s'", param.type_text);
+		AstNode* tr = first_type_ref_child(r, param);
+		assert(tr.extra_text == "function",
+			"expected 'function' marker, got '%s'", tr.extra_text);
+		assert((tr.mod_flags & ast::MOD_SUSPEND) != 0,
+			"expected MOD_SUSPEND on suspend function type");
+		assert(count_kind(r, tr, TYPE_REF) == 3,
+			"expected 3 TYPE_REF children (2 params + return), got %d",
+			(int)count_kind(r, tr, TYPE_REF));
+		AstNode* p0 = nth_kind(r, tr, TYPE_REF, 0);
+		assert(p0.name == "A" && p0.extra_text == "param",
+			"expected param 0 'A'/'param', got '%s'/'%s'", p0.name, p0.extra_text);
+		AstNode* p1 = nth_kind(r, tr, TYPE_REF, 1);
+		assert(p1.name == "B" && p1.extra_text == "param",
+			"expected param 1 'B'/'param', got '%s'/'%s'", p1.name, p1.extra_text);
+		AstNode* ret = nth_kind(r, tr, TYPE_REF, 2);
+		assert(ret.name == "C", "expected return name 'C', got '%s'", ret.name);
+		assert(ret.extra_text == "return nullable",
+			"expected 'return nullable' marker, got '%s'", ret.extra_text);
+		assert(ret.type_text == "C?",
+			"expected return type_text 'C?', got '%s'", ret.type_text);
+	};
+}
+
+fn void type_ref_deeply_nested_generic_dual_storage() @test {
+	@pool() {
+		ParseResult* r = do_parse("fun f(): Map<String, List<Pair<Int, Boolean>>> = mapOf()");
+		defer free_result(r);
+		assert(r.error_count == 0, "expected no errors, got %d", (int)r.error_count);
+		AstNode* fun = child(r, file_node(r), 0);
+		assert(fun.type_text == "Map<String, List<Pair<Int, Boolean>>>",
+			"expected fun type_text, got '%s'", fun.type_text);
+		// Map<...>
+		AstNode* map_tr = first_type_ref_child(r, fun);
+		assert(map_tr.name == "Map", "expected outer 'Map', got '%s'", map_tr.name);
+		assert(map_tr.type_text == "Map<String, List<Pair<Int, Boolean>>>",
+			"expected outer type_text, got '%s'", map_tr.type_text);
+		assert(count_kind(r, map_tr, TYPE_REF) == 2,
+			"expected 2 type args under Map, got %d",
+			(int)count_kind(r, map_tr, TYPE_REF));
+		AstNode* str_arg = nth_kind(r, map_tr, TYPE_REF, 0);
+		assert(str_arg.name == "String" && str_arg.extra_text == "arg",
+			"expected first arg 'String'/'arg', got '%s'/'%s'", str_arg.name, str_arg.extra_text);
+		// List<Pair<Int, Boolean>>
+		AstNode* list_tr = nth_kind(r, map_tr, TYPE_REF, 1);
+		assert(list_tr.name == "List", "expected 'List', got '%s'", list_tr.name);
+		assert(list_tr.type_text == "List<Pair<Int, Boolean>>",
+			"expected list type_text, got '%s'", list_tr.type_text);
+		assert(count_kind(r, list_tr, TYPE_REF) == 1,
+			"expected 1 type arg under List, got %d",
+			(int)count_kind(r, list_tr, TYPE_REF));
+		// Pair<Int, Boolean>
+		AstNode* pair_tr = nth_kind(r, list_tr, TYPE_REF, 0);
+		assert(pair_tr.name == "Pair", "expected 'Pair', got '%s'", pair_tr.name);
+		assert(pair_tr.type_text == "Pair<Int, Boolean>",
+			"expected pair type_text, got '%s'", pair_tr.type_text);
+		assert(count_kind(r, pair_tr, TYPE_REF) == 2,
+			"expected 2 type args under Pair, got %d",
+			(int)count_kind(r, pair_tr, TYPE_REF));
+		AstNode* int_arg = nth_kind(r, pair_tr, TYPE_REF, 0);
+		assert(int_arg.name == "Int" && int_arg.extra_text == "arg",
+			"expected 'Int'/'arg', got '%s'/'%s'", int_arg.name, int_arg.extra_text);
+		AstNode* bool_arg = nth_kind(r, pair_tr, TYPE_REF, 1);
+		assert(bool_arg.name == "Boolean" && bool_arg.extra_text == "arg",
+			"expected 'Boolean'/'arg', got '%s'/'%s'", bool_arg.name, bool_arg.extra_text);
+	};
+}
 
 fn void type_ref_intersection_dual_storage() @test {
 	@pool() {
@@ -4705,8 +4828,6 @@ fn void type_ref_variance_dual_storage() @test {
 		assert((arg.mod_flags & ast::MOD_OUT) != 0, "expected MOD_OUT on variance type arg");
 	};
 }
-
-// T11 deferred — deeply nested generic TYPE_REF traversal WIP.
 
 // ── WHERE_CONSTRAINT nodes ─────────────────────────────────────────
 
