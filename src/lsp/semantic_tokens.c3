@@ -119,7 +119,7 @@ fn usz build_name_table(ParseResult* pr, NameEntry[] table) {
 
 		table[count].offset = n.name_offset;
 		table[count].token_type = tt;
-		table[count].modifiers = compute_modifiers(n);
+		table[count].modifiers = compute_modifiers(pr, i, n);
 		count++;
 	}
 
@@ -220,8 +220,10 @@ fn int lookup_name_index(NameEntry[] table, usz count, uint offset) {
 
 /**
  * Compute semantic token modifier bitmask from an AST node's properties.
+ * `pr` and `idx` identify the node within the parse result so annotation
+ * lookups can use the sub-AST helper (`has_annotation_ast`).
  */
-fn int compute_modifiers(AstNode* n) {
+fn int compute_modifiers(ParseResult* pr, uint idx, AstNode* n) {
 	int mods = 0;
 
 	// All declaration names get the "declaration" modifier
@@ -242,8 +244,8 @@ fn int compute_modifiers(AstNode* n) {
 		mods |= (1 << TM_STATIC);
 	}
 
-	// @Deprecated annotation
-	if (n.annotation_text.len > 0 && n.has_annotation("Deprecated")) {
+	// @Deprecated annotation (sub-AST lookup; helper short-circuits on no children)
+	if (ast::has_annotation_ast(pr, idx, "Deprecated")) {
 		mods |= (1 << TM_DEPRECATED);
 	}
 
