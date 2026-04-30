@@ -137,3 +137,17 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
   - 916 (TYPE_CHECK_EXPR `cond.type_text`): `find_type_ref_child(pr, condition_idx)` — verified `attach_type_ref_child_from_text` at parser.c3:2321 + 3996.
   - 1361 (PARAM type_text inside `resolve_lambda_callee_param_type`): **DEFERRED**. This fn has no `source` in scope. Threading would require adding `String source` to fn signature; sole external caller `src/lsp/hover.c3:169` (`resolve_lambda_param_type` chain) would also need the param — but hover.c3 modification is forbidden by C5c scope. Legacy text path retained. Recommend bundling 1361 with C5f (hover migration) which already touches hover.c3.
 - Build clean, 2802 PASS / 0 FAIL preserved.
+
+## 2026-04-30 C5d — completion migration
+- 22 `.type_text` reader sites in `src/lsp/completion.c3` audited individually.
+- **Migrated 8 RENDER sites** (with text fallback preserved): 1140/1144 in `add_object_body_completions` (PROPERTY_DECL + FUN_DECL detail); 1287/1291/1302 in `add_members_from_class_ast` (FUN_DECL/PROPERTY_DECL/PARAM detail); 1349 in `build_fun_signature` (PARAM); 1355 in `build_fun_signature` (return); 1367 in `build_property_signature`. Each pairs with its preceding gate-style `.len > 0` check and a `t.len > 0 ? t : (text > 0 ? text : default)` cascade.
+- **Stayed on text — gates with documenting comments**: 811/814 (TYPE_PARAM upper bound — flagged for Wave-D because intersection bounds `T : A & B` produce multiple TYPE_REF children and `find_type_ref_child` only yields the first); 1061 (gate before parse_type_text fallthrough); 1348/1354/1366 are now folded into the migrated render branches but the gate semantics are preserved by the cascade.
+- **Deferred (TEXT-CONSUMER / no AST link)**: 1062 — `types::parse_type_text(n.type_text)` parses the text into a TypeRef; migration would need a sub-AST → TypeRef builder that does not exist (out of scope for C5d). 1406/1410/1421/1465/1466/1476/1477 — operate on `MemberDecl*` (workspace cache struct, not AstNode). MemberDecl has no `pr` / `idx` link; migration requires touching `src/workspace.c3` cache build path. Documented at top of `add_members_from_cache` + both `build_*_from_cache` fns.
+- **Helpers**: pasted file-local `find_type_ref_child` + `find_return_type_ref_child` from C5b template (`33b46b2`). Both used.
+- **Source threading**: var name `content` (matches `doc.content`, consistent with `inlay_hints.c3` C5c convention). Threaded into 3 fns:
+  - `add_object_body_completions(items, pr, content, receiver_name, prefix)` — single caller at line 913 in `add_dot_completions` (already had `content`).
+  - `add_members_from_class_ast(items, pr, content, class_name, prefix)` — 2 callers (1233 in `add_workspace_class_members`, 1546 in `add_workspace_supertype_members_depth`); both already had `content` in scope from local file-load logic.
+  - `build_fun_signature(sig, fun_node, pr, content, class_idx)` and `build_property_signature(sig, prop_node, pr, content)` — only called from inside `add_members_from_class_ast`, so threading `content` was zero-friction.
+- **`build_fun_signature` cleanup**: hoisted `ast::node_index(pr, fun_node)` out of the parent-check loop (was called per-iteration). Cosmetic, but matches B6 lesson.
+- `c3c build` clean. `c3c test`: 2802 PASS / 0 FAIL.
+- Single commit, scope = completion.c3 + notepad + plan only.

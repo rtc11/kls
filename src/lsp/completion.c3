@@ -50,6 +50,34 @@ const String[] KOTLIN_KEYWORDS = {
 	"true", "false", "null",
 };
 
+// File-local sub-AST helpers (C5d migration). Find direct TYPE_REF children
+// of a declaration node so callers can render via `ast::type_ref_name` while
+// the legacy `type_text` text path stays as a Wave-D fallback.
+fn uint find_type_ref_child(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != decl_idx) continue;
+		if (child.kind == TYPE_REF) return i;
+	}
+	return ast::NO_PARENT;
+}
+
+fn uint find_return_type_ref_child(ParseResult* pr, uint fun_idx) {
+	if (fun_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[fun_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_REF) continue;
+		if (child.extra_text == "return") return i;
+	}
+	return ast::NO_PARENT;
+}
+
 /**
  * Handle textDocument/completion request.
  * Returns a CompletionList JSON object with keyword, identifier, and
@@ -808,6 +836,10 @@ fn void add_type_argument_completions(Object* items, DocumentStore* store, Strin
 			Object* item = object::new_obj(tmem);
 			item.set("label", n.name);
 			item.set("kind", 25); // TypeParameter
+			// gate: presence check on dual-storage text field
+			// TODO(wave-D): TYPE_PARAM upper bounds may be intersection (T : A & B);
+			// `find_type_ref_child` only yields first TYPE_REF, so source-slice render
+			// would drop the `& B` portion. Migrate when intersection rendering supported.
 			if (n.type_text.len > 0) {
 				DString detail;
 				detail.tinit();
@@ -910,7 +942,7 @@ fn void add_dot_completions(Object* items, DocumentStore* store, WorkspaceIndex*
 	// over supertype members so this runs first; later workspace/dep
 	// passes dedup against existing labels.
 	if (pr != null) {
-		add_object_body_completions(items, pr, receiver_name, prefix);
+		add_object_body_completions(items, pr, content, receiver_name, prefix);
 	}
 
 	// If we couldn't resolve via AST, try to infer from the name
@@ -1058,6 +1090,8 @@ fn TypeRef resolve_receiver_type(ParseResult* pr, TypeInfo* ti, String name, uin
 				return ti.node_types[i];
 			}
 			// Fall back to type_text
+			// TODO(wave-D): `parse_type_text` is a string-parsing consumer (text-consumer).
+			// Migrating requires a TypeRef builder over sub-AST that doesn't exist yet.
 			if (n.type_text.len > 0) {
 				return types::parse_type_text(n.type_text);
 			}
@@ -1098,7 +1132,7 @@ fn TypeRef guess_receiver_type(String content, String receiver_name, uint line, 
  * initializer is an OBJECT_EXPR, then emits each direct body decl as
  * a Property/Method completion item with proper kind + detail.
  */
-fn void add_object_body_completions(Object* items, ParseResult* pr, String receiver_name, String prefix) {
+fn void add_object_body_completions(Object* items, ParseResult* pr, String content, String receiver_name, String prefix) {
 	if (pr == null || receiver_name.len == 0) return;
 
 	// Find the PROPERTY_DECL bound to receiver_name
@@ -1137,11 +1171,23 @@ fn void add_object_body_completions(Object* items, ParseResult* pr, String recei
 		switch (m.kind) {
 			case PROPERTY_DECL:
 				kind = COMPLETION_KIND_PROPERTY;
-				detail = m.type_text.len > 0 ? m.type_text : "Any";
+				{
+					uint ref_idx = find_type_ref_child(pr, k);
+					String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+						? ast::type_ref_name(pr, ref_idx, content, tmem)
+						: "";
+					detail = t.len > 0 ? t : (m.type_text.len > 0 ? m.type_text : "Any");
+				}
 				break;
 			case FUN_DECL:
 				kind = COMPLETION_KIND_METHOD;
-				detail = m.type_text.len > 0 ? m.type_text : "Unit";
+				{
+					uint ref_idx = find_return_type_ref_child(pr, k);
+					String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+						? ast::type_ref_name(pr, ref_idx, content, tmem)
+						: "";
+					detail = t.len > 0 ? t : (m.type_text.len > 0 ? m.type_text : "Unit");
+				}
 				break;
 			default:
 				continue;
@@ -1230,7 +1276,7 @@ fn void add_workspace_class_members(Object* items, WorkspaceIndex* workspace, Do
 		defer mem::free(pr);
 		parser::parse(content, pr);
 
-		add_members_from_class_ast(items, pr, type_name, prefix);
+		add_members_from_class_ast(items, pr, content, type_name, prefix);
 
 		// Walk supertypes to include inherited members
 		for (usz s = 0; s < sym.supertype_count; s++) {
@@ -1246,7 +1292,7 @@ fn void add_workspace_class_members(Object* items, WorkspaceIndex* workspace, Do
  * completion items. Handles functions, properties, nested classes,
  * and data class constructor params with val/var.
  */
-fn void add_members_from_class_ast(Object* items, ParseResult* pr, String class_name, String prefix) {
+fn void add_members_from_class_ast(Object* items, ParseResult* pr, String content, String class_name, String prefix) {
 	// Find the class declaration
 	for (uint i = 0; i < pr.node_count; i++) {
 		AstNode* n = &pr.nodes[i];
@@ -1284,12 +1330,24 @@ fn void add_members_from_class_ast(Object* items, ParseResult* pr, String class_
 			switch (child.kind) {
 				case FUN_DECL:
 					kind = COMPLETION_KIND_METHOD;
-					detail = child.type_text.len > 0 ? child.type_text : "Unit";
-					build_fun_signature(&sig, child, pr, i);
+					{
+						uint ref_idx = find_return_type_ref_child(pr, j);
+						String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+							? ast::type_ref_name(pr, ref_idx, content, tmem)
+							: "";
+						detail = t.len > 0 ? t : (child.type_text.len > 0 ? child.type_text : "Unit");
+					}
+					build_fun_signature(&sig, child, pr, content, i);
 				case PROPERTY_DECL:
 					kind = COMPLETION_KIND_PROPERTY;
-					detail = child.type_text.len > 0 ? child.type_text : "";
-					build_property_signature(&sig, child);
+					{
+						uint ref_idx = find_type_ref_child(pr, j);
+						String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+							? ast::type_ref_name(pr, ref_idx, content, tmem)
+							: "";
+						detail = t.len > 0 ? t : (child.type_text.len > 0 ? child.type_text : "");
+					}
+					build_property_signature(&sig, child, pr, content);
 				case CLASS_DECL:
 				case INTERFACE_DECL:
 				case OBJECT_DECL:
@@ -1299,8 +1357,14 @@ fn void add_members_from_class_ast(Object* items, ParseResult* pr, String class_
 					// Data class constructor params with val/var
 					if ((child.mod_flags & ast::MOD_VAR) != 0 || (child.mod_flags & ast::MOD_FINAL) != 0) {
 						kind = COMPLETION_KIND_PROPERTY;
-						detail = child.type_text.len > 0 ? child.type_text : "";
-						build_property_signature(&sig, child);
+						{
+							uint ref_idx = find_type_ref_child(pr, j);
+							String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+								? ast::type_ref_name(pr, ref_idx, content, tmem)
+								: "";
+							detail = t.len > 0 ? t : (child.type_text.len > 0 ? child.type_text : "");
+						}
+						build_property_signature(&sig, child, pr, content);
 					} else {
 						continue; // regular param, not a member
 					}
@@ -1333,26 +1397,37 @@ fn void add_members_from_class_ast(Object* items, ParseResult* pr, String class_
  * Build a function signature string for documentation:
  * "fun name(param: Type, ...): ReturnType"
  */
-fn void build_fun_signature(DString* sig, AstNode* fun_node, ParseResult* pr, uint class_idx) {
+fn void build_fun_signature(DString* sig, AstNode* fun_node, ParseResult* pr, String content, uint class_idx) {
 	sig.appendf("fun %s(", fun_node.name);
 
+	uint fun_idx = ast::node_index(pr, fun_node);
 	bool first = true;
 	for (uint k = 0; k < pr.node_count; k++) {
-		if (pr.nodes[k].parent != ast::node_index(pr, fun_node)) continue;
+		if (pr.nodes[k].parent != fun_idx) continue;
 		if (pr.nodes[k].kind != PARAM) continue;
 		if (!first) sig.append(", ");
 		first = false;
 		if (pr.nodes[k].name.len > 0) {
 			sig.appendf("%s", pr.nodes[k].name);
 		}
-		if (pr.nodes[k].type_text.len > 0) {
-			sig.appendf(": %s", pr.nodes[k].type_text);
+		uint ref_idx = find_type_ref_child(pr, k);
+		String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+			? ast::type_ref_name(pr, ref_idx, content, tmem)
+			: "";
+		String pt = t.len > 0 ? t : pr.nodes[k].type_text;
+		if (pt.len > 0) {
+			sig.appendf(": %s", pt);
 		}
 	}
 
 	sig.append(")");
-	if (fun_node.type_text.len > 0) {
-		sig.appendf(": %s", fun_node.type_text);
+	uint ret_idx = find_return_type_ref_child(pr, fun_idx);
+	String rt = (ret_idx != ast::NO_PARENT && content.len > 0)
+		? ast::type_ref_name(pr, ret_idx, content, tmem)
+		: "";
+	String rendered = rt.len > 0 ? rt : fun_node.type_text;
+	if (rendered.len > 0) {
+		sig.appendf(": %s", rendered);
 	}
 }
 
@@ -1360,11 +1435,17 @@ fn void build_fun_signature(DString* sig, AstNode* fun_node, ParseResult* pr, ui
  * Build a property signature string for documentation:
  * "val name: Type" or "var name: Type"
  */
-fn void build_property_signature(DString* sig, AstNode* prop_node) {
+fn void build_property_signature(DString* sig, AstNode* prop_node, ParseResult* pr, String content) {
 	String keyword = (prop_node.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
 	sig.appendf("%s %s", keyword, prop_node.name);
-	if (prop_node.type_text.len > 0) {
-		sig.appendf(": %s", prop_node.type_text);
+	uint prop_idx = ast::node_index(pr, prop_node);
+	uint ref_idx = find_type_ref_child(pr, prop_idx);
+	String t = (ref_idx != ast::NO_PARENT && content.len > 0)
+		? ast::type_ref_name(pr, ref_idx, content, tmem)
+		: "";
+	String rendered = t.len > 0 ? t : prop_node.type_text;
+	if (rendered.len > 0) {
+		sig.appendf(": %s", rendered);
 	}
 }
 
@@ -1374,6 +1455,10 @@ fn void build_property_signature(DString* sig, AstNode* prop_node) {
  * operating on the pre-computed member cache instead of re-parsing.
  */
 fn void add_members_from_cache(Object* items, List{MemberDecl}* members, String prefix) {
+	// TODO(wave-D): MemberDecl.type_text is workspace-cache state with no AST link.
+	// Migration requires either threading (pr, content) into the workspace cache
+	// build path or storing a sub-AST handle on MemberDecl. Out of scope for C5d
+	// (would touch src/workspace.c3). Legacy text path retained.
 	for (usz i = 0; i < members.len(); i++) {
 		MemberDecl* m = &(*members)[i];
 		if (m.name.len == 0) continue;
@@ -1449,6 +1534,7 @@ fn void add_members_from_cache(Object* items, List{MemberDecl}* members, String 
  * Build a function signature from a cached MemberDecl.
  */
 fn void build_fun_signature_from_cache(DString* sig, MemberDecl* m) {
+	// TODO(wave-D): see add_members_from_cache — MemberDecl text fields lack AST link.
 	sig.appendf("fun %s(", m.name);
 
 	for (usz i = 0; i < m.param_count; i++) {
@@ -1471,6 +1557,7 @@ fn void build_fun_signature_from_cache(DString* sig, MemberDecl* m) {
  * Build a property signature from a cached MemberDecl.
  */
 fn void build_property_signature_from_cache(DString* sig, MemberDecl* m) {
+	// TODO(wave-D): see add_members_from_cache — MemberDecl text fields lack AST link.
 	String keyword = (m.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
 	sig.appendf("%s %s", keyword, m.name);
 	if (m.type_text.len > 0) {
@@ -1543,7 +1630,7 @@ fn void add_workspace_supertype_members_depth(Object* items, WorkspaceIndex* wor
 		defer mem::free(pr);
 		parser::parse(content, pr);
 
-		add_members_from_class_ast(items, pr, supertype_name, prefix);
+		add_members_from_class_ast(items, pr, content, supertype_name, prefix);
 
 		// Continue walking supertypes
 		for (usz s = 0; s < sym.supertype_count; s++) {

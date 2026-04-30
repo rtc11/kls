@@ -947,7 +947,7 @@ Pre-commit per: full `c3c test`.
   - [x] C5a: `src/lsp/call_hierarchy.c3` — detail now from return-type TYPE_REF via `ast::type_ref_name`; text fallback stays.
 - [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - [x] C5c: `src/lsp/inlay_hints.c3` — 8 reader sites migrated to `ast::type_ref_name` with text fallback; 3 gate sites stayed on text (rationale in learnings); site 1361 deferred to C5f (would require modifying hover.c3 caller).
-  - C5d: `src/lsp/completion.c3`
+  - [x] C5d: `src/lsp/completion.c3` — 8 RENDER sites migrated to `ast::type_ref_name` with text fallback; 7 sites deferred (MemberDecl cache lacks AST link, parse_type_text text-consumer); 2 gate sites kept (TYPE_PARAM intersection bound rendering); rationale in learnings.
   - C5e: `src/lsp/definition.c3`
   - C5f: `src/lsp/hover.c3`
   - C5g: `src/lsp/semantic_tokens.c3`
@@ -1035,7 +1035,7 @@ subagent: plan
   - C5a: `src/lsp/call_hierarchy.c3`
 - [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - C5c: `src/lsp/inlay_hints.c3`
-  - C5d: `src/lsp/completion.c3`
+  - [x] C5d: `src/lsp/completion.c3`
   - C5e: `src/lsp/definition.c3`
   - C5f: `src/lsp/hover.c3`
   - C5g: `src/lsp/semantic_tokens.c3`
