@@ -951,7 +951,7 @@ Pre-commit per: full `c3c test`.
   - [x] C5e: `src/lsp/definition.c3` — 0 RENDER / 8 DEFER (text-consumer + MemberDecl) / 7 GATE; 15 sites annotated with TODO(wave-D) or rationale; no helpers needed (zero render sites); fallback preserved unchanged.
   - [x] C5f: `src/lsp/hover.c3` — 8 RENDER sites migrated to `ast::type_ref_name` with text fallback (build_signature: PARAM types in FUN/CONSTRUCTOR/standalone, FUN_DECL return, PROPERTY type, TYPEALIAS); 2 DEFER (TYPE_PARAM + WHERE_CONSTRAINT intersection bounds, TODO(wave-D)); 1 GATE (lambda PARAM inference guard); helpers `find_type_ref_child`/`find_return_type_ref_child` added file-local. 2802 PASS.
     - [x] C5g: `src/lsp/semantic_tokens.c3` — NO-OP. Zero `.type_text` readers (verified grep).
-- [ ] **C6**: `src/document.c3` migration — `unspecified-low` + [`kls`]. Depends C1.
+- [x] **C6**: `src/document.c3` migration — NO-OP. Single `.type_text` reader at :313 is dual-storage maintenance (incremental-edit `rebase_string_slices` pointer fixup). NOT a consumer. MUST stay until Wave D removes the field itself. No migration possible/required.
 - [ ] **C7**: `src/workspace.c3` migration — `unspecified-high` + [`kls`]. Depends C1, C6.
 - [ ] **C8a**: `src/kotlin/contracts.c3` migration — `unspecified-high` + [`kls`]. Depends C1.
 - [ ] **C8b**: `src/kotlin/cfg.c3` migration — `unspecified-high` + [`kls`]. Depends C8a.
