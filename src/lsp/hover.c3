@@ -556,7 +556,7 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 	ds.appendf("```kotlin\n");
 
 	// Java-interop annotations (cosmetic; documents JVM bytecode shape).
-	append_jvm_annotations(&ds, node);
+	append_jvm_annotations(&ds, pr, node);
 
 	// Modifiers
 	append_modifiers(&ds, node.mod_flags);
@@ -788,12 +788,12 @@ fn bool append_where_clause(DString* ds, ParseResult* pr, AstNode* node) {
  *
  * Whitelisted: JvmStatic, JvmField, JvmOverloads, JvmName.
  */
-fn void append_jvm_annotations(DString* ds, AstNode* node) {
-	if (node.annotation_text.len == 0) return;
-	if (node.has_annotation("JvmStatic"))    ds.appendf("@JvmStatic\n");
-	if (node.has_annotation("JvmField"))     ds.appendf("@JvmField\n");
-	if (node.has_annotation("JvmOverloads")) ds.appendf("@JvmOverloads\n");
-	if (node.has_annotation("JvmName"))      ds.appendf("@JvmName\n");
+fn void append_jvm_annotations(DString* ds, ParseResult* pr, AstNode* node) {
+	uint idx = ast::node_index(pr, node);
+	if (ast::has_annotation_ast(pr, idx, "JvmStatic"))    ds.appendf("@JvmStatic\n");
+	if (ast::has_annotation_ast(pr, idx, "JvmField"))     ds.appendf("@JvmField\n");
+	if (ast::has_annotation_ast(pr, idx, "JvmOverloads")) ds.appendf("@JvmOverloads\n");
+	if (ast::has_annotation_ast(pr, idx, "JvmName"))      ds.appendf("@JvmName\n");
 }
 
 fn void append_modifiers(DString* ds, ulong flags) {
