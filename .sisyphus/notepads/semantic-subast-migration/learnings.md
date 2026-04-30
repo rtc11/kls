@@ -110,3 +110,9 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - `execute_query_index` now threads `store` and resolves member `type` via cached AST + `ast::type_ref_name(pr, ast::node_index(pr, type_node), source, tmem)`; fallback stays `member.type_text` when cache/source missing.
 - `execute_ast_at` now uses `source` for offset lookup and `ast::type_ref_name(pr, cur, source, tmem)` for chain entries; helper reuses existing `ast::find_child` + `ast::node_index` path.
 - `c3c test`: 2802 PASS, 0 FAIL.
+
+## 2026-04-30 C5a — call_hierarchy migration
+- `handle_prepare`, `collect_incoming_from_ast`, and `collect_outgoing_from_function` now thread `String source` into `build_item`.
+- `build_item` resolves FUN_DECL / CONSTRUCTOR_DECL detail from return-type TYPE_REF via `find_return_type_ref_child(pr, fun_idx)` + `ast::type_ref_name(pr, return_type_idx, source, tmem)`.
+- Legacy `node.type_text` fallback stays for empty source or missing TYPE_REF, so detail JSON stays byte-identical.
+- `c3c test`: 2802 PASS, 0 FAIL.

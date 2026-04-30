@@ -89,7 +89,7 @@ fn Object*? handle_prepare(DocumentStore* store, WorkspaceIndex* workspace, Obje
 
 	if (fun_node == null) return null;
 
-	Object* item = build_item(uri, fun_node);
+	Object* item = build_item(uri, fun_node, pr, doc.content);
 	Object* result = object::new_obj(tmem);
 	result.push(item);
 	return result;
@@ -114,7 +114,7 @@ fn Object*? handle_incoming_calls(DocumentStore* store, WorkspaceIndex* workspac
 	if (try doc = store.get(target_uri)) {
 		ParseResult* pr = store.get_ast(target_uri) ?? null;
 		if (pr != null) {
-			collect_incoming_from_ast(result, pr, target_name, target_uri);
+			collect_incoming_from_ast(result, pr, target_name, target_uri, doc.content);
 		}
 	}
 
@@ -199,7 +199,7 @@ fn Object*? handle_outgoing_calls(DocumentStore* store, WorkspaceIndex* workspac
 
 	// Collect all CALL_EXPR nodes inside this function
 	uint fun_idx = ast::node_index(pr, fun_node);
-	collect_outgoing_from_function(result, pr, fun_idx, target_uri, store, workspace);
+	collect_outgoing_from_function(result, pr, fun_idx, target_uri, content, store, workspace);
 
 	if (result.get_len() == 0) return null;
 	return result;
@@ -210,7 +210,20 @@ fn Object*? handle_outgoing_calls(DocumentStore* store, WorkspaceIndex* workspac
 /**
  * Build a CallHierarchyItem JSON object from an AST FUN_DECL node.
  */
-fn Object* build_item(String uri, AstNode* node) {
+fn uint find_return_type_ref_child(ParseResult* pr, uint fun_idx) {
+	if (fun_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[fun_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_REF) continue;
+		if (child.extra_text == "return") return i;
+	}
+	return ast::NO_PARENT;
+}
+
+fn Object* build_item(String uri, AstNode* node, ParseResult* pr, String source) {
 	Object* item = object::new_obj(tmem);
 	item.set("name", node.name);
 
@@ -225,6 +238,19 @@ fn Object* build_item(String uri, AstNode* node) {
 		detail.tinit();
 		detail.appendf("%s.%s", node.extra_text, node.name);
 		item.set("detail", detail.str_view());
+	} else if (source.len > 0) {
+		uint fun_idx = ast::node_index(pr, node);
+		uint return_type_idx = find_return_type_ref_child(pr, fun_idx);
+		if (return_type_idx != ast::NO_PARENT) {
+			String detail_text = ast::type_ref_name(pr, return_type_idx, source, tmem);
+			if (detail_text.len > 0) {
+				item.set("detail", detail_text);
+			} else if (node.type_text.len > 0) {
+				item.set("detail", node.type_text);
+			}
+		} else if (node.type_text.len > 0) {
+			item.set("detail", node.type_text);
+		}
 	} else if (node.type_text.len > 0) {
 		item.set("detail", node.type_text);
 	}
@@ -305,7 +331,7 @@ fn AstNode*? find_enclosing_function(ParseResult* pr, uint node_idx) {
  * Collect incoming calls from a single file's AST.
  * For each CALL_EXPR matching target_name, find enclosing function and group.
  */
-fn void collect_incoming_from_ast(Object* result, ParseResult* pr, String target_name, String uri) {
+fn void collect_incoming_from_ast(Object* result, ParseResult* pr, String target_name, String uri, String source) {
 	// Temp storage: group calls by enclosing function index
 	// Max 64 distinct callers per file
 	uint[64] caller_indices;
@@ -351,7 +377,7 @@ fn void collect_incoming_from_ast(Object* result, ParseResult* pr, String target
 		}
 		if (!found && caller_count < 64) {
 			caller_indices[caller_count] = enc_idx;
-			caller_items[caller_count] = build_item(uri, enclosing);
+			caller_items[caller_count] = build_item(uri, enclosing, pr, source);
 			Object* ranges_arr = object::new_obj(tmem);
 			ranges_arr.push(call_range);
 			caller_ranges[caller_count] = ranges_arr;
@@ -425,7 +451,7 @@ fn void scan_workspace_incoming(Object* result, WorkspaceIndex* workspace, Docum
 		// Parse and scan AST
 		ParseResult* temp_pr = mem::new(ParseResult);
 		parser::parse(content, temp_pr);
-		collect_incoming_from_ast(result, temp_pr, target_name, file_uri);
+		collect_incoming_from_ast(result, temp_pr, target_name, file_uri, content);
 		mem::free(temp_pr);
 
 		if (need_free) {
@@ -438,7 +464,7 @@ fn void scan_workspace_incoming(Object* result, WorkspaceIndex* workspace, Docum
  * Collect outgoing calls from a function body.
  * Walks all CALL_EXPR descendants of fun_idx.
  */
-fn void collect_outgoing_from_function(Object* result, ParseResult* pr, uint fun_idx, String uri,
+fn void collect_outgoing_from_function(Object* result, ParseResult* pr, uint fun_idx, String uri, String source,
 		DocumentStore* store, WorkspaceIndex* workspace) {
 	// Temp: deduplicate by callee name + target location
 	String[128] seen_names;
@@ -488,7 +514,7 @@ fn void collect_outgoing_from_function(Object* result, ParseResult* pr, uint fun
 			if (!found && seen_count < 128) {
 				seen_names[seen_count] = callee_name;
 				seen_lines[seen_count] = target_line;
-				seen_items[seen_count] = build_item(uri, target_node);
+				seen_items[seen_count] = build_item(uri, target_node, pr, source);
 				Object* ranges_arr = object::new_obj(tmem);
 				ranges_arr.push(call_range);
 				seen_ranges[seen_count] = ranges_arr;
