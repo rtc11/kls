@@ -169,3 +169,24 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - All 8 DEFER sites annotated with `// TODO(wave-D): <reason>` blocks. Cross-cutting blockers: (a) sub-AST → TypeRef builder doesn't exist (covers 6 sites); (b) MemberDecl cache lacks AST link (covers 3 sites incl. 3339+3340 pair). Both blockers also documented for C5d.
 - `c3c build` clean. `c3c test`: 2802 PASS / 0 FAIL.
 - Single commit, scope = definition.c3 + notepad + plan only.
+
+## 2026-04-30 C5f — hover migration
+
+### Per-site classification (17 sites total)
+- **GATE (1)**: L167 `n.type_text.len == 0` — guard for lambda PARAM type inference fallback. Untouched.
+- **RENDER (8)**: L588-589, L596-597, L632-633, L644-645, L662-663, L679-680, plus FUN_DECL return type — all in `build_signature` switch arms. Migrated to `find_type_ref_child`/`find_return_type_ref_child` + `ast::type_ref_name(pr, ref_idx, source, tmem)` with `.type_text` fallback (Wave D gate).
+- **DEFER (2)**: L740-741 (TYPE_PARAM upper bound) + L772-773 (WHERE_CONSTRAINT bound) — annotated `TODO(wave-D)` for intersection support (`T : A & B`). Same blocker as C5d completion L840.
+
+### Source threading
+- `build_signature` already had `source` param. Threaded `source` into `append_type_params` and `append_where_clause` (added default `""`). All 8 callers of those helpers were already inside `build_signature`, so `source` propagated trivially.
+- File-local helpers `find_type_ref_child` + `find_return_type_ref_child` added after `describe_keyword` (line 547) — pasted verbatim from C5b commit `33b46b2`.
+
+### Surprises
+- Hover.c3 ratio confirmed renderer-heavy (8 RENDER vs 2 DEFER vs 1 GATE) as predicted, opposite of definition.c3 (0 RENDER per C5e).
+- Inlay_hints C5c deferred site at line 1407 (consumed by `is_function_type`) lives in `inlay_hints.c3`, NOT hover.c3 — no cross-file work needed.
+- All 4 `append_type_params` callsites and 2 `append_where_clause` callsites inside build_signature → single source thread sufficed.
+
+### Verification
+- `c3c build` clean.
+- `c3c test`: 2802 passed / 0 failed / 0 skipped.
+- Single commit, scope = hover.c3 + notepad + plan only.

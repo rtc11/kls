@@ -544,6 +544,34 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 	return NO_DESCRIPTION~;
 }
 
+// File-local helpers (C5f): locate the first TYPE_REF child of a declaration
+// or the FUN_DECL return-type TYPE_REF child so callers can render via
+// `ast::type_ref_name` instead of the legacy `.type_text` text field.
+fn uint find_type_ref_child(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != decl_idx) continue;
+		if (child.kind == TYPE_REF) return i;
+	}
+	return ast::NO_PARENT;
+}
+
+fn uint find_return_type_ref_child(ParseResult* pr, uint fun_idx) {
+	if (fun_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[fun_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_REF) continue;
+		if (child.extra_text == "return") return i;
+	}
+	return ast::NO_PARENT;
+}
+
 /**
  * Build a markdown signature string from an AST declaration node.
  * If source is provided, also appends the KDoc/comment documentation.
@@ -565,7 +593,7 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 	switch (node.kind) {
 		case FUN_DECL:
 			ds.appendf("fun ");
-			append_type_params(&ds, pr, node);
+			append_type_params(&ds, pr, node, source);
 			// Receiver type
 			if (node.extra_text.len > 0) {
 				ds.appendf("%s.", node.extra_text);
@@ -585,33 +613,43 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 				}
 				first = false;
 				ds.appendf("%s", child.name);
-				if (child.type_text.len > 0) {
-					ds.appendf(": %s", child.type_text);
+				uint pref_idx = find_type_ref_child(pr, i);
+				String pt = (pref_idx != ast::NO_PARENT && source.len > 0)
+					? ast::type_ref_name(pr, pref_idx, source, tmem)
+					: "";
+				String prendered = pt.len > 0 ? pt : child.type_text;
+				if (prendered.len > 0) {
+					ds.appendf(": %s", prendered);
 				}
 				if (ast::param_has_default(child)) {
 					ds.appendf(" = %s", ast::param_default_text(child));
 				}
 			}
 			ds.appendf(")");
-			if (node.type_text.len > 0) {
-				ds.appendf(": %s", node.type_text);
+			uint ret_idx = find_return_type_ref_child(pr, node_idx);
+			String rt = (ret_idx != ast::NO_PARENT && source.len > 0)
+				? ast::type_ref_name(pr, ret_idx, source, tmem)
+				: "";
+			String rendered = rt.len > 0 ? rt : node.type_text;
+			if (rendered.len > 0) {
+				ds.appendf(": %s", rendered);
 			} else if (type_info != null && type_info.has_type[node_idx]) {
 				String inferred = types::format_type(&type_info.node_types[node_idx]);
 				if (inferred.len > 0) {
 					ds.appendf(": %s", inferred);
 				}
 			}
-			append_where_clause(&ds, pr, node);
+			append_where_clause(&ds, pr, node, source);
 
 		case CLASS_DECL:
 			ds.appendf("class %s", node.name);
-			append_type_params(&ds, pr, node);
-			append_where_clause(&ds, pr, node);
+			append_type_params(&ds, pr, node, source);
+			append_where_clause(&ds, pr, node, source);
 
 		case INTERFACE_DECL:
 			ds.appendf("interface %s", node.name);
-			append_type_params(&ds, pr, node);
-			append_where_clause(&ds, pr, node);
+			append_type_params(&ds, pr, node, source);
+			append_where_clause(&ds, pr, node, source);
 
 		case OBJECT_DECL:
 			ds.appendf("object %s", node.name);
@@ -623,14 +661,19 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 			// #13: Show val vs var based on MOD_VAR flag
 			String prop_keyword = (node.mod_flags & ast::MOD_VAR) != 0 ? "var" : "val";
 			ds.appendf("%s ", prop_keyword);
-			append_type_params(&ds, pr, node);
+			append_type_params(&ds, pr, node, source);
 			// Receiver type
 			if (node.extra_text.len > 0) {
 				ds.appendf("%s.", node.extra_text);
 			}
 			ds.appendf("%s", node.name);
-			if (node.type_text.len > 0) {
-				ds.appendf(": %s", node.type_text);
+			uint pref_idx = find_type_ref_child(pr, node_idx);
+			String pt = (pref_idx != ast::NO_PARENT && source.len > 0)
+				? ast::type_ref_name(pr, pref_idx, source, tmem)
+				: "";
+			String prendered = pt.len > 0 ? pt : node.type_text;
+			if (prendered.len > 0) {
+				ds.appendf(": %s", prendered);
 			} else if (type_info != null && type_info.has_type[node_idx]) {
 				String inferred = types::format_type(&type_info.node_types[node_idx]);
 				if (inferred.len > 0) {
@@ -640,9 +683,14 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 
 		case TYPEALIAS_DECL:
 			ds.appendf("typealias %s", node.name);
-			append_type_params(&ds, pr, node);
-			if (node.type_text.len > 0) {
-				ds.appendf(" = %s", node.type_text);
+			append_type_params(&ds, pr, node, source);
+			uint aref_idx = find_type_ref_child(pr, node_idx);
+			String at = (aref_idx != ast::NO_PARENT && source.len > 0)
+				? ast::type_ref_name(pr, aref_idx, source, tmem)
+				: "";
+			String arendered = at.len > 0 ? at : node.type_text;
+			if (arendered.len > 0) {
+				ds.appendf(" = %s", arendered);
 			}
 
 		case CONSTRUCTOR_DECL:
@@ -659,8 +707,13 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 				}
 				first = false;
 				ds.appendf("%s", child.name);
-				if (child.type_text.len > 0) {
-					ds.appendf(": %s", child.type_text);
+				uint cref_idx = find_type_ref_child(pr, i);
+				String ct = (cref_idx != ast::NO_PARENT && source.len > 0)
+					? ast::type_ref_name(pr, cref_idx, source, tmem)
+					: "";
+				String crendered = ct.len > 0 ? ct : child.type_text;
+				if (crendered.len > 0) {
+					ds.appendf(": %s", crendered);
 				}
 				if (ast::param_has_default(child)) {
 					ds.appendf(" = %s", ast::param_default_text(child));
@@ -676,8 +729,13 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
 
 		case PARAM:
 			ds.appendf("%s", node.name);
-			if (node.type_text.len > 0) {
-				ds.appendf(": %s", node.type_text);
+			uint sref_idx = find_type_ref_child(pr, node_idx);
+			String st = (sref_idx != ast::NO_PARENT && source.len > 0)
+				? ast::type_ref_name(pr, sref_idx, source, tmem)
+				: "";
+			String srendered = st.len > 0 ? st : node.type_text;
+			if (srendered.len > 0) {
+				ds.appendf(": %s", srendered);
 			} else if (type_info != null && type_info.has_type[node_idx]) {
 				String inferred = types::format_type(&type_info.node_types[node_idx]);
 				if (inferred.len > 0 && inferred != node.name) {
@@ -710,7 +768,7 @@ fn String build_signature(AstNode* node, ParseResult* pr, String source = "", Ty
  * Append type parameters to a DString: <T, out R : Comparable<R>, reified V>
  * Returns true if any type parameters were appended.
  */
-fn bool append_type_params(DString* ds, ParseResult* pr, AstNode* node) {
+fn bool append_type_params(DString* ds, ParseResult* pr, AstNode* node, String source = "") {
 	uint node_idx = ast::node_index(pr, node);
 	bool has_any = false;
 	bool first = true;
@@ -737,6 +795,9 @@ fn bool append_type_params(DString* ds, ParseResult* pr, AstNode* node) {
 		ds.appendf("%s", child.name);
 
 		// Upper bound
+		// TODO(wave-D): TYPE_PARAM upper bounds may be intersection (T : A & B);
+		// `find_type_ref_child` only yields first TYPE_REF, so source-slice render
+		// would drop the `& B` portion. Migrate when intersection rendering supported.
 		if (child.type_text.len > 0) {
 			ds.appendf(" : %s", child.type_text);
 		}
@@ -752,7 +813,7 @@ fn bool append_type_params(DString* ds, ParseResult* pr, AstNode* node) {
  * Append where clause constraints to a DString: where T : Comparable<T>, R : Serializable
  * Returns true if any constraints were appended.
  */
-fn bool append_where_clause(DString* ds, ParseResult* pr, AstNode* node) {
+fn bool append_where_clause(DString* ds, ParseResult* pr, AstNode* node, String source = "") {
 	uint node_idx = ast::node_index(pr, node);
 	bool first = true;
 
@@ -769,6 +830,9 @@ fn bool append_where_clause(DString* ds, ParseResult* pr, AstNode* node) {
 		}
 
 		ds.appendf("%s", child.name);
+		// TODO(wave-D): WHERE_CONSTRAINT bounds may be intersection (T : A & B);
+		// `find_type_ref_child` only yields first TYPE_REF, so source-slice render
+		// would drop the `& B` portion. Migrate when intersection rendering supported.
 		if (child.type_text.len > 0) {
 			ds.appendf(" : %s", child.type_text);
 		}
