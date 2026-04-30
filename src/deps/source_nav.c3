@@ -593,7 +593,18 @@ fn Object* resolve_dep_definition(DepSymbol* sym) {
 			return null;
 		}
 	} else {
-		if (try e = find_source_entry_in_jar(source_jar, sym.package_name, sym.class_name)) {
+		// For nested-class members (class_name like "Outer$Inner"), the
+		// source file is the OUTER class — strip to outer segment before
+		// looking up the JAR entry. The inner-segment search below still
+		// lands on the correct line within that file.
+		String lookup_class = sym.class_name;
+		for (usz d = 0; d < sym.class_name.len; d++) {
+			if (sym.class_name[d] == '$') {
+				lookup_class = sym.class_name[..d - 1];
+				break;
+			}
+		}
+		if (try e = find_source_entry_in_jar(source_jar, sym.package_name, lookup_class)) {
 			entry_name = e;
 		} else {
 			return null;
@@ -618,10 +629,19 @@ fn Object* resolve_dep_definition(DepSymbol* sym) {
 	}
 	String source_content = (String)source_data;
 
-	// Find the symbol position in the source
+	// Find the symbol position in the source.
+	// For nested classes, sym.name is "Outer$Inner" but the source declares
+	// it as "Inner" — search by the inner segment to land on the right line.
+	String search_name = sym.name;
+	for (usz d = 0; d < sym.name.len; d++) {
+		if (sym.name[d] == '$') {
+			search_name = sym.name[d + 1..];
+			break;
+		}
+	}
 	uint sym_line = 0;
 	uint sym_col = 0;
-	if (!find_symbol_position(source_content, sym.name, sym.kind, &sym_line, &sym_col)) {
+	if (!find_symbol_position(source_content, search_name, sym.kind, &sym_line, &sym_col)) {
 		// Even if we can't find the exact position, navigate to top of file
 		sym_line = 0;
 		sym_col = 0;
@@ -638,7 +658,7 @@ fn Object* resolve_dep_definition(DepSymbol* sym) {
 
 	Object* end_pos = object::new_obj(tmem);
 	end_pos.set("line", (int)sym_line);
-	end_pos.set("character", (int)(sym_col + sym.name.len));
+	end_pos.set("character", (int)(sym_col + search_name.len));
 
 	Object* range = object::new_obj(tmem);
 	range.set("start", start);

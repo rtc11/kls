@@ -1,4 +1,5 @@
 {
+  "plugin": ["oh-my-opencode"],
   "$schema": "https://opencode.ai/config.json",
   "instructions": [".opencode/skills/caveman/SKILL.md", ".opencode/skills/caveman-compress/SKILL.md"]
 }

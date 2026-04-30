@@ -575,10 +575,18 @@ fn void resolve_types(ParseResult* pr, TypeInfo* info) {
 
 	// Phase 10: Final expression pass — now with smart-cast facts available.
 	// Clear cached types on NAME_EXPR / DOT_EXPR nodes so flow facts can
-	// override the originally-resolved types. Then propagate to initializers.
+	// override the originally-resolved types. Also clear compound-expression
+	// nodes (IF_EXPR / WHEN_EXPR / TRY_EXPR) whose result type is derived
+	// from their branch bodies — otherwise a cached pre-smart-cast LUB
+	// (e.g. Any from `when (e) { is T -> e; else -> T(...) }` where the
+	// is-arm originally saw `e: Exception` instead of the narrowed `T`)
+	// survives the re-resolution and propagates to its enclosing PROPERTY_DECL.
+	// PAREN_EXPR is intentionally NOT cleared: IF_EXPR's condition-skipping
+	// logic relies on typed_count including the (paren-wrapped) condition.
 	for (uint i = 0; i < pr.node_count; i++) {
 		NodeKind k = pr.nodes[i].kind;
-		if (k == NAME_EXPR || k == DOT_EXPR) {
+		if (k == NAME_EXPR || k == DOT_EXPR
+			|| k == IF_EXPR || k == WHEN_EXPR || k == TRY_EXPR) {
 			info.has_type[i] = false;
 		}
 	}
@@ -1938,7 +1946,19 @@ fn TypeRef resolve_call_expr_type(ParseResult* pr, TypeInfo* info, uint idx, Ast
 		if (candidate.kind != CLASS_DECL && candidate.kind != OBJECT_DECL) continue;
 		if (candidate.name == node.name) { user_class_shadows = true; break; }
 	}
-	if (!user_class_shadows) {
+	// Method call (`recv.name(args)`) shadows top-level stdlib of same name:
+	// `kafkaLog.error(...)` is NOT `kotlin.error(): Nothing`. The CALL_EXPR
+	// has a DOT_EXPR child with matching name when it's a method call.
+	bool is_method_call_shadow = false;
+	for (uint j = 0; j < pr.node_count; j++) {
+		AstNode* child = &pr.nodes[j];
+		if (child.parent != idx) continue;
+		if (child.kind == DOT_EXPR && child.name == node.name) {
+			is_method_call_shadow = true;
+			break;
+		}
+	}
+	if (!user_class_shadows && !is_method_call_shadow) {
 		TypeRef known = resolve_known_call(node.name);
 		if (known.kind != UNKNOWN) {
 			// Try to infer type arguments from call arguments
@@ -3470,7 +3490,7 @@ fn TypeRef resolve_in_file_member(ParseResult* pr, TypeRef receiver, String memb
 					return { .kind = SIMPLE, .name = recv_name };
 				case PARAM:
 					// Primary-ctor val/var only — plain params aren't members
-					uint mods = child.mod_flags;
+					ulong mods = child.mod_flags;
 					if ((mods & ast::MOD_FINAL) == 0 && (mods & ast::MOD_VAR) == 0) continue;
 					if (out_decl_idx != null) *out_decl_idx = j;
 					if (child.type_text.len > 0) {
@@ -4480,7 +4500,7 @@ fn TypeRef resolve_workspace_member_type(TypeRef receiver, String member_name,
 
 	// Synthetic enum + data class members (Kotlin spec §11.2.4 data,
 	// §11.2.6 enum). Mirrors in-file resolve_in_file_member synthesis.
-	uint cls_flags = g_workspace.lookup_class_mod_flags(type_name);
+	ulong cls_flags = g_workspace.lookup_class_mod_flags(type_name);
 	if ((cls_flags & ast::MOD_ENUM) != 0) {
 		if (member_name == "name") return TYPE_STRING;
 		if (member_name == "ordinal") return TYPE_INT;
@@ -5100,41 +5120,34 @@ fn TypeRef resolve_paren_expr_type(ParseResult* pr, TypeInfo* info, uint idx, As
 }
 
 fn TypeRef resolve_if_expr_type(ParseResult* pr, TypeInfo* info, uint idx, AstNode* node) {
-	// Collect typed children of IF_EXPR.
-	// The condition may or may not be present as a child (depends on parser).
-	// The then/else branches are the last 2 children (or last 1 if no else).
-	// Strategy: if there are 3 typed children, skip the first (condition).
-	// If there are 2 typed children, compute common_type of both.
-	// If only 1, return it directly.
-
-	// First, count total children and collect typed ones
+	// IF_EXPR children in source order: condition, then-branch, [else-branch].
+	// Result type = common_type(then, else); else absent → Unit-ish, but we
+	// fall back to the then-branch type for inference purposes.
+	//
+	// We position-skip the first child (condition) when there are 2+ children,
+	// rather than relying on typed_count, because Phase-10 reresolution may
+	// temporarily leave the condition (a NAME_EXPR / DOT_EXPR / IF_EXPR) un-typed
+	// at the moment we hit this IF_EXPR — counting only typed children would
+	// then drop one of the BRANCHES instead of the condition.
+	uint[8] children;
 	uint child_count = 0;
-	uint[8] typed_children;
-	uint typed_count = 0;
 	for (uint j = 0; j < pr.node_count; j++) {
 		if (pr.nodes[j].parent == idx) {
+			if (child_count < 8) children[child_count] = j;
 			child_count++;
-			if (info.has_type[j] && typed_count < 8) {
-				typed_children[typed_count] = j;
-				typed_count++;
-			}
 		}
 	}
 
-	if (typed_count == 0) return TYPE_UNKNOWN;
+	if (child_count == 0) return TYPE_UNKNOWN;
 
-	// If we have 3+ children, the first is the condition -- skip it.
-	// If we have exactly 2 children with types and 3+ total children,
-	// the condition was typed too; skip it.
-	uint start = 0;
-	if (child_count >= 3 && typed_count >= 2) {
-		// Skip the condition (first typed child)
-		start = 1;
-	}
+	// Skip first child if it's the condition (always present in well-formed IF_EXPR).
+	uint start = child_count >= 2 ? 1 : 0;
 
 	TypeRef result = TYPE_UNKNOWN;
-	for (uint k = start; k < typed_count; k++) {
-		TypeRef t = info.node_types[typed_children[k]];
+	for (uint k = start; k < child_count && k < 8; k++) {
+		uint c = children[k];
+		if (!info.has_type[c]) continue;
+		TypeRef t = info.node_types[c];
 		if (result.kind == UNKNOWN) {
 			result = t;
 		} else {

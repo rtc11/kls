@@ -6,7 +6,8 @@ import kls::deps::classfile;
 // ── has_dollar_in_class_name tests ─────────────────────────────────
 
 fn void dollar_in_inner_class() @test {
-	assert(jar_index::has_dollar_in_class_name("com/example/Outer$Inner.class"), "should detect inner class");
+	// Named nested classes are now indexed (e.g. ProcessingExceptionHandler$Response).
+	assert(!jar_index::has_dollar_in_class_name("com/example/Outer$Inner.class"), "named nested class should be allowed through");
 }
 
 fn void dollar_not_in_simple_class() @test {
@@ -14,11 +15,20 @@ fn void dollar_not_in_simple_class() @test {
 }
 
 fn void dollar_in_nested_inner() @test {
-	assert(jar_index::has_dollar_in_class_name("com/Outer$Mid$Inner.class"), "should detect nested inner");
+	// Multi-level named nesting still allowed (segment after first $ is alphabetic).
+	assert(!jar_index::has_dollar_in_class_name("com/Outer$Mid$Inner.class"), "named nested chain should be allowed");
 }
 
 fn void dollar_no_package() @test {
-	assert(jar_index::has_dollar_in_class_name("Outer$Inner.class"), "should detect without package");
+	assert(!jar_index::has_dollar_in_class_name("Outer$Inner.class"), "named nested without package should be allowed");
+}
+
+fn void dollar_anonymous_class_skipped() @test {
+	assert(jar_index::has_dollar_in_class_name("com/example/Foo$1.class"), "anonymous classes (digit suffix) should be skipped");
+}
+
+fn void dollar_local_synthetic_skipped() @test {
+	assert(jar_index::has_dollar_in_class_name("com/example/Foo$12.class"), "multi-digit anonymous should be skipped");
 }
 
 fn void no_dollar_no_package() @test {

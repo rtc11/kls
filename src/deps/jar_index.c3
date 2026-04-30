@@ -298,26 +298,30 @@ fn void DependencyIndex.index_jar(DependencyIndex* self, String jar_path) {
 
 /**
  * Check if a .class file name has a '$' in the class name part.
- * This indicates an inner class. We skip these to avoid duplicating
- * symbols (outer class already has the public API).
- * Exception: $Companion classes are allowed through — their members
- * are accessible via ClassName.member in Kotlin and need indexing.
- * Does NOT skip Kotlin file-facade classes like CollectionsKt.
+ * This indicates an inner class.
+ *
+ * Skip rules (return true = skip):
+ *   - Anonymous classes: `Foo$1.class`, `Foo$12.class` (segment after $ is numeric)
+ *   - Local/synthetic with mixed digits like `Foo$1Bar.class`
+ *
+ * Allow through (return false = keep):
+ *   - Named nested classes: `Outer$Inner.class`, `Foo$Response.class`
+ *     (their members are accessible via `Outer.Inner.member` in Kotlin)
+ *   - `$Companion` (already handled — Kotlin companion object members)
  */
 fn bool has_dollar_in_class_name(String name) {
-	// The name looks like "com/example/Outer$Inner.class"
-	// We want to check for '$' in the part after the last '/'
 	usz start = 0;
 	for (usz i = 0; i < name.len; i++) {
 		if (name[i] == '/') start = i + 1;
 	}
-	// Check the filename part for '$'
 	for (usz i = start; i < name.len; i++) {
 		if (name[i] == '$') {
-			// Allow $Companion.class through — Kotlin companion object members
-			// need to be indexed under the outer class name
 			if (name[i..].starts_with("$Companion.class")) return false;
-			return true;
+			// Skip if first char after '$' is a digit (anonymous/local class).
+			usz next = i + 1;
+			if (next < name.len && name[next] >= '0' && name[next] <= '9') return true;
+			// Otherwise: named nested class — allow through.
+			return false;
 		}
 	}
 	return false;
@@ -415,7 +419,20 @@ fn void add_symbols_from_class(DependencyIndex* idx, ClassInfo* info, String jar
 			}
 		}
 
-		add_dep_symbol(idx, simple_name, sig.str_view(), pkg, simple_name, jar_path, class_kind,
+		// For nested classes (simple_name like "Outer$Inner"), use the
+		// outer class name as `class_name` so source navigation finds the
+		// containing source file (Outer.java / Outer.kt). The compound
+		// name remains in `name` so nested-class lookup
+		// (`find_dep_nested_class`) still resolves "Outer$Inner".
+		String class_field = simple_name;
+		for (usz d = 0; d < simple_name.len; d++) {
+			if (simple_name[d] == '$') {
+				class_field = simple_name[..d - 1];
+				break;
+			}
+		}
+
+		add_dep_symbol(idx, simple_name, sig.str_view(), pkg, class_field, jar_path, class_kind,
 			&class_supertypes, class_supertype_count, jar_path_interned: true);
 	}
 

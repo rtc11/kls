@@ -39,7 +39,7 @@ struct MemberDecl {
 	String type_text;      // heap-copied type annotation (return type / property type)
 	String uri;            // heap-copied file URI where the member is declared
 	NodeKind node_kind;    // FUN_DECL, PROPERTY_DECL, CLASS_DECL, PARAM, etc.
-	uint mod_flags;        // modifier flags (MOD_VAR, MOD_FINAL, etc.)
+	ulong mod_flags;        // modifier flags (MOD_VAR, MOD_FINAL, etc.)
 	uint line;             // 0-based line
 	uint col;              // 0-based column
 	uint name_len;         // length of name
@@ -96,7 +96,7 @@ struct WorkspaceIndex {
 	HashMap{String, List{usz}} name_index;    // name -> symbol indices
 	HashMap{String, List{usz}} super_index;   // supertype name -> symbol indices that extend/implement it
 	HashMap{String, List{MemberDecl}} member_cache;  // class name -> member declarations
-	HashMap{String, uint} class_mod_flags;           // class name -> mod_flags of CLASS_DECL (MOD_ENUM, MOD_DATA, MOD_VALUE, etc.)
+	HashMap{String, ulong} class_mod_flags;           // class name -> mod_flags of CLASS_DECL (MOD_ENUM, MOD_DATA, MOD_VALUE, etc.)
 	HashMap{String, List{String}} class_type_params; // class name -> generic type parameter names (e.g. MappedStream -> [K, V])
 	HashMap{String, AstCacheEntry} ast_cache; // uri -> cached (content, ParseResult) for cross-file lookups
 	HashMap{String, TypealiasInfo} typealiases; // alias name -> indexed typealias decl (Kotlin spec §11.1.5)
@@ -216,7 +216,7 @@ fn void WorkspaceIndex.free(WorkspaceIndex* self) {
 	};
 	self.class_type_params.free();
 
-	// class_mod_flags has only primitive uint values; HashMap key strings
+	// class_mod_flags has only primitive ulong values; HashMap key strings
 	// share storage with class names (no separate allocations to free).
 	self.class_mod_flags.free();
 
@@ -617,7 +617,7 @@ fn List{MemberDecl}*? WorkspaceIndex.lookup_members(WorkspaceIndex* self, String
  * unknown. Used by cross-file resolvers to detect MOD_ENUM / MOD_DATA /
  * MOD_VALUE without re-walking the AST.
  */
-fn uint WorkspaceIndex.lookup_class_mod_flags(WorkspaceIndex* self, String class_name) {
+fn ulong WorkspaceIndex.lookup_class_mod_flags(WorkspaceIndex* self, String class_name) {
 	return self.class_mod_flags.get(class_name) ?? 0;
 }
 

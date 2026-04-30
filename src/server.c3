@@ -154,7 +154,7 @@ fn void Server.poll_loop_iteration(Server* self) {
 
 	// Check debug socket for incoming connections
 	if (ready > 0 && ((ushort)polls[1].revents & (ushort)net::SUBSCRIBE_ANY_READ) != 0) {
-		self.debug_server.accept_and_handle(&self.workspace);
+		self.debug_server.accept_and_handle(&self.documents, &self.workspace);
 	}
 }
 
@@ -171,6 +171,41 @@ fn void? Server.run_one_message(Server* self) {
 	}
 
 	self.dispatch(msg);
+}
+
+// Stamp DocumentStore.last_cursor_* whenever a request arrives that carries
+// a cursor position in its params. Called from `dispatch` once per message;
+// keeps every individual handler free of bookkeeping.
+fn void record_cursor_from_params(DocumentStore* store, String method, Object* params) {
+	switch (method) {
+		case "textDocument/hover":
+		case "textDocument/completion":
+		case "textDocument/signatureHelp":
+		case "textDocument/definition":
+		case "textDocument/declaration":
+		case "textDocument/typeDefinition":
+		case "textDocument/implementation":
+		case "textDocument/references":
+		case "textDocument/documentHighlight":
+		case "textDocument/prepareRename":
+		case "textDocument/rename":
+		case "textDocument/prepareCallHierarchy":
+		case "textDocument/prepareTypeHierarchy":
+		case "textDocument/selectionRange":
+		case "textDocument/linkedEditingRange":
+			break;
+		default:
+			return;
+	}
+	Object* td = params.get("textDocument") ?? null;
+	if (td == null) return;
+	String uri = td.get_string("uri") ?? "";
+	if (uri.len == 0) return;
+	Object* pos = params.get("position") ?? null;
+	if (pos == null) return;
+	int line = pos.get_int("line") ?? -1;
+	int character = pos.get_int("character") ?? -1;
+	store.record_cursor(uri, line, character);
 }
 
 fn void Server.dispatch(Server* self, Object* msg) {
@@ -213,6 +248,8 @@ fn void Server.dispatch(Server* self, Object* msg) {
 	}
 
 	log::debug("[kls] -> %s", method);
+
+	if (params != null) record_cursor_from_params(&self.documents, method, params);
 
 	switch (method) {
 		case "initialize":
@@ -616,7 +653,7 @@ fn void Server.dispatch(Server* self, Object* msg) {
 		case "workspace/executeCommand":
 			if (params == null) {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Missing params");
-			} else if (try result = execute_command::handle_execute_command(&self.workspace, params)) {
+			} else if (try result = execute_command::handle_execute_command(&self.documents, &self.workspace, params)) {
 				json_rpc::send_response(request_id, result);
 			} else {
 				json_rpc::send_error_response(request_id, json_rpc::INVALID_PARAMS, "Invalid params");

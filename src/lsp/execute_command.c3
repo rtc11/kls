@@ -9,9 +9,16 @@ import std::thread;
 import kls::log;
 import kls::json_rpc;
 import kls::workspace;
+import kls::document;
 import kls::kotlin::symbols;
+import kls::kotlin::ast;
+import kls::kotlin::types;
 import kls::deps::classpath;
 import kls::lsp::progress;
+import kls::lsp::hover;
+import kls::lsp::definition;
+import kls::lsp::references;
+import kls::lsp::diagnostics;
 
 // ── Command IDs (must match code_lens.c3) ──────────────────────────
 
@@ -19,15 +26,43 @@ const String CMD_RUN_MAIN = "kotlin.runMain";
 const String CMD_RUN_TEST = "kotlin.runTest";
 const String CMD_QUERY_INDEX = "kotlin.queryIndex";
 
+// ── Debug introspection commands (for kls-query MCP) ───────────────
+
+const String CMD_LIST_DOCUMENTS    = "kotlin.listOpenDocuments";
+const String CMD_DIAGNOSTICS_FOR   = "kotlin.diagnosticsForUri";
+const String CMD_HOVER_AT          = "kotlin.hoverAt";
+const String CMD_DEFINITION_AT     = "kotlin.definitionAt";
+const String CMD_REFERENCES_AT     = "kotlin.referencesAt";
+const String CMD_AST_AT            = "kotlin.astAt";
+const String CMD_TYPE_AT           = "kotlin.typeAt";
+const String CMD_LAST_EDITED       = "kotlin.lastEditedUri";
+const String CMD_LAST_CURSOR       = "kotlin.lastCursor";
+
 /**
  * Handle workspace/executeCommand request.
- * Commands:
- *   kotlin.runMain  [uri, "", "main"]       — run main() via Gradle or kotlinc
- *   kotlin.runTest  [uri, className, funcName] — run test via Gradle
  *
- * Returns null on success. Sends window/logMessage with output.
+ * Run/test commands:
+ *   kotlin.runMain  [uri, "", "main"]                — run main() via Gradle or kotlinc
+ *   kotlin.runTest  [uri, className, funcName]      — run test via Gradle
+ *
+ * Index introspection:
+ *   kotlin.queryIndex            [name?]             — workspace symbol summary or by-name lookup
+ *
+ * Live debug introspection (returns JSON synchronously, used by kls-query MCP):
+ *   kotlin.listOpenDocuments     []                  — list all open documents
+ *   kotlin.diagnosticsForUri     [uri]               — recompute + return diagnostics
+ *   kotlin.hoverAt               [uri, line, char]   — hover JSON at position
+ *   kotlin.definitionAt          [uri, line, char]   — definition Location JSON
+ *   kotlin.referencesAt          [uri, line, char]   — references array
+ *   kotlin.astAt                 [uri, line, char]   — AST node + parent chain at position
+ *   kotlin.typeAt                [uri, line, char]   — kls-internal TypeRef debug string
+ *   kotlin.lastEditedUri         []                  — most-recent didOpen/didChange URI
+ *
+ * line/char are 0-based per LSP spec.
+ *
+ * Returns null on success for fire-and-forget commands. Sends window/logMessage with output.
  */
-fn Object*? handle_execute_command(WorkspaceIndex* workspace, Object* params) {
+fn Object*? handle_execute_command(DocumentStore* store, WorkspaceIndex* workspace, Object* params) {
 	String command = params.get_string("command") ?? "";
 	Object* args = params.get("arguments") ?? null;
 
@@ -45,6 +80,24 @@ fn Object*? handle_execute_command(WorkspaceIndex* workspace, Object* params) {
 			execute_run_test(workspace, args);
 		case CMD_QUERY_INDEX:
 			return execute_query_index(workspace, args);
+		case CMD_LIST_DOCUMENTS:
+			return execute_list_documents(store);
+		case CMD_DIAGNOSTICS_FOR:
+			return execute_diagnostics_for_uri(store, workspace, args);
+		case CMD_HOVER_AT:
+			return execute_hover_at(store, workspace, args);
+		case CMD_DEFINITION_AT:
+			return execute_definition_at(store, workspace, args);
+		case CMD_REFERENCES_AT:
+			return execute_references_at(store, workspace, args);
+		case CMD_AST_AT:
+			return execute_ast_at(store, args);
+		case CMD_TYPE_AT:
+			return execute_type_at(store, args);
+		case CMD_LAST_EDITED:
+			return execute_last_edited(store);
+		case CMD_LAST_CURSOR:
+			return execute_last_cursor(store);
 		default:
 			log::err("[kls] executeCommand: unknown command '%s'", command);
 			show_message(3, "Unknown command: ");
@@ -63,6 +116,15 @@ fn Object* build_execute_command_options() {
 	commands.push(object::new_string(CMD_RUN_MAIN, tmem));
 	commands.push(object::new_string(CMD_RUN_TEST, tmem));
 	commands.push(object::new_string(CMD_QUERY_INDEX, tmem));
+	commands.push(object::new_string(CMD_LIST_DOCUMENTS, tmem));
+	commands.push(object::new_string(CMD_DIAGNOSTICS_FOR, tmem));
+	commands.push(object::new_string(CMD_HOVER_AT, tmem));
+	commands.push(object::new_string(CMD_DEFINITION_AT, tmem));
+	commands.push(object::new_string(CMD_REFERENCES_AT, tmem));
+	commands.push(object::new_string(CMD_AST_AT, tmem));
+	commands.push(object::new_string(CMD_TYPE_AT, tmem));
+	commands.push(object::new_string(CMD_LAST_EDITED, tmem));
+	commands.push(object::new_string(CMD_LAST_CURSOR, tmem));
 	opts.set("commands", commands);
 	return opts;
 }
@@ -297,6 +359,314 @@ fn String symbol_kind_label(SymbolKind kind) {
 		case PROPERTY:  return "property";
 		case TYPEALIAS: return "typealias";
 	}
+}
+
+// ── Debug introspection ────────────────────────────────────────────
+
+/**
+ * Build LSP-style params {textDocument:{uri}, position:{line,character}} from
+ * an args array [uri, line, character]. Returns null on malformed input.
+ */
+fn Object*? build_position_params(Object* args) {
+	if (args == null || args.get_len() < 3) return null;
+	String uri = args.get_at(0).s;
+	int line = args.get_int_at(1) ?? -1;
+	int character = args.get_int_at(2) ?? -1;
+	if (uri.len == 0 || line < 0 || character < 0) return null;
+
+	Object* p = object::new_obj(tmem);
+	Object* td = object::new_obj(tmem);
+	td.set("uri", uri);
+	p.set("textDocument", td);
+	Object* pos = object::new_obj(tmem);
+	pos.set("line", line);
+	pos.set("character", character);
+	p.set("position", pos);
+	return p;
+}
+
+/**
+ * Wrap any handler result inside {ok: bool, result: ...} so a null result
+ * (handler returned nothing) is distinguishable from a transport error.
+ */
+fn Object* wrap_ok(Object* result) {
+	Object* obj = object::new_obj(tmem);
+	obj.set("ok", true);
+	if (result == null) {
+		obj.set("result", object::new_null());
+	} else {
+		obj.set("result", result);
+	}
+	return obj;
+}
+
+fn Object* wrap_err(String message) {
+	Object* obj = object::new_obj(tmem);
+	obj.set("ok", false);
+	obj.set("error", message);
+	return obj;
+}
+
+fn Object* execute_list_documents(DocumentStore* store) {
+	Object* result = object::new_obj(tmem);
+	Object* docs_arr = object::new_obj(tmem);
+	int count = 0;
+	if (store != null) {
+		@pool() {
+			foreach (&doc : store.docs.tvalues()) {
+				Object* d = object::new_obj(tmem);
+				d.set("uri", doc.uri);
+				d.set("language_id", doc.language_id);
+				d.set("version", doc.version);
+				d.set("byte_count", (int)doc.content.len);
+
+				// Count newlines for line count
+				int line_count = 1;
+				for (usz i = 0; i < doc.content.len; i++) {
+					if (doc.content[i] == '\n') line_count++;
+				}
+				d.set("line_count", line_count);
+				d.set("has_ast", doc.cached_ast != null);
+				d.set("has_types", doc.cached_types != null);
+				d.set("has_tokens", doc.cached_tokens != null);
+				docs_arr.push(d);
+				count++;
+			}
+		};
+	}
+	result.set("count", count);
+	result.set("documents", docs_arr);
+	if (store != null && store.last_edited_uri.len > 0) {
+		result.set("last_edited_uri", store.last_edited_uri);
+	}
+	return result;
+}
+
+fn Object* execute_last_edited(DocumentStore* store) {
+	Object* result = object::new_obj(tmem);
+	if (store != null && store.last_edited_uri.len > 0) {
+		result.set("uri", store.last_edited_uri);
+	} else {
+		result.set("uri", object::new_null());
+	}
+	return result;
+}
+
+fn Object* execute_last_cursor(DocumentStore* store) {
+	Object* result = object::new_obj(tmem);
+	if (store == null || store.last_cursor_uri.len == 0 ||
+		store.last_cursor_line < 0 || store.last_cursor_character < 0) {
+		result.set("uri", object::new_null());
+		result.set("line", object::new_null());
+		result.set("character", object::new_null());
+		return result;
+	}
+	result.set("uri", store.last_cursor_uri);
+	result.set("line", store.last_cursor_line);
+	result.set("character", store.last_cursor_character);
+	return result;
+}
+
+fn Object* execute_diagnostics_for_uri(DocumentStore* store, WorkspaceIndex* workspace, Object* args) {
+	if (args == null || args.get_len() < 1) {
+		return wrap_err("missing uri");
+	}
+	String uri = args.get_at(0).s;
+	if (uri.len == 0) {
+		return wrap_err("empty uri");
+	}
+	if (store == null) {
+		return wrap_err("no document store");
+	}
+	if (catch excuse = store.get(uri)) {
+		return wrap_err("document not open");
+	}
+
+	// Fetch parsed AST + types (lazily computed by store).
+	ParseResult* ast_result = null;
+	if (try a = store.get_ast(uri)) ast_result = a;
+	if (ast_result == null) {
+		return wrap_err("failed to parse document");
+	}
+	TypeInfo* type_info = null;
+	if (try ti = store.get_types(uri)) type_info = ti;
+
+	String content = "";
+	if (try doc = store.get(uri)) content = doc.content;
+
+	Object* arr = diagnostics::build_diagnostics_array(content, ast_result, workspace, type_info);
+	Object* result = object::new_obj(tmem);
+	result.set("uri", uri);
+	result.set("diagnostics", arr);
+	return result;
+}
+
+fn Object* execute_hover_at(DocumentStore* store, WorkspaceIndex* workspace, Object* args) {
+	Object* p = build_position_params(args) ?? null;
+	if (p == null) return wrap_err("expected [uri, line, character]");
+	Object* result = null;
+	if (try r = hover::handle_hover(store, workspace, p)) result = r;
+	return wrap_ok(result);
+}
+
+fn Object* execute_definition_at(DocumentStore* store, WorkspaceIndex* workspace, Object* args) {
+	Object* p = build_position_params(args) ?? null;
+	if (p == null) return wrap_err("expected [uri, line, character]");
+	Object* result = null;
+	if (try r = definition::handle_definition(store, workspace, p)) result = r;
+	return wrap_ok(result);
+}
+
+fn Object* execute_references_at(DocumentStore* store, WorkspaceIndex* workspace, Object* args) {
+	Object* p = build_position_params(args) ?? null;
+	if (p == null) return wrap_err("expected [uri, line, character]");
+	// references handler reads context.includeDeclaration; default true for
+	// debug ergonomics.
+	Object* ctx = object::new_obj(tmem);
+	ctx.set("includeDeclaration", true);
+	p.set("context", ctx);
+	Object* result = null;
+	if (try r = references::handle_references(store, workspace, p)) result = r;
+	return wrap_ok(result);
+}
+
+fn Object* execute_ast_at(DocumentStore* store, Object* args) {
+	if (args == null || args.get_len() < 3) {
+		return wrap_err("expected [uri, line, character]");
+	}
+	String uri = args.get_at(0).s;
+	int line = args.get_int_at(1) ?? -1;
+	int character = args.get_int_at(2) ?? -1;
+	if (uri.len == 0 || line < 0 || character < 0) {
+		return wrap_err("bad arguments");
+	}
+	if (store == null) return wrap_err("no document store");
+
+	ParseResult* pr = null;
+	if (try a = store.get_ast(uri)) pr = a;
+	if (pr == null) return wrap_err("failed to parse document");
+
+	String content = "";
+	if (try doc = store.get(uri)) content = doc.content;
+	long offset = hover::position_to_offset(content, (uint)line, (uint)character);
+	if (offset < 0) return wrap_err("position out of range");
+
+	// Find innermost AST node whose [start, end) span contains offset.
+	// Smaller spans are preferred.
+	uint best_idx = 0;
+	usz best_span = (usz)-1;
+	bool found = false;
+	for (uint i = 1; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if ((usz)n.start_offset <= (usz)offset && (usz)n.end_offset > (usz)offset) {
+			usz span = (usz)(n.end_offset - n.start_offset);
+			if (span < best_span) {
+				best_span = span;
+				best_idx = i;
+				found = true;
+			}
+		}
+	}
+
+	Object* result = object::new_obj(tmem);
+	result.set("uri", uri);
+	result.set("line", line);
+	result.set("character", character);
+	result.set("offset", (int)offset);
+	if (!found) {
+		result.set("found", false);
+		return result;
+	}
+	result.set("found", true);
+
+	// Build parent chain (innermost → outermost), capped at 16.
+	Object* chain = object::new_obj(tmem);
+	uint cur = best_idx;
+	int depth = 0;
+	while (cur != 0 && depth < 16) {
+		AstNode* n = &pr.nodes[cur];
+		Object* node = object::new_obj(tmem);
+		node.set("idx", (int)cur);
+		node.set("kind", n.kind.nameof);
+		node.set("name", n.name);
+		node.set("start", (int)n.start_offset);
+		node.set("end", (int)n.end_offset);
+		node.set("name_line", (int)n.name_line);
+		node.set("name_col", (int)n.name_col);
+		if (n.type_text.len > 0) node.set("type_text", n.type_text);
+		node.set("mod_flags", (long)n.mod_flags);
+		chain.push(node);
+		if (n.parent == cur) break; // root
+		cur = n.parent;
+		depth++;
+	}
+	result.set("chain", chain);
+	return result;
+}
+
+fn Object* execute_type_at(DocumentStore* store, Object* args) {
+	if (args == null || args.get_len() < 3) {
+		return wrap_err("expected [uri, line, character]");
+	}
+	String uri = args.get_at(0).s;
+	int line = args.get_int_at(1) ?? -1;
+	int character = args.get_int_at(2) ?? -1;
+	if (uri.len == 0 || line < 0 || character < 0) {
+		return wrap_err("bad arguments");
+	}
+	if (store == null) return wrap_err("no document store");
+
+	ParseResult* pr = null;
+	if (try a = store.get_ast(uri)) pr = a;
+	if (pr == null) return wrap_err("failed to parse document");
+
+	TypeInfo* ti = null;
+	if (try t = store.get_types(uri)) ti = t;
+	if (ti == null) return wrap_err("type info unavailable");
+
+	String content = "";
+	if (try doc = store.get(uri)) content = doc.content;
+	long offset = hover::position_to_offset(content, (uint)line, (uint)character);
+	if (offset < 0) return wrap_err("position out of range");
+
+	// Find innermost typed node containing offset.
+	uint best_idx = 0;
+	usz best_span = (usz)-1;
+	bool found = false;
+	for (uint i = 1; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (!ti.has_type[i]) continue;
+		if ((usz)n.start_offset <= (usz)offset && (usz)n.end_offset > (usz)offset) {
+			usz span = (usz)(n.end_offset - n.start_offset);
+			if (span < best_span) {
+				best_span = span;
+				best_idx = i;
+				found = true;
+			}
+		}
+	}
+
+	Object* result = object::new_obj(tmem);
+	result.set("uri", uri);
+	result.set("line", line);
+	result.set("character", character);
+	result.set("offset", (int)offset);
+	if (!found) {
+		result.set("found", false);
+		return result;
+	}
+	AstNode* n = &pr.nodes[best_idx];
+	String formatted = types::format_type(&ti.node_types[best_idx]);
+	result.set("found", true);
+	result.set("idx", (int)best_idx);
+	result.set("kind", n.kind.nameof);
+	result.set("name", n.name);
+	result.set("start", (int)n.start_offset);
+	result.set("end", (int)n.end_offset);
+	result.set("type", formatted);
+	result.set("is_class_ref", ti.node_types[best_idx].is_class_ref);
+	result.set("type_kind", ti.node_types[best_idx].kind.nameof);
+	return result;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

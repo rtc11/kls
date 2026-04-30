@@ -6602,3 +6602,62 @@ fn void when_multi_condition_lub_user_types() @test {
 		assert(r_idx != 0 && t == "String", "r: String (LUB Animal → speak()), got '%s'", t);
 	};
 }
+
+fn void when_subject_is_branch_returns_subject_with_ctor_arms() @test {
+	// Repro: val error = when (exception) { is ApiError -> exception; else -> ApiError(...) }
+	// All arms ApiError → val error: ApiError. Bug: previously inferred Any.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///api_error.kt",
+			"package models\nclass ApiError(val statusCode: Int, val msg: String) : Exception()");
+
+		String src = `fun handle(exception: Exception): Int {
+	val error = when (exception) {
+		is ApiError -> exception
+		else -> ApiError(500, "boom")
+	}
+	return error.statusCode
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint e_idx = find_decl(pr, "error");
+		String t = e_idx > 0 && ti.has_type[e_idx] ? types::format_type(&ti.node_types[e_idx]) : "<no>";
+		assert(e_idx != 0 && t == "ApiError", "error: ApiError (all arms ApiError), got '%s'", t);
+	};
+}
+
+fn void when_subject_is_branch_three_arms_real_repro() @test {
+	// Real-world repro from helved-utbetaling StatusExceptionHandlers.kt.
+	// 3-arm when with `is X -> exception` (smart cast), 2x ctor call.
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		ws.index_file("file:///api_error.kt",
+			"package models\ndata class ApiError(val statusCode: Int, val msg: String) : RuntimeException(msg)");
+
+		String src = `class DeserialiseringFeiletException : Exception()
+fun summary(): String = ""
+fun handle(exception: Exception): Int {
+	val error = when (exception) {
+		is ApiError -> exception
+		is DeserialiseringFeiletException -> ApiError(400, "x")
+		else -> ApiError(500, "y")
+	}
+	return error.statusCode
+}`;
+		ParseResult* pr = do_parse(src);
+		defer free_result(pr);
+		TypeInfo* ti = do_resolve_with_workspace(pr, &ws);
+		defer { types::free_type_info(ti); mem::free(ti); };
+
+		uint e_idx = find_decl(pr, "error");
+		String t = e_idx > 0 && ti.has_type[e_idx] ? types::format_type(&ti.node_types[e_idx]) : "<no>";
+		assert(e_idx != 0 && t == "ApiError", "error: ApiError (3-arm when), got '%s'", t);
+	};
+}

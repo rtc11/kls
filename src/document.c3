@@ -31,11 +31,30 @@ struct Document {
 struct DocumentStore {
 	HashMap{String, Document} docs;
 	WorkspaceIndex* workspace;     // optional, set for cross-file type resolution
+	String last_edited_uri;        // tracks last didOpen/didChange/didSave URI for debug introspection
+	String last_cursor_uri;        // last URI carrying a cursor-bearing request (hover/def/etc)
+	int last_cursor_line;          // 0-indexed; -1 = none
+	int last_cursor_character;     // 0-indexed; -1 = none
 }
 
 fn void DocumentStore.init(DocumentStore* self) {
 	self.docs.init(mem);
 	self.workspace = null;
+	self.last_edited_uri = "";
+	self.last_cursor_uri = "";
+	self.last_cursor_line = -1;
+	self.last_cursor_character = -1;
+}
+
+fn void DocumentStore.record_cursor(DocumentStore* self, String uri, int line, int character) {
+	if (uri.len == 0 || line < 0 || character < 0) return;
+	if (try doc = self.get(uri)) {
+		self.last_cursor_uri = doc.uri;
+	} else {
+		self.last_cursor_uri = uri;
+	}
+	self.last_cursor_line = line;
+	self.last_cursor_character = character;
 }
 
 fn void DocumentStore.free(DocumentStore* self) {
@@ -103,6 +122,11 @@ fn void DocumentStore.open(DocumentStore* self, String uri, String language_id, 
 	};
 	// HashMap copies keys internally (COPY_KEYS), so pass uri directly
 	self.docs.set(uri, doc);
+	// Track most-recently-touched URI for debug introspection. Reuse the
+	// heap copy stored on the Document (same lifetime as docs entry).
+	if (try stored = self.docs.get_ref(uri)) {
+		self.last_edited_uri = stored.uri;
+	}
 }
 
 fn void DocumentStore.update(DocumentStore* self, String uri, int version, String content) {
@@ -131,6 +155,7 @@ fn void DocumentStore.update(DocumentStore* self, String uri, int version, Strin
 		mem::free(doc.content.ptr);
 		doc.version = version;
 		doc.content = content.copy(mem);
+		self.last_edited_uri = doc.uri;
 	}
 }
 
@@ -264,6 +289,7 @@ fn void DocumentStore.apply_change(DocumentStore* self, String uri, int version,
 		mem::free(old_content.ptr);
 		doc.version = version;
 		doc.content = new_content;
+		self.last_edited_uri = doc.uri;
 	}
 }
 
@@ -369,6 +395,15 @@ fn long position_to_byte_offset(String content, uint line, uint character) {
 fn void DocumentStore.close(DocumentStore* self, String uri) {
 	// Free document strings and cached AST/types/chunks before HashMap.remove() frees the entry
 	if (try doc = self.docs.get_ref(uri)) {
+		// Clear last_edited if it pointed at this doc (which is about to be freed).
+		if (self.last_edited_uri.ptr == doc.uri.ptr) {
+			self.last_edited_uri = "";
+		}
+		if (self.last_cursor_uri.ptr == doc.uri.ptr) {
+			self.last_cursor_uri = "";
+			self.last_cursor_line = -1;
+			self.last_cursor_character = -1;
+		}
 		if (doc.cached_ast != null) {
 			doc.cached_ast.free_errors();
 			mem::free(doc.cached_ast);

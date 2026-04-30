@@ -82,40 +82,40 @@ enum NodeKind : int {
 
 // ── Modifier flags (bitfield) ──────────────────────────────────────
 
-const uint MOD_NONE         = 0;
-const uint MOD_ABSTRACT     = 1 << 0;
-const uint MOD_OPEN         = 1 << 1;
-const uint MOD_FINAL        = 1 << 2;
-const uint MOD_SEALED       = 1 << 3;
-const uint MOD_DATA         = 1 << 4;
-const uint MOD_ENUM         = 1 << 5;
-const uint MOD_INNER        = 1 << 6;
-const uint MOD_ANNOTATION   = 1 << 7;
-const uint MOD_VALUE        = 1 << 8;
-const uint MOD_INLINE       = 1 << 9;
-const uint MOD_INFIX        = 1 << 10;
-const uint MOD_OPERATOR     = 1 << 11;
-const uint MOD_SUSPEND      = 1 << 12;
-const uint MOD_TAILREC      = 1 << 13;
-const uint MOD_OVERRIDE     = 1 << 14;
-const uint MOD_LATEINIT     = 1 << 15;
-const uint MOD_CONST        = 1 << 16;
-const uint MOD_EXTERNAL     = 1 << 17;
-const uint MOD_PRIVATE      = 1 << 18;
-const uint MOD_PROTECTED    = 1 << 19;
-const uint MOD_INTERNAL     = 1 << 20;
-const uint MOD_PUBLIC       = 1 << 21;
-const uint MOD_EXPECT       = 1 << 22;
-const uint MOD_ACTUAL       = 1 << 23;
-const uint MOD_VARARG       = 1 << 24;
-const uint MOD_COMPANION    = 1 << 25;
-const uint MOD_NOINLINE     = 1 << 26;
-const uint MOD_CROSSINLINE  = 1 << 27;
-const uint MOD_REIFIED      = 1 << 28;
-const uint MOD_VAR          = 1 << 29;  // property declared with 'var' (mutable)
-const uint MOD_IN           = 1 << 30;  // type parameter variance: in
-const uint MOD_OUT          = 1u << 31; // type parameter variance: out
-const uint MOD_FUN_INTERFACE = MOD_REIFIED; // interface declared with preceding 'fun'
+const ulong MOD_NONE         = 0;
+const ulong MOD_ABSTRACT     = 1ul << 0;
+const ulong MOD_OPEN         = 1ul << 1;
+const ulong MOD_FINAL        = 1ul << 2;
+const ulong MOD_SEALED       = 1ul << 3;
+const ulong MOD_DATA         = 1ul << 4;
+const ulong MOD_ENUM         = 1ul << 5;
+const ulong MOD_INNER        = 1ul << 6;
+const ulong MOD_ANNOTATION   = 1ul << 7;
+const ulong MOD_VALUE        = 1ul << 8;
+const ulong MOD_INLINE       = 1ul << 9;
+const ulong MOD_INFIX        = 1ul << 10;
+const ulong MOD_OPERATOR     = 1ul << 11;
+const ulong MOD_SUSPEND      = 1ul << 12;
+const ulong MOD_TAILREC      = 1ul << 13;
+const ulong MOD_OVERRIDE     = 1ul << 14;
+const ulong MOD_LATEINIT     = 1ul << 15;
+const ulong MOD_CONST        = 1ul << 16;
+const ulong MOD_EXTERNAL     = 1ul << 17;
+const ulong MOD_PRIVATE      = 1ul << 18;
+const ulong MOD_PROTECTED    = 1ul << 19;
+const ulong MOD_INTERNAL     = 1ul << 20;
+const ulong MOD_PUBLIC       = 1ul << 21;
+const ulong MOD_EXPECT       = 1ul << 22;
+const ulong MOD_ACTUAL       = 1ul << 23;
+const ulong MOD_VARARG       = 1ul << 24;
+const ulong MOD_COMPANION    = 1ul << 25;
+const ulong MOD_NOINLINE     = 1ul << 26;
+const ulong MOD_CROSSINLINE  = 1ul << 27;
+const ulong MOD_REIFIED      = 1ul << 28;
+const ulong MOD_VAR          = 1ul << 29;  // property declared with 'var' (mutable)
+const ulong MOD_IN           = 1ul << 30;  // type parameter variance: in
+const ulong MOD_OUT          = 1ul << 31; // type parameter variance: out
+const ulong MOD_FUN_INTERFACE = 1ul << 32; // interface declared with preceding 'fun'
 
 // ── AST node ───────────────────────────────────────────────────────
 
@@ -143,7 +143,7 @@ struct AstNode {
 	uint children_start;  // first index where children may appear (set by adopt_children)
 
 	// Modifier flags (bitfield)
-	uint mod_flags;
+	ulong mod_flags;
 
 	// Type text: for properties, function return types, typealias targets
 	// Slice into source covering the type annotation text

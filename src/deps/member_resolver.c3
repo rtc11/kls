@@ -186,6 +186,37 @@ fn DepSymbol* find_best_class(DependencyIndex* dep_index, String class_name, Str
 }
 
 /**
+ * Find a nested class-like symbol whose JVM-style simple name is
+ * "Outer$Inner". Used so that `Outer.Inner` (where Inner is a nested
+ * class declared in Outer) resolves through the dep index.
+ *
+ * Picks `preferred_pkg` first when supplied, then any package match
+ * for the outer name, then the first match.
+ */
+fn DepSymbol* find_dep_nested_class(DependencyIndex* dep_index, String outer, String inner, String preferred_pkg) {
+	if (dep_index == null || !dep_index.initialized) return null;
+	if (outer.len == 0 || inner.len == 0) return null;
+
+	String compound = string::tformat("%s$%s", outer, inner);
+	DepSymbol*[16] matches;
+	usz count = dep_index.lookup_by_name(compound, &matches);
+	if (count == 0) return null;
+
+	DepSymbol* fallback = null;
+	for (usz i = 0; i < count; i++) {
+		DepSymbol* sym = matches[i];
+		DepSymbolKind k = sym.kind;
+		if (k != DEP_CLASS && k != DEP_INTERFACE && k != DEP_ENUM &&
+			k != DEP_ANNOTATION && k != DEP_OBJECT) continue;
+		if (preferred_pkg.len > 0 && sym.package_name == preferred_pkg) {
+			return sym;
+		}
+		if (fallback == null) fallback = sym;
+	}
+	return fallback;
+}
+
+/**
  * Find dep-class members matching `member_name` for the receiver
  * type `class_name`. Fills `out` with up to `out.len` candidates.
  *
@@ -254,6 +285,21 @@ fn usz find_dep_class_members(
 		if (matched) {
 			out[count] = sym;
 			count++;
+		}
+	}
+
+	// Nested-class member: `Outer.Inner` where Inner is a class declared
+	// inside Outer (e.g. `ProcessingExceptionHandler.Response`). The dep
+	// indexer stores Inner under simple_name "Outer$Inner". Only meaningful
+	// when receiver is a class-ref (you can only nest-access types via the
+	// class name, not via an instance).
+	if (count == 0 && receiver_is_class_ref) {
+		String outer_name = is_known_class ? best_class.name : class_name;
+		String outer_pkg = is_known_class ? best_class.package_name : preferred_pkg;
+		DepSymbol* nested = find_dep_nested_class(dep_index, outer_name, member_name, outer_pkg);
+		if (nested != null) {
+			out[0] = nested;
+			count = 1;
 		}
 	}
 

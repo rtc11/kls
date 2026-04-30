@@ -854,3 +854,24 @@ fn void hover_index_bracket_shows_get_signature() @test {
 		assert(value.contains("get"), "expected 'get' in hover, got: '%s'", value);
 	};
 }
+
+// Regression: overload arity helper used by hover to filter dep-method overloads.
+fn void signature_param_count_zero_args() @test {
+	assert(hover::signature_param_count("public static Response resume()") == 0,
+		"empty parens => 0 params");
+}
+
+fn void signature_param_count_one_arg() @test {
+	assert(hover::signature_param_count("public static Response resume(List<Record> records)") == 1,
+		"one arg with generics => 1 param");
+}
+
+fn void signature_param_count_multi_arg_with_generics() @test {
+	assert(hover::signature_param_count("public void put(Map<String, Integer> m, int n)") == 2,
+		"two args with nested generics => 2 params");
+}
+
+fn void signature_param_count_no_parens() @test {
+	assert(hover::signature_param_count("val foo: Int") == -1,
+		"no parens => -1");
+}

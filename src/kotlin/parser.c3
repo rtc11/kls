@@ -178,7 +178,7 @@ fn void parse_chunk(String source, ParseResult* result,
 
 	// Parse declarations until we pass byte_end or hit EOF
 	while (!p.at_eof() && p.current.offset < byte_end) {
-		uint mods = p.parse_modifiers();
+		ulong mods = p.parse_modifiers();
 		if (p.at_eof() || p.current.offset >= byte_end) break;
 
 		if (!p.parse_declaration(mods)) {
@@ -499,7 +499,7 @@ fn void Parser.parse_file(Parser* self) {
 			continue;
 		}
 
-		uint mods = self.parse_modifiers();
+		ulong mods = self.parse_modifiers();
 		if (self.at_eof()) break;
 
 		if (!self.parse_declaration(mods)) {
@@ -614,8 +614,8 @@ fn void Parser.parse_import_decl(Parser* self) {
 
 // ── Modifiers ──────────────────────────────────────────────────────
 
-fn uint Parser.parse_modifiers(Parser* self) {
-	uint flags = ast::MOD_NONE;
+fn ulong Parser.parse_modifiers(Parser* self) {
+	ulong flags = ast::MOD_NONE;
 	// Single annotation: direct source slice (zero-copy, stable pointer).
 	// Multiple: heap-copied concatenation (tiny per-decl leak, acceptable for LSP).
 	String first_ann = "";
@@ -999,7 +999,7 @@ fn void Parser.build_annotation_entry(Parser* self, uint decl_idx, AnnotationRan
  * Try to parse a declaration with the given modifiers.
  * Returns true if a declaration was parsed, false otherwise.
  */
-fn bool Parser.parse_declaration(Parser* self, uint mods) {
+fn bool Parser.parse_declaration(Parser* self, ulong mods) {
 	switch (self.current.kind) {
 		case KW_CLASS:
 			self.parse_class_like(mods, CLASS_DECL);
@@ -1058,7 +1058,7 @@ fn bool Parser.parse_declaration(Parser* self, uint mods) {
  * interface Name<T> : Iface { body }
  * object Name : Iface { body }
  */
-fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
+fn void Parser.parse_class_like(Parser* self, ulong mods, NodeKind kind) {
 	uint idx = self.add_node(kind);
 	self.result.nodes[idx].mod_flags = mods;
 	self.result.nodes[idx].annotation_text = self.last_annotations;
@@ -1131,7 +1131,7 @@ fn void Parser.parse_class_like(Parser* self, uint mods, NodeKind kind) {
  * fun Receiver.name(params): ReturnType { body }
  * fun <T> Receiver<T>.name(params): ReturnType { body }
  */
-fn void Parser.parse_fun_decl(Parser* self, uint mods) {
+fn void Parser.parse_fun_decl(Parser* self, ulong mods) {
 	uint idx = self.add_node(FUN_DECL);
 	self.result.nodes[idx].mod_flags = mods;
 	self.result.nodes[idx].annotation_text = self.last_annotations;
@@ -1271,7 +1271,7 @@ fn void Parser.parse_fun_decl(Parser* self, uint mods) {
  * val Receiver.name: Type get() = ...
  * val (a, b) = pair  -- destructuring (skip internals)
  */
-fn void Parser.parse_property_decl(Parser* self, uint mods) {
+fn void Parser.parse_property_decl(Parser* self, ulong mods) {
 	uint idx = self.add_node(PROPERTY_DECL);
 	// #13: Track val vs var distinction
 	if (self.at(KW_VAR)) {
@@ -1414,7 +1414,7 @@ fn void Parser.parse_property_decl(Parser* self, uint mods) {
 
 // ── Typealias declaration ──────────────────────────────────────────
 
-fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
+fn void Parser.parse_typealias_decl(Parser* self, ulong mods) {
 	uint idx = self.add_node(TYPEALIAS_DECL);
 	self.result.nodes[idx].mod_flags = mods;
 	self.result.nodes[idx].annotation_text = self.last_annotations;
@@ -1450,7 +1450,7 @@ fn void Parser.parse_typealias_decl(Parser* self, uint mods) {
 
 // ── Constructor declaration ────────────────────────────────────────
 
-fn void Parser.parse_constructor_decl(Parser* self, uint mods) {
+fn void Parser.parse_constructor_decl(Parser* self, ulong mods) {
 	uint idx = self.add_node(CONSTRUCTOR_DECL);
 	self.result.nodes[idx].mod_flags = mods;
 	self.result.nodes[idx].annotation_text = self.last_annotations;
@@ -1510,7 +1510,7 @@ fn void Parser.parse_init_block(Parser* self) {
 
 // ── Companion object ───────────────────────────────────────────────
 
-fn void Parser.parse_companion_object(Parser* self, uint mods) {
+fn void Parser.parse_companion_object(Parser* self, ulong mods) {
 	uint idx = self.add_node(COMPANION_OBJECT_DECL);
 	self.result.nodes[idx].mod_flags = mods | ast::MOD_COMPANION;
 	self.result.nodes[idx].annotation_text = self.last_annotations;
@@ -1558,7 +1558,7 @@ fn void Parser.parse_primary_constructor(Parser* self) {
 
 	while (!self.at(RPAREN) && !self.at_eof()) {
 		// Annotations and modifiers on parameters
-		uint param_mods = self.parse_modifiers();
+		ulong param_mods = self.parse_modifiers();
 
 		// val/var prefix makes it a property parameter
 		bool is_val = self.eat(KW_VAL);
@@ -1582,7 +1582,7 @@ fn void Parser.parse_primary_constructor(Parser* self) {
 
 fn void Parser.parse_param(Parser* self) {
 	// Consume parameter-level modifiers: vararg, crossinline, noinline
-	uint mods = ast::MOD_NONE;
+	ulong mods = ast::MOD_NONE;
 	while (self.at(KW_VARARG) || self.at(KW_CROSSINLINE) || self.at(KW_NOINLINE)) {
 		if (self.at(KW_VARARG)) {
 			mods |= ast::MOD_VARARG;
@@ -1598,7 +1598,7 @@ fn void Parser.parse_param(Parser* self) {
 	self.parse_param_with_mods(mods);
 }
 
-fn void Parser.parse_param_with_mods(Parser* self, uint mods) {
+fn void Parser.parse_param_with_mods(Parser* self, ulong mods) {
 	uint idx = self.add_node(PARAM);
 	self.result.nodes[idx].mod_flags = mods;
 	self.result.nodes[idx].annotation_text = self.last_annotations;
@@ -1657,7 +1657,7 @@ fn void Parser.parse_type_params(Parser* self) {
 		uint children_start = self.result.node_count;
 
 		// Variance: in/out
-		uint mods = ast::MOD_NONE;
+		ulong mods = ast::MOD_NONE;
 		if (self.eat(KW_IN)) {
 			mods |= ast::MOD_IN;
 		} else if (self.eat(KW_OUT)) {
@@ -1729,7 +1729,7 @@ fn void Parser.parse_type_args(Parser* self) {
 		self.node_start(idx, self.current);
 
 		// Use-site variance: in/out
-		uint mods = ast::MOD_NONE;
+		ulong mods = ast::MOD_NONE;
 		if (self.eat(KW_IN)) {
 			mods |= ast::MOD_IN;
 		} else if (self.eat(KW_OUT)) {
@@ -1882,7 +1882,7 @@ fn void Parser.parse_class_body(Parser* self, bool is_enum) {
 
 	// Members
 	while (!self.at(RCURL) && !self.at_eof()) {
-		uint mods = self.parse_modifiers();
+		ulong mods = self.parse_modifiers();
 		if (self.at(RCURL) || self.at_eof()) break;
 
 		if (!self.parse_declaration(mods)) {
@@ -2069,7 +2069,7 @@ fn bool Parser.parse_statement(Parser* self) {
 
 	// Check for modifiers + declaration (local fun, local class)
 	if (is_modifier_keyword(self.current.kind) || self.at(AT)) {
-		uint mods = self.parse_modifiers();
+		ulong mods = self.parse_modifiers();
 		if (is_declaration_start(self.current.kind)) {
 			return self.parse_declaration(mods);
 		}
@@ -4143,7 +4143,7 @@ fn void Parser.finish_structured_type_ref(Parser* self, uint idx, Token start_to
 }
 
 fn void Parser.parse_structured_type_ref_existing(Parser* self, uint idx,
-		String role = "", uint mods = ast::MOD_NONE) {
+		String role = "", ulong mods = ast::MOD_NONE) {
 	Token start_tok = self.current;
 	if (self.peek_top_level_intersection()) {
 		self.result.nodes[idx].kind = TYPE_REF;
@@ -4228,7 +4228,7 @@ fn void Parser.parse_structured_type_ref_existing(Parser* self, uint idx,
 		if (self.at(LANGLE)) {
 			self.advance();
 			while (!self.at(RANGLE) && !self.at_eof()) {
-				uint arg_mods = ast::MOD_NONE;
+				ulong arg_mods = ast::MOD_NONE;
 				if (self.eat(KW_IN)) {
 					arg_mods |= ast::MOD_IN;
 				} else if (self.eat(KW_OUT)) {
@@ -4283,7 +4283,7 @@ fn void Parser.parse_structured_type_ref_existing(Parser* self, uint idx,
 }
 
 fn uint Parser.parse_structured_type_ref_node(Parser* self, uint parent_idx,
-		String role = "", uint mods = ast::MOD_NONE) {
+		String role = "", ulong mods = ast::MOD_NONE) {
 	uint idx = self.add_node(TYPE_REF);
 	self.result.nodes[idx].parent = parent_idx;
 	self.parse_structured_type_ref_existing(idx, role, mods);
@@ -4291,7 +4291,7 @@ fn uint Parser.parse_structured_type_ref_node(Parser* self, uint parent_idx,
 }
 
 fn uint Parser.attach_type_ref_child_from_text(Parser* self, uint parent_idx,
-		uint abs_start, uint abs_end, String role = "", uint mods = ast::MOD_NONE) {
+		uint abs_start, uint abs_end, String role = "", ulong mods = ast::MOD_NONE) {
 	if (abs_end <= abs_start || abs_end > self.source.len) return ast::NO_PARENT;
 
 	String save_source = self.source;
@@ -4325,7 +4325,7 @@ fn uint Parser.attach_type_ref_child_from_text(Parser* self, uint parent_idx,
 }
 
 fn void Parser.fill_type_ref_from_text(Parser* self, uint idx,
-		uint abs_start, uint abs_end, String role = "", uint mods = ast::MOD_NONE) {
+		uint abs_start, uint abs_end, String role = "", ulong mods = ast::MOD_NONE) {
 	if (abs_end <= abs_start || abs_end > self.source.len) return;
 
 	String save_source = self.source;
@@ -4687,7 +4687,7 @@ fn void Parser.parse_property_accessor(Parser* self) {
 
 	// Optional accessor modifiers / annotations (e.g. `private set`, `@JvmName("x") get`).
 	// Reuses parse_modifiers; populates self.last_annotations + returns flag bits.
-		uint accessor_mods = ast::MOD_NONE;
+		ulong accessor_mods = ast::MOD_NONE;
 	if (self.at(AT) || is_accessor_modifier_keyword(self.current.kind)) {
 		accessor_mods = self.parse_modifiers();
 	}

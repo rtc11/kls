@@ -4691,7 +4691,7 @@ fn void probe_t11b_function_types() @test {
 				io::fprintfn(&fh,
 					"  [%d] parent=%d kind=%d name='%s' type_text='%s' extra='%s' mods=0x%x",
 					(int)i, (int)n.parent, (int)n.kind, n.name, n.type_text,
-					n.extra_text, (uint)n.mod_flags)!!;
+					n.extra_text, (ulong)n.mod_flags)!!;
 			}
 		}
 	};

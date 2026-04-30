@@ -1412,8 +1412,6 @@ fn TokenTarget find_dot_member_definition(ParseResult* pr, TypeInfo* ti, Documen
 					if (ti.has_type[j]) {
 						receiver_type = ti.node_types[j];
 					} else {
-						// Try to resolve inner chain: get the inner DOT_EXPR's member name
-						// and receiver, look up that member's type in workspace/deps.
 						receiver_type = resolve_dot_expr_type(pr, ti, workspace, j);
 					}
 				} else if (pr.nodes[j].kind == CALL_EXPR) {
@@ -1993,6 +1991,41 @@ fn TokenTarget find_definition_by_fqn(DependencyIndex* dep_index, String receive
 		if (class_matches[i].kind == DEP_CLASS || class_matches[i].kind == DEP_INTERFACE ||
 			class_matches[i].kind == DEP_ENUM || class_matches[i].kind == DEP_OBJECT) {
 			return make_dep_target_from_ptr(dep_index, class_matches[i]);
+		}
+	}
+
+	// Nested class chain: "Outer.Inner" + member_name → static member of
+	// the nested class. Indexer stores the nested class under simple_name
+	// "Outer$Inner" with its own package_name (the outer's package). Find
+	// it, then look up `member_name` under its real class_name+package.
+	if (has_dot) {
+		String outer = receiver_chain[:last_dot];
+		String inner = receiver_chain[last_dot + 1..];
+		// Only attempt when outer has no further dots (single-level nesting).
+		// Multi-level nesting (A.B.C) handled by recursion if added later.
+		bool outer_simple = true;
+		for (usz i = 0; i < outer.len; i++) {
+			if (outer[i] == '.') { outer_simple = false; break; }
+		}
+		if (outer_simple) {
+			DepSymbol* nested = member_resolver::find_dep_nested_class(dep_index, outer, inner, "");
+			if (nested != null) {
+				DepSymbol*[32] nested_member_matches;
+				usz nested_member_count = dep_index.lookup_by_name(member_name, &nested_member_matches);
+				for (usz i = 0; i < nested_member_count; i++) {
+					DepSymbol* sym = nested_member_matches[i];
+					if (sym.class_name == nested.name && sym.package_name == nested.package_name &&
+						(sym.kind == DEP_METHOD || sym.kind == DEP_FIELD)) {
+						return make_dep_target_from_ptr(dep_index, sym);
+					}
+				}
+				// Member not found on nested class — but if the cursor is on
+				// the inner type itself (member_name is also a type at that
+				// position), return the nested class.
+				if (member_name == inner) {
+					return make_dep_target_from_ptr(dep_index, nested);
+				}
+			}
 		}
 	}
 
@@ -3260,6 +3293,13 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 			// If not a variable, it might be a class/object reference
 			if (recv_type.kind == UNKNOWN) {
 				recv_type = { .kind = SIMPLE, .name = var_name };
+				// Mark as class-ref when the name resolves to a workspace
+				// class/object/interface or a dep class. Required so the
+				// nested-class branch below + downstream static-member
+				// dispatch (find_dep_member_definition) fire correctly.
+				if (workspace != null && is_class_ref_name(workspace, var_name)) {
+					recv_type.is_class_ref = true;
+				}
 			}
 		} else if (pr.nodes[j].kind == DOT_EXPR) {
 			// Recursive chain: a.b.c — resolve inner DOT_EXPR type
@@ -3285,7 +3325,9 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 				}
 				// For constructor-like members (class name = type)
 				if (m.node_kind == CLASS_DECL || m.node_kind == INTERFACE_DECL || m.node_kind == OBJECT_DECL) {
-					return { .kind = SIMPLE, .name = m.name };
+					TypeRef class_t = { .kind = SIMPLE, .name = m.name };
+					class_t.is_class_ref = true;
+					return class_t;
 				}
 				break;
 			}
@@ -3295,10 +3337,47 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 		if (workspace.dep_index.initialized) {
 			TypeRef dep_type = resolve_dep_member_type(&workspace.dep_index, recv_type.name, member_name);
 			if (dep_type.kind != UNKNOWN) return dep_type;
+
+			// Nested-class fallback: when receiver is a class-ref, look up
+			// `member_name` as a nested class of `recv_type.name`. Returns
+			// a TypeRef marked is_class_ref=true so a third-level chain
+			// (Outer.Inner.staticMethod) routes through the static path.
+			if (recv_type.is_class_ref) {
+				DepSymbol* nested = member_resolver::find_dep_nested_class(
+					&workspace.dep_index, recv_type.name, member_name, "");
+				if (nested != null) {
+					TypeRef nested_t = { .kind = SIMPLE, .name = nested.name };
+					nested_t.is_class_ref = true;
+					return nested_t;
+				}
+			}
 		}
 	}
 
 	return types::TYPE_UNKNOWN;
+}
+
+/**
+ * Returns true if `name` resolves to a workspace class/interface/object
+ * or a dep class/interface/enum/object — i.e. a static-member receiver.
+ * Used by the chained-DOT receiver synthesis path to set is_class_ref.
+ */
+fn bool is_class_ref_name(WorkspaceIndex* workspace, String name) {
+	if (workspace == null || name.len == 0) return false;
+	if (try indices = workspace.lookup_by_name(name)) {
+		for (usz idx = 0; idx < indices.len(); idx++) {
+			WorkspaceSymbol* sym = workspace.get_symbol((*indices)[idx]);
+			if (sym.kind == symbols::SymbolKind.CLASS ||
+				sym.kind == symbols::SymbolKind.INTERFACE ||
+				sym.kind == symbols::SymbolKind.OBJECT) {
+				return true;
+			}
+		}
+	}
+	if (workspace.dep_index.initialized) {
+		if (member_resolver::is_dep_class_name(&workspace.dep_index, name)) return true;
+	}
+	return false;
 }
 
 /**

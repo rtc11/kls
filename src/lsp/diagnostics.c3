@@ -2291,7 +2291,7 @@ fn bool param_in_skip_context(ParseResult* ast, uint param_idx) {
 		AstNode* n = &ast.nodes[cur];
 		switch (n.kind) {
 			case FUN_DECL:
-				uint flags = n.mod_flags;
+				ulong flags = n.mod_flags;
 				if ((flags & ast::MOD_OVERRIDE) != 0) return true;
 				if ((flags & ast::MOD_OPEN) != 0) return true;
 				if ((flags & ast::MOD_ABSTRACT) != 0) return true;
@@ -2826,7 +2826,7 @@ fn void add_sealed_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
 		if (subj_type.name.len == 0) continue;
 
 		// Check sealed flag
-		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		ulong flags = workspace.lookup_class_mod_flags(subj_type.name);
 		if (flags & ast::MOD_SEALED == 0) continue;
 
 		// Enumerate direct subtypes via super_index
@@ -2939,7 +2939,7 @@ fn void add_enum_exhaustive_diagnostics(Object* diagnostics, ParseResult* ast,
 		if (subj_type.name.len == 0) continue;
 
 		// Check enum flag
-		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		ulong flags = workspace.lookup_class_mod_flags(subj_type.name);
 		if (flags & ast::MOD_ENUM == 0) continue;
 
 		// Enumerate enum entries via member_cache
@@ -3781,7 +3781,7 @@ fn void add_redundant_else_when_diagnostics(Object* diagnostics, ParseResult* as
 		TypeRef subj_type = type_info.node_types[subj_idx];
 		if (subj_type.name.len == 0) continue;
 
-		uint flags = workspace.lookup_class_mod_flags(subj_type.name);
+		ulong flags = workspace.lookup_class_mod_flags(subj_type.name);
 		bool is_sealed = (flags & ast::MOD_SEALED) != 0;
 		bool is_enum = (flags & ast::MOD_ENUM) != 0;
 		if (!is_sealed && !is_enum) continue;

@@ -267,7 +267,60 @@ fn String? describe_expression_type(ParseResult* pr, TypeInfo* ti, Token tok, Wo
  * `UUID.randomUUID()` (class ref → static) doesn't surface instance methods and
  * vice versa. Tracked in AGENTS.md.
  */
-fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type, ParseResult* pr = null, bool receiver_is_class_ref = false) {
+/**
+ * If the DOT_EXPR at `dot_idx` is the callee of a CALL_EXPR (i.e.
+ * `recv.member(args)`), return the call's argument count. Returns -1
+ * when the dot-member is not directly invoked.
+ */
+fn int call_arity_for_dot(ParseResult* pr, uint dot_idx) {
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* n = &pr.nodes[i];
+		if (n.kind != CALL_EXPR) continue;
+		// First child of CALL_EXPR = callee
+		for (uint j = 0; j < pr.node_count; j++) {
+			if (pr.nodes[j].parent == i) {
+				if (j == dot_idx) return (int)ast::count_call_args(pr, i);
+				break;
+			}
+		}
+	}
+	return -1;
+}
+
+/**
+ * Count parameters in a method signature like
+ * `"public static Response resume(List<Record> records, int n)"`.
+ * Counts top-level commas in the first balanced `(...)` group; returns
+ * 0 for empty `()`. Returns -1 when no parens found.
+ */
+fn int signature_param_count(String signature) {	usz open = 0;
+	bool found_open = false;
+	for (usz i = 0; i < signature.len; i++) {
+		if (signature[i] == '(') { open = i; found_open = true; break; }
+	}
+	if (!found_open) return -1;
+	int depth = 0;
+	int commas = 0;
+	bool any_content = false;
+	for (usz i = open; i < signature.len; i++) {
+		char c = signature[i];
+		if (c == '(' || c == '<' || c == '[') {
+			depth++;
+		} else if (c == ')' || c == '>' || c == ']') {
+			depth--;
+			if (c == ')' && depth == 0) {
+				return any_content ? commas + 1 : 0;
+			}
+		} else if (c == ',' && depth == 1) {
+			commas++;
+		} else if (depth >= 1 && c != ' ' && c != '\t') {
+			any_content = true;
+		}
+	}
+	return -1;
+}
+
+fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String receiver_type, ParseResult* pr = null, bool receiver_is_class_ref = false, int expected_arg_count = -1) {
 	// Resolve preferred package from explicit imports of the receiver name.
 	String preferred_pkg = "";
 	if (pr != null) {
@@ -294,6 +347,23 @@ fn String? describe_dep_member(DependencyIndex* dep_index, Token tok, String rec
 		preferred_pkg, filtered[..]);
 
 	if (filtered_count == 0) return NO_DESCRIPTION~;
+
+	// Overload arity filter: when call site arg count is known, prefer
+	// signatures whose declared param count matches. Falls back to all
+	// matches if filtering would eliminate every candidate.
+	if (expected_arg_count >= 0) {
+		DepSymbol*[16] arity_match;
+		usz arity_count = 0;
+		for (usz i = 0; i < filtered_count && arity_count < arity_match.len; i++) {
+			if (signature_param_count(filtered[i].signature) == expected_arg_count) {
+				arity_match[arity_count++] = filtered[i];
+			}
+		}
+		if (arity_count > 0) {
+			for (usz i = 0; i < arity_count; i++) filtered[i] = arity_match[i];
+			filtered_count = arity_count;
+		}
+	}
 
 	DString ds;
 	ds.tinit();
@@ -371,6 +441,18 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 		}
 
 		if (receiver_type.kind == UNKNOWN) {
+			// Fallback for chained access `a.b.c` where receiver is a DOT_EXPR
+			// with no type info — recurse via definition.c3's resolver which
+			// handles workspace lookup, dep classes, and nested classes.
+			if (recv_idx != ast::NO_PARENT && pr.nodes[recv_idx].kind == DOT_EXPR && workspace != null) {
+				TypeRef recursed = definition::resolve_dot_expr_type(pr, ti, workspace, recv_idx);
+				if (recursed.kind != UNKNOWN) {
+					receiver_type = recursed;
+				}
+			}
+		}
+
+		if (receiver_type.kind == UNKNOWN) {
 			// Fallback: if the receiver is a bare NAME_EXPR matching a known
 			// dep class (e.g. java.lang.System without explicit import), look
 			// up the member directly via that class name. Mirrors the JDK
@@ -438,7 +520,8 @@ fn String? describe_dot_member(ParseResult* pr, TypeInfo* ti, Token tok, Workspa
 		// receiver becomes the first parameter, so we match against that.
 		// Java methods (instance + static) are filtered by declaring class.
 		if (workspace != null && workspace.dep_index.initialized) {
-			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name, pr, receiver_type.is_class_ref)) {
+			int arg_count = call_arity_for_dot(pr, dot_idx);
+			if (try desc = describe_dep_member(&workspace.dep_index, tok, receiver_type.name, pr, receiver_type.is_class_ref, arg_count)) {
 				return desc;
 			}
 		}
@@ -713,7 +796,7 @@ fn void append_jvm_annotations(DString* ds, AstNode* node) {
 	if (node.has_annotation("JvmName"))      ds.appendf("@JvmName\n");
 }
 
-fn void append_modifiers(DString* ds, uint flags) {
+fn void append_modifiers(DString* ds, ulong flags) {
 	if (flags & ast::MOD_PUBLIC != 0)      ds.appendf("public ");
 	if (flags & ast::MOD_PRIVATE != 0)     ds.appendf("private ");
 	if (flags & ast::MOD_PROTECTED != 0)   ds.appendf("protected ");

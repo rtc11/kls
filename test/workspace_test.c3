@@ -883,3 +883,48 @@ fn void get_symbol_after_remove_file_handles_stale_indices() @test {
 	WorkspaceSymbol* s = idx.get_symbol(before - 1);
 	assert(s.name.len == 0, "stale index must yield sentinel");
 }
+
+fn void member_lookup_does_not_pollute_across_classes() @test {
+	// Repro: data class ApiError(val msg: String) shouldn't see msg from a
+	// sibling/nested enum class with same param name.
+	WorkspaceIndex ws;
+	ws.init();
+	defer ws.free();
+
+	ws.index_file("file:///models/ApiError.kt",
+		"package models\n"
+		"object DocumentedErrors {\n"
+		"    sealed interface Async {\n"
+		"        val msg: String\n"
+		"        val doc: String\n"
+		"        enum class Utbetaling(override val msg: String, override val doc: String) : Async {\n"
+		"            PERSONEN_FINNES_IKKE(\"a\", \"b\")\n"
+		"        }\n"
+		"        enum class Simulering(override val msg: String, override val doc: String) : Async {\n"
+		"            SIMULERING_ER_STENGT(\"a\", \"b\")\n"
+		"        }\n"
+		"    }\n"
+		"}\n"
+		"data class ApiError(val statusCode: Int, val msg: String) : RuntimeException(msg)");
+
+	if (try members = ws.lookup_members("ApiError")) {
+		bool found_status = false;
+		uint msg_count = 0;
+		uint first_msg_line = 0;
+		for (usz i = 0; i < members.len(); i++) {
+			MemberDecl* m = &(*members)[i];
+			if (m.name == "statusCode") found_status = true;
+			if (m.name == "msg") {
+				if (msg_count == 0) first_msg_line = m.line;
+				msg_count++;
+			}
+		}
+		assert(found_status, "ApiError should have statusCode member");
+		assert(msg_count == 1, "ApiError should have exactly 1 msg member, got %d (first at line %d)", msg_count, first_msg_line);
+		// data class ApiError is on line index 14 (0-indexed). Nested enums
+		// have their `val msg` PARAMs at much earlier line indices (≤9).
+		assert(first_msg_line >= 13, "ApiError.msg should resolve to data class param (line >= 13), got %d", first_msg_line);
+	} else {
+		assert(false, "no ApiError members cached");
+	}
+}

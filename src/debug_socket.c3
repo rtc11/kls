@@ -10,6 +10,7 @@ import std::collections::object;
 import kls::log;
 import kls::json_rpc;
 import kls::workspace;
+import kls::document;
 import kls::lsp::execute_command;
 
 extern fn int getsockname(NativeSocket socket, SockAddrPtr address, Socklen_t* address_len);
@@ -91,7 +92,7 @@ fn NativeSocket DebugServer.native_socket(DebugServer* self) {
  * Accept a pending connection and handle one debug query.
  * Non-blocking: only call when poll indicates readability.
  */
-fn void DebugServer.accept_and_handle(DebugServer* self, WorkspaceIndex* workspace) {
+fn void DebugServer.accept_and_handle(DebugServer* self, DocumentStore* store, WorkspaceIndex* workspace) {
 	if (!self.active) return;
 
 	TcpSocket client;
@@ -188,7 +189,7 @@ fn void DebugServer.accept_and_handle(DebugServer* self, WorkspaceIndex* workspa
 	// Dispatch
 	if (method == "workspace/executeCommand") {
 		if (params != null) {
-			if (try result = execute_command::handle_execute_command(workspace, params)) {
+			if (try result = execute_command::handle_execute_command(store, workspace, params)) {
 				send_debug_response(&client, request_id, result);
 			} else {
 				send_debug_error(&client, request_id, -32602, "Invalid params");
