@@ -943,15 +943,14 @@ Pre-commit per: full `c3c test`.
 - [x] **C3**: `src/lsp/document_link.c3` migration — NO-OP. W0 inventory mis-counted; zero `.type_text` readers in this file. Marked done with rationale.
 - [x] **C4**: `src/lsp/execute_command.c3` migration (2 readers at :315,596 — JSON serialization `m.type_text` and `n.type_text`) — `quick` + [`kls`]. Parallel C2. Depends C1.
   - Done: commit `3dc4676`. Added `resolved_member_type_text` + `member_type_text` helpers (slight dup — followup cleanup candidate) using `workspace.get_cached_ast` + `store.get(uri).content` for source, walking to TYPE_REF child via `ast::find_child(pr, n, TYPE_REF)` then `type_ref_name`. Split `execute_query_index` into `_with_store` variant + thin wrapper for backward compat. Falls back to legacy `member.type_text` when AST/source unavailable (defensive). 2802 PASS.
-- [ ] **C5a-g**: SERIAL one-per-commit:
+- [x] **C5a-g**: SERIAL one-per-commit:
   - [x] C5a: `src/lsp/call_hierarchy.c3` — detail now from return-type TYPE_REF via `ast::type_ref_name`; text fallback stays.
 - [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - [x] C5c: `src/lsp/inlay_hints.c3` — 8 reader sites migrated to `ast::type_ref_name` with text fallback; 3 gate sites stayed on text (rationale in learnings); site 1361 deferred to C5f (would require modifying hover.c3 caller).
   - [x] C5d: `src/lsp/completion.c3` — 8 RENDER sites migrated to `ast::type_ref_name` with text fallback; 7 sites deferred (MemberDecl cache lacks AST link, parse_type_text text-consumer); 2 gate sites kept (TYPE_PARAM intersection bound rendering); rationale in learnings.
   - [x] C5e: `src/lsp/definition.c3` — 0 RENDER / 8 DEFER (text-consumer + MemberDecl) / 7 GATE; 15 sites annotated with TODO(wave-D) or rationale; no helpers needed (zero render sites); fallback preserved unchanged.
   - [x] C5f: `src/lsp/hover.c3` — 8 RENDER sites migrated to `ast::type_ref_name` with text fallback (build_signature: PARAM types in FUN/CONSTRUCTOR/standalone, FUN_DECL return, PROPERTY type, TYPEALIAS); 2 DEFER (TYPE_PARAM + WHERE_CONSTRAINT intersection bounds, TODO(wave-D)); 1 GATE (lambda PARAM inference guard); helpers `find_type_ref_child`/`find_return_type_ref_child` added file-local. 2802 PASS.
-  - C5g: `src/lsp/semantic_tokens.c3`
-  - Each `unspecified-low` + [`kls`]. Each Depends C1.
+    - [x] C5g: `src/lsp/semantic_tokens.c3` — NO-OP. Zero `.type_text` readers (verified grep).
 - [ ] **C6**: `src/document.c3` migration — `unspecified-low` + [`kls`]. Depends C1.
 - [ ] **C7**: `src/workspace.c3` migration — `unspecified-high` + [`kls`]. Depends C1, C6.
 - [ ] **C8a**: `src/kotlin/contracts.c3` migration — `unspecified-high` + [`kls`]. Depends C1.
