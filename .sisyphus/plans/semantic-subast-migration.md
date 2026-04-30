@@ -881,7 +881,7 @@ Pre-commit per: full `c3c test`.
 - [ ] D1 readiness assessment exists; NO text-field removal without future explicit user GO
 - [ ] F1 oracle PASS — plan compliance + dual-storage invariant intact
 - [ ] F2 quality PASS — no dead helpers / drift / missed guards
-- [ ] F3 manual QA PASS — full test + real-project smoke
+ - [x] F3 manual QA PASS — full test + real-project smoke (verdict: PASS WITH NOTES — see `.sisyphus/evidence/F3-qa.md`)
 - [ ] F4 scope check PASS — zero out-of-scope edits; invariant holds
 - [ ] Every commit kept `c3c test` exit 0 (verifiable via `.sisyphus/evidence/post-*` logs)
 - [ ] Every commit is per-file or per-tight-cluster; zero bundled commits
