@@ -218,3 +218,8 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - `c3c build` clean.
 - `c3c test`: 2802 passed, 0 failed, 0 skipped.
 - Single commit, scope = code_actions.c3 + notepad + plan only.
+
+## 2026-04-30 F4 — final fidelity audit
+- Strict touched-file audit vs plan-declared in-scope list matters more than “reasonable intent”: `.sisyphus/*` docs and `test/dual_storage_snapshot_test.c3` count as out-of-scope under literal final-gate rules, even when some were required elsewhere in plan.
+- Final gate exposed mismatch between plan acceptance wording and actual Wave-D deferral strategy: documented defers may still fail a literal reading of “all parse_only/format_text readers route through new helpers OR sub-AST walking”.
+- Output tests exist for migrated renderer sites, but they do not by themselves prove text-fallback branch execution. Future migrations wanting stronger evidence should add forced-missing-sub-AST fixtures or explicit fallback-path tests.
