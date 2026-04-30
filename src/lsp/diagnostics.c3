@@ -2213,12 +2213,7 @@ fn bool property_has_custom_setter(ParseResult* ast, uint prop_idx) {
 
 // True if PROPERTY_DECL has a child marked as `by` delegate root.
 fn bool property_is_delegated(ParseResult* ast, uint prop_idx) {
-	for (uint c = 0; c < ast.node_count; c++) {
-		AstNode* n = &ast.nodes[c];
-		if (n.parent != prop_idx) continue;
-		if (n.extra_text == "delegate") return true;
-	}
-	return false;
+	return ast::has_delegate_child(ast, prop_idx);
 }
 
 // True if a private class member `name` is reassigned anywhere in the file
