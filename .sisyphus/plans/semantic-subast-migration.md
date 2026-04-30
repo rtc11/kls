@@ -964,7 +964,7 @@ Pre-commit per: full `c3c test`.
 - [x] **C12**: test fixture migration — NO-OP (test_assertion DEFER per plan §80). All `.type_text` reads in tests (parser_test.c3=45, workspace_test.c3=5, contracts_test.c3, dual_storage_snapshot_test.c3) are **intentional dual-storage validation assertions** that verify the parser produces correct text fields. Per plan acceptance criteria line 80: "`test_assertion` readers either: migrated to assert sub-AST shape OR retain text assertions intentionally (documented)" — choosing the documented-retention option. Tests MUST keep asserting on `.type_text` until Wave D removes the field; their job is to PROTECT the dual-storage invariant. No migration.
 
 ### Wave D (Optional, gated)
-- [ ] **D1**: Wave D readiness assessment doc — `oracle` + [`kls`]. NO code. Depends C12.
+- [x] **D1**: Wave D readiness assessment doc — `oracle` + [`kls`]. NO code. Depends C12. Done: `.sisyphus/evidence/wave-d-readiness.md` written by atlas (oracle subagent thrashed without producing output). **Verdict: CONDITIONAL DEFER** — Wave C is the natural endpoint; D2-D6 reopen only on measured perf/memory pressure or dual-storage drift bug. Cost-benefit analysis does not justify Wave D today (~MB memory savings, modest perf win, regression risk in type-resolution backbone). All Wave-C-shippable acceptance criteria met. Field stays text indefinitely; DEFER comments document real blockers.
 
 ### Wave FINAL (parallel, after D1)
 - [ ] **F1**: Plan compliance audit — `oracle` + [`kls`]
