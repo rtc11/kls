@@ -215,14 +215,23 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 
 	if (decl.kind == FUN_DECL) {
 		label.appendf("fun %s(", decl.name);
-		param_count = append_params(&label, &param_offsets, &param_names, decl, pr);
+		param_count = append_params(&label, &param_offsets, &param_names, decl, pr, source);
 		label.appendf(")");
 		if (decl.type_text.len > 0) {
-			label.appendf(": %s", decl.type_text);
+			uint decl_idx = ast::node_index(pr, decl);
+			uint return_type_idx = find_return_type_ref_child(pr, decl_idx);
+			String return_type_text = return_type_idx != ast::NO_PARENT && source.len > 0
+				? ast::type_ref_name(pr, return_type_idx, source, tmem)
+				: "";
+			if (return_type_text.len > 0) {
+				label.appendf(": %s", return_type_text);
+			} else {
+				label.appendf(": %s", decl.type_text);
+			}
 		}
 	} else if (decl.kind == CONSTRUCTOR_DECL) {
 		label.appendf("constructor(");
-		param_count = append_params(&label, &param_offsets, &param_names, decl, pr);
+		param_count = append_params(&label, &param_offsets, &param_names, decl, pr, source);
 		label.appendf(")");
 	} else if (decl.kind == CLASS_DECL) {
 		// Class used as constructor call (e.g., MyClass(...))
@@ -230,7 +239,7 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
 		label.appendf("%s(", decl.name);
 		uint decl_idx = ast::node_index(pr, decl);
 		// Check for PARAM children (primary constructor params)
-		param_count = append_params(&label, &param_offsets, &param_names, decl, pr);
+		param_count = append_params(&label, &param_offsets, &param_names, decl, pr, source);
 		label.appendf(")");
 	} else {
 		// Other declaration types -- provide basic label
@@ -310,7 +319,7 @@ fn Object* build_signature_help(AstNode* decl, ParseResult* pr, int active_param
  * Also records parameter names for @param doc extraction.
  * Returns the number of parameters appended.
  */
-fn int append_params(DString* label, int[64]* offsets, String[32]* names, AstNode* decl, ParseResult* pr) {
+fn int append_params(DString* label, int[64]* offsets, String[32]* names, AstNode* decl, ParseResult* pr, String source) {
 	uint decl_idx = ast::node_index(pr, decl);
 	int count = 0;
 	bool first = true;
@@ -330,7 +339,15 @@ fn int append_params(DString* label, int[64]* offsets, String[32]* names, AstNod
 
 		label.appendf("%s", child.name);
 		if (child.type_text.len > 0) {
-			label.appendf(": %s", child.type_text);
+			uint type_ref_idx = find_type_ref_child(pr, i);
+			String type_text = type_ref_idx != ast::NO_PARENT && source.len > 0
+				? ast::type_ref_name(pr, type_ref_idx, source, tmem)
+				: "";
+			if (type_text.len > 0) {
+				label.appendf(": %s", type_text);
+			} else {
+				label.appendf(": %s", child.type_text);
+			}
 		}
 
 		// Record the end offset
@@ -345,4 +362,29 @@ fn int append_params(DString* label, int[64]* offsets, String[32]* names, AstNod
 	}
 
 	return count;
+}
+
+fn uint find_type_ref_child(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != decl_idx) continue;
+		if (child.kind == TYPE_REF) return i;
+	}
+	return ast::NO_PARENT;
+}
+
+fn uint find_return_type_ref_child(ParseResult* pr, uint fun_idx) {
+	if (fun_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[fun_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_REF) continue;
+		if (child.extra_text == "return") return i;
+	}
+	return ast::NO_PARENT;
 }

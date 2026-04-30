@@ -945,7 +945,7 @@ Pre-commit per: full `c3c test`.
   - Done: commit `3dc4676`. Added `resolved_member_type_text` + `member_type_text` helpers (slight dup — followup cleanup candidate) using `workspace.get_cached_ast` + `store.get(uri).content` for source, walking to TYPE_REF child via `ast::find_child(pr, n, TYPE_REF)` then `type_ref_name`. Split `execute_query_index` into `_with_store` variant + thin wrapper for backward compat. Falls back to legacy `member.type_text` when AST/source unavailable (defensive). 2802 PASS.
 - [ ] **C5a-g**: SERIAL one-per-commit:
   - [x] C5a: `src/lsp/call_hierarchy.c3` — detail now from return-type TYPE_REF via `ast::type_ref_name`; text fallback stays.
-  - C5b: `src/lsp/signature_help.c3`
+- [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - C5c: `src/lsp/inlay_hints.c3`
   - C5d: `src/lsp/completion.c3`
   - C5e: `src/lsp/definition.c3`
@@ -1033,7 +1033,7 @@ subagent: plan
 - [ ] **C4**: `src/lsp/execute_command.c3` — `quick` + [`kls`]. Parallel C2, C3.
 - [ ] **C5**: Remaining LSP type_text consumers — SERIAL, one-per-commit:
   - C5a: `src/lsp/call_hierarchy.c3`
-  - C5b: `src/lsp/signature_help.c3`
+- [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - C5c: `src/lsp/inlay_hints.c3`
   - C5d: `src/lsp/completion.c3`
   - C5e: `src/lsp/definition.c3`

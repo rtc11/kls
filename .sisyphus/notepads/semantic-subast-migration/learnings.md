@@ -116,3 +116,8 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - `build_item` resolves FUN_DECL / CONSTRUCTOR_DECL detail from return-type TYPE_REF via `find_return_type_ref_child(pr, fun_idx)` + `ast::type_ref_name(pr, return_type_idx, source, tmem)`.
 - Legacy `node.type_text` fallback stays for empty source or missing TYPE_REF, so detail JSON stays byte-identical.
 - `c3c test`: 2802 PASS, 0 FAIL.
+
+## 2026-04-30 C5b — signature_help migration
+- `build_signature_help` now threads existing `source` into `append_params` and resolves FUN_DECL return type through `find_return_type_ref_child(pr, decl_idx)` + `ast::type_ref_name(pr, return_type_idx, source, tmem)`.
+- `append_params` now resolves PARAM annotations through `find_type_ref_child(pr, i)` + `ast::type_ref_name(pr, type_ref_idx, source, tmem)`.
+- Legacy `decl.type_text` / `child.type_text` fallback stays when source empty or TYPE_REF missing, so signature labels stay byte-identical.
