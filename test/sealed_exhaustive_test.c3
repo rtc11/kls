@@ -117,3 +117,87 @@ fun area(s: Shape): Int {
 			"non-sealed parent should not emit exhaustiveness warning");
 	};
 }
+
+// Multi-condition arm covers multiple subtypes (Kotlin spec §17.3 +
+// §16.30.5: `is A, is B -> body` covers both A and B). All subtypes
+// covered across multi-cond + single arms — must NOT warn.
+fn void sealed_when_multi_cond_all_covered_no_warning() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		String src =
+`sealed class Shape
+class Circle : Shape()
+class Square : Shape()
+class Triangle : Shape()
+fun area(s: Shape): Int {
+    return when (s) {
+        is Circle, is Square -> 1
+        is Triangle -> 2
+    }
+}`;
+		Object* diags = build_diags_ws(&ws, "file:///shapes.kt", src);
+		assert(!any_msg_contains(diags, "non-exhaustive"),
+			"multi-cond covers all subtypes — exhaustive");
+	};
+}
+
+// Multi-condition arm leaves one subtype uncovered — warn AND ensure
+// missing list contains only the uncovered subtype, not the multi-cond
+// covered ones.
+fn void sealed_when_multi_cond_missing_one_warns() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		String src =
+`sealed class Shape
+class Circle : Shape()
+class Square : Shape()
+class Triangle : Shape()
+fun area(s: Shape): Int {
+    return when (s) {
+        is Circle, is Square -> 1
+    }
+}`;
+		Object* diags = build_diags_ws(&ws, "file:///shapes.kt", src);
+		assert(any_msg_contains(diags, "non-exhaustive"),
+			"missing Triangle — must warn");
+		assert(any_msg_contains(diags, "Triangle"),
+			"missing subtype Triangle must appear in message");
+		assert(!any_msg_contains(diags, "Circle"),
+			"Circle is covered — must not appear in missing list");
+		assert(!any_msg_contains(diags, "Square"),
+			"Square is covered — must not appear in missing list");
+	};
+}
+
+// `in` patterns over a sealed subject add nothing to subtype coverage —
+// remaining subtypes are still missing. (Sealed subjects can't sensibly
+// participate in `in range`, but a user might write it with a custom
+// `contains` operator. Whatever the user wrote, the by-name
+// exhaustiveness check must ignore it.)
+fn void sealed_when_in_pattern_does_not_cover_subtypes() @test {
+	@pool() {
+		WorkspaceIndex ws;
+		ws.init();
+		defer ws.free();
+		String src =
+`sealed class Shape
+class Circle : Shape()
+class Square : Shape()
+fun area(s: Shape, primary: Set<Shape>): Int {
+    return when (s) {
+        in primary -> 0
+        is Circle -> 1
+    }
+}`;
+		Object* diags = build_diags_ws(&ws, "file:///shapes.kt", src);
+		assert(any_msg_contains(diags, "non-exhaustive"),
+			"in-pattern adds no coverage; Square remains missing");
+		assert(any_msg_contains(diags, "Square"),
+			"missing Square must appear in message");
+	};
+}
+
