@@ -95,6 +95,9 @@ fn String render_supertype_delegate_real(ParseResult* pr, uint type_ref_idx, Str
 }
 
 fn String render_annotation_args_stub(ParseResult* pr, int annot_idx) {
+	// Deferred: ParseResult does not expose source text, so ast.c3 cannot yet
+	// re-slice annotation arg subtrees there. Keep text-field passthrough until
+	// Wave D removes dual-storage fallback.
 	return pr.nodes[(uint)annot_idx].annotation_text;
 }
 

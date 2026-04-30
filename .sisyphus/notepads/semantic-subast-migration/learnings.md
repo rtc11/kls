@@ -67,3 +67,9 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - Delegate marker set on delegate expression subtree root, then that root adopted as child of PROPERTY_DECL or supertype TYPE_REF.
 - `has_delegate_child(pr, parent_idx)` fits parent-child scan for PROPERTY_DECL delegate checks.
 - Self-marker checks where node already bound as child stay direct `extra_text == "delegate"`; no helper needed.
+
+## 2026-04-30 B1 — annotation sub-AST helper
+- Added `has_annotation_ast(ParseResult* result, uint parent_idx, String simple_name)` in `src/kotlin/ast.c3`; scans direct `ANNOTATION_ENTRY` children via `children_start` + `child.parent == parent_idx` and matches against child `name`, which parser already stores as simple last identifier of qualified annotation path.
+- Use-site target handling stays implicit in parser shape: targets like `get:` / `set:` / `field:` live in `ANNOTATION_ENTRY.type_text`, so helper ignores them and simple-name matching stays aligned with legacy `AstNode.has_annotation` semantics.
+- Dual storage still required in Wave B1: kept `AstNode.has_annotation` text-based fast path unchanged because receiver method has no `ParseResult*`; sub-AST helper exists beside it for staged consumer migration, Wave D removes text fallback later.
+- Deferred `annotation_args_text` in `ast.c3`: `ParseResult` has no source slice/bytes field, so helper cannot reconstruct annotation arg text there without producer/storage changes outside B1 scope. Snapshot test keeps passthrough renderer with defer note.

@@ -341,6 +341,24 @@ fn bool AstNode.has_annotation(AstNode* self, String name) {
 }
 
 /**
+ * Check whether parent has direct ANNOTATION_ENTRY child with matching
+ * simple name. Uses annotation sub-AST; use-site targets live in type_text
+ * and do not affect simple-name matching.
+ */
+fn bool has_annotation_ast(ParseResult* result, uint parent_idx, String simple_name) {
+	if (parent_idx >= result.node_count || simple_name.len == 0) return false;
+	AstNode* parent = &result.nodes[parent_idx];
+	if (parent.child_count == 0) return false;
+	for (uint i = parent.children_start; i < result.node_count; i++) {
+		AstNode* child = &result.nodes[i];
+		if (child.parent != parent_idx) continue;
+		if (child.kind != ANNOTATION_ENTRY) continue;
+		if (child.name == simple_name) return true;
+	}
+	return false;
+}
+
+/**
  * Find the first ANNOTATION_ENTRY child whose simple name matches.
  * Returns null fault if not found. Searches across all entries (handles
  * cases where multiple annotations are attached to the same declaration).
