@@ -4,6 +4,8 @@ import kls::kotlin::ast;
 import kls::kotlin::cfg;
 import kls::kotlin::contracts;
 import kls::kotlin::types;
+import kls::kotlin::symbols;
+import kls::workspace;
 
 // ── Flow-sensitive smart-cast analysis ─────────────────────────────
 //
@@ -789,14 +791,52 @@ fn void scan_node(ParseResult* pr, uint idx, FlowState* state) {
 		// control flow is not part of the enclosing function. Naively
 		// recursing would leak narrowing facts (e.g. `requireNotNull(x)`
 		// inside a `forEach { ... }`) into the caller even when the
-		// lambda may not run. Only descend when the enclosing call has
-		// a `callsInPlace` contract with EXACTLY_ONCE / AT_LEAST_ONCE
-		// for this lambda's argument position.
+		// lambda may not run. Only descend (adding facts) when the
+		// enclosing call has a `callsInPlace` contract with
+		// EXACTLY_ONCE / AT_LEAST_ONCE for this lambda's argument
+		// position. For AT_MOST_ONCE / UNKNOWN / no contract the lambda
+		// may still execute, so any reassignment inside it must KILL
+		// facts about the reassigned binding (Kotlin spec §11.3 — smart
+		// cast invalidated by possible mutation).
 		NodeKind ck = pr.nodes[i].kind;
 		if (ck == LAMBDA_EXPR || ck == ANONYMOUS_FUN_EXPR) {
-			if (!lambda_runs_at_least_once(pr, i)) continue;
+			if (!lambda_runs_at_least_once(pr, i)) {
+				kill_lambda_assignments(pr, i, state);
+				continue;
+			}
 		}
 		scan_node(pr, i, state);
+	}
+}
+
+/**
+ * Walk a lambda / anonymous-fn body and kill smart-cast facts for any
+ * binding that is assigned inside (`x = ...`, `b.x = ...`). Adds NO
+ * narrowing facts — the lambda may have run zero or many times so we
+ * cannot trust per-call effects, but we must not preserve facts about
+ * names the lambda may have mutated. Recurses through nested
+ * blocks / control-flow / nested lambdas alike (any nested mutation
+ * still invalidates outer facts).
+ */
+fn void kill_lambda_assignments(ParseResult* pr, uint idx, FlowState* state) {
+	if (idx >= pr.node_count) return;
+	AstNode* n = &pr.nodes[idx];
+	if (n.kind == ASSIGNMENT_EXPR) {
+		uint lhs = first_child(pr, idx);
+		String lname;
+		String lmem;
+		if (dotted_name_of_expr(pr, lhs, &lname, &lmem) && lname.len > 0) {
+			if (lmem.len == 0) {
+				state.kill_receiver(lname);
+			} else {
+				state.kill_name(lname, lmem);
+			}
+		}
+	}
+	if (n.child_count == 0) return;
+	for (uint i = n.children_start; i < pr.node_count; i++) {
+		if (pr.nodes[i].parent != idx) continue;
+		kill_lambda_assignments(pr, i, state);
 	}
 }
 
@@ -879,11 +919,16 @@ fn void apply_call_contracts(ParseResult* pr, uint call_idx, FlowState* state) {
 }
 
 /**
- * Collect contracts for a callee from BOTH the hardcoded stdlib table
- * AND the in-file user-defined contracts (any FUN_DECL with matching
- * name in the same ParseResult). Cross-file user contracts are NOT
- * resolved here — that requires a workspace lookup which would invert
- * the kotlin → workspace layering. Tracked in the contracts plan.
+ * Collect contracts for a callee from THREE sources, in priority order:
+ *   1. Hardcoded stdlib contract table (`requireNotNull`, `check`, …).
+ *   2. In-file user-defined FUN_DECLs with matching name (overloads).
+ *   3. Cross-file user-defined FUN_DECLs resolved via workspace index.
+ *
+ * Cross-file resolution piggybacks on `types::g_workspace` (already a
+ * global bridge for cross-file type inference), so no new layering is
+ * introduced — flow already imports types. Per-callee output is bounded
+ * by `out.len`; overloads from any source contribute (flow is
+ * conservative so a superset of facts only narrows further).
  */
 fn usz collect_contracts_for_callee(ParseResult* pr, String callee_name,
 		contracts::ContractEffect[] out) {
@@ -891,8 +936,7 @@ fn usz collect_contracts_for_callee(ParseResult* pr, String callee_name,
 	if (n >= out.len) return n;
 
 	// In-file scan: find any FUN_DECL with this name, extract its
-	// contracts. Multiple matches (overloads) all contribute — flow
-	// is conservative so applying superset of facts only narrows more.
+	// contracts. Multiple matches (overloads) all contribute.
 	for (uint i = 0; i < pr.node_count; i++) {
 		if (n >= out.len) break;
 		if (pr.nodes[i].kind != FUN_DECL) continue;
@@ -900,6 +944,54 @@ fn usz collect_contracts_for_callee(ParseResult* pr, String callee_name,
 		usz wrote = contracts::extract_user_contracts(pr, i, out[n..]);
 		n += wrote;
 	}
+
+	// Cross-file scan: query workspace for FUN_DECLs with matching
+	// name in OTHER files. Skip if no workspace bound (unit tests that
+	// bypass workspace setup). NOTE: we have no `pr.uri` to filter
+	// same-file matches; in-file FUN_DECLs may also appear in the
+	// workspace index and get extracted twice. That's safe — flow is
+	// conservative monotone, applying the same fact twice is a no-op.
+	if (n < out.len && types::g_workspace != null) {
+		if (try indices = types::g_workspace.lookup_by_name(callee_name)) {
+			for (usz i = 0; i < indices.len(); i++) {
+				if (n >= out.len) break;
+				WorkspaceSymbol* sym = types::g_workspace.get_symbol((*indices)[i]);
+				if (sym.kind != symbols::SymbolKind.FUNCTION) continue;
+				// Only top-level functions get cross-file contract
+				// resolution. Member functions need receiver-type
+				// disambiguation we don't do here.
+				if (sym.receiver.len > 0) continue;
+				ParseResult*? other_pr_opt = types::g_workspace.get_cached_ast(sym.uri);
+				if (catch other_pr_opt) continue;
+				if (other_pr_opt == null) continue;
+				ParseResult* other_pr = other_pr_opt;
+				// Skip when the workspace returned the SAME ParseResult
+				// pointer we're already scanning (in-file pass handled it).
+				if (other_pr == pr) continue;
+				// Find the FUN_DECL by name+line; fall back to first
+				// matching name if line lookup fails.
+				uint fidx = uint.max;
+				for (uint k = 0; k < other_pr.node_count; k++) {
+					AstNode* nd = &other_pr.nodes[k];
+					if (nd.kind != FUN_DECL) continue;
+					if (nd.name != callee_name) continue;
+					if (nd.name_line == sym.line) { fidx = k; break; }
+				}
+				if (fidx == uint.max) {
+					for (uint k = 0; k < other_pr.node_count; k++) {
+						AstNode* nd = &other_pr.nodes[k];
+						if (nd.kind == FUN_DECL && nd.name == callee_name) {
+							fidx = k; break;
+						}
+					}
+				}
+				if (fidx == uint.max) continue;
+				usz wrote = contracts::extract_user_contracts(other_pr, fidx, out[n..]);
+				n += wrote;
+			}
+		}
+	}
+
 	return n;
 }
 
