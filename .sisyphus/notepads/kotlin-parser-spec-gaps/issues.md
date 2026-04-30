@@ -60,3 +60,13 @@
 - ast.c3:122 `MOD_FUN_INTERFACE = MOD_REIFIED` — bit-aliasing tech debt. Currently safe (REIFIED only consumed on TYPE_PARAM, MOD_FUN_INTERFACE only set on INTERFACE_DECL). Future risk if either bit-check broadens.
 - lexer.c3:710-718 `lex_operator` switch — extra leading tab on `switch` + `case '.':` block from T1 RESERVED `...` insertion. Cosmetic.
 - parser.c3:4690 `uint accessor_mods = ast::MOD_NONE;` — extra leading tab from T6 in_accessor_body diff context.
+
+## 2026-04-30 — F2 CLOSED
+- Item 3 (MOD_FUN_INTERFACE alias): widened `mod_flags` from `uint` to `ulong`. MOD_FUN_INTERFACE now `1ul << 32`, no longer aliased to MOD_REIFIED. Cascaded to parse_modifiers, append_modifiers, lookup_class_mod_flags, WorkspaceMember, class_mod_flags HashMap. Commit `37dfa91` (bundled w/ unrelated parallel-agent LSP/deps work in worktree).
+- Item 1 (dead helpers): deleted `skip_param_default` and `skip_delegation_expression` from parser.c3.
+- Item 2 (stray `}`): fixed in `skip_type_ref` function-type-with-receiver branch.
+- Item 4 (cosmetic indent):
+  - `accessor_mods` stray leading tab → fixed.
+  - `lex_operator` switch indentation → DEFERRED. Entangled with pre-existing inconsistent `case` indentation throughout the function (some cases at switch-level, some at switch+1). Cosmetic-only, no functional benefit, high risk of formatter cascade. Documented decision in commit message.
+- Items 1+2+4-accessor in commit `456952b`.
+- Full `c3c test`: 2782 PASS, 0 FAIL after both commits.

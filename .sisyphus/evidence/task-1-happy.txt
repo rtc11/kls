@@ -1,0 +1,1 @@
+No build target named 'test/lexer_test.c3' was found in project.json. Was it misspelled?

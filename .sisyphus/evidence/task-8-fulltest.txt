@@ -1,0 +1,3 @@
+2735 tests run.
+Test Result: PASSED: 2735 passed, 0 failed, 0 skipped.
+Commit: 0a51ca7 feat(parser): parse intersection bounds in type parameters

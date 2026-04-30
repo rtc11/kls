@@ -1,0 +1,35 @@
+F3 Final QA — Coverage Summary
+================================
+
+Baseline: 582415eb (2706 pass / 0 fail)
+Current HEAD: 20c44a5 (2749 pass / 0 fail)
+Delta: +43 test runs, +29 unique test names, 0 removed, 0 regressions
+
+Test diff status: CLEAN
+- 0 baseline tests removed
+- 0 baseline tests changed to FAIL
+- 29 new parser_test additions, all PASS
+
+QA Scenarios (T1–T11) coverage verification:
+T1  double literal d/D suffix .................... IMPL src/kotlin/lexer.c3:476  (covered by lexer parse paths)
+T2  shebang at BOF ............................... IMPL src/kotlin/lexer.c3:307  (skip_shebang_if_at_bof)
+T3  doc comment DOC_COMMENT token ................ TEST test/lexer_next_all_test.c3:98,104
+T4  reserved keyword tokens ...................... TEST test/lexer_test.c3:553 (reserved_ellipsis)
+T5  fun interface MOD_FUN_INTERFACE .............. TEST test/parser_test.c3:187 (parse_fun_interface +3 more)
+T6  property accessor field marker ............... TEST test/parser_test.c3:3906,3927 (getter/setter)
+T7  by delegation supertype attaches expression .. TEST test/parser_test.c3:5350,5366,5388,5402
+T8  multi-bound type params (& separator) ........ TEST test/parser_test.c3 parse_type_param_{single,multi,three}_bounds
+T9  annotation args dual storage ................. TEST test/parser_test.c3:5421,5444,5464,5480
+T10 param default value preserved ................ TEST test/parser_test.c3:1201,1217,1232,1272
+T11 generic return type dual storage ............. TEST test/parser_test.c3:4659
+
+Spec-conformance feature coverage (via test/parser_test.c3 grep):
+- classes / interfaces / objects / enums / sealed / data / value class .. ✓
+- functions / properties / lambdas .................................... ✓
+- when / try / generics / nullable / function types .................... ✓
+- suspend / extensions / annotations ................................... ✓
+
+Test state: 2749 pass / 0 fail / 0 skipped
+Build: links cleanly, testrun exit code 0
+
+VERDICT: APPROVE
