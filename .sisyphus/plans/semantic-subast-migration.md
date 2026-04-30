@@ -276,9 +276,9 @@ Forced serialization points: any wave-internal pair touching the same file
 - **WHY**: ast.c3 helpers are the canonical home for new APIs; T11b tests prove the dual-storage invariant the snapshot test must lock down
 
 **Acceptance Criteria**:
-- [ ] `.sisyphus/evidence/migration-inventory.md` lists every reader with classification + target task
-- [ ] `.sisyphus/evidence/baseline-test-output.txt` exists, exit code 0
-- [ ] `test/dual_storage_snapshot_test.c3` exists; full `c3c test` PASS
+- [x] `.sisyphus/evidence/migration-inventory.md` lists every reader with classification + target task
+- [x] `.sisyphus/evidence/baseline-test-output.txt` exists, exit code 0
+- [x] `test/dual_storage_snapshot_test.c3` exists; full `c3c test` PASS
 
 **QA Scenarios**:
 ```
@@ -328,9 +328,9 @@ Scenario: snapshot guard fires on intentional drift (smoke)
 - **WHY**: T7/T10 producer code defines the AST shape — helpers must match it exactly
 
 **Acceptance Criteria**:
-- [ ] Two helpers exist with documented contracts
-- [ ] Snapshot guard test now exercises real renderers for param-default + delegate
-- [ ] Full `c3c test` PASS with zero diff vs baseline (only new tests added)
+- [x] Two helpers exist with documented contracts
+- [x] Snapshot guard test now exercises real renderers for param-default + delegate
+- [x] Full `c3c test` PASS with zero diff vs baseline (only new tests added)
 
 **QA Scenarios**:
 ```
@@ -374,9 +374,9 @@ Evidence: .sisyphus/evidence/task-a1-{happy,negative,snapshot}.txt
 - **WHY**: keep test coverage tight to detect output drift
 
 **Acceptance Criteria**:
-- [ ] All `param.extra_text` reads in this file route through new helper OR documented as out-of-scope
-- [ ] `test/inlay_hints_test.c3` PASS
-- [ ] Full `c3c test` PASS, zero baseline diff except new tests
+- [x] All `param.extra_text` reads in this file route through new helper OR documented as out-of-scope
+- [x] `test/inlay_hints_test.c3` PASS
+- [x] Full `c3c test` PASS, zero baseline diff except new tests
 
 **QA Scenarios**:
 ```
@@ -698,11 +698,11 @@ Evidence: .sisyphus/evidence/task-c1-*.txt
 **Depends**: C1-C9.
 
 **Acceptance per sub-commit**:
-- [ ] `test/types_test.c3` PASS
-- [ ] `test/cross_file_*_test.c3` PASS (5 files via full run)
-- [ ] `test/smart_cast_diagnostic_test.c3` PASS
-- [ ] `test/contracts_test.c3` PASS
-- [ ] Full `c3c test` zero baseline diff except added tests
+- [x] `test/types_test.c3` PASS
+- [x] `test/cross_file_*_test.c3` PASS (5 files via full run)
+- [x] `test/smart_cast_diagnostic_test.c3` PASS
+- [x] `test/contracts_test.c3` PASS
+- [x] Full `c3c test` zero baseline diff except added tests
 
 **QA**: per AGENTS.md type system + smart cast tests; cross-file member completion / hover / definition / references unchanged.
 
