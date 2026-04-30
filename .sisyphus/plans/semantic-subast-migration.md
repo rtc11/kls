@@ -880,7 +880,7 @@ Pre-commit per: full `c3c test`.
 - [ ] C2-C12 consumer migrations green and per-file committed (C5 + C8 + C10 internally split per the wave spec)
 - [ ] D1 readiness assessment exists; NO text-field removal without future explicit user GO
 - [ ] F1 oracle PASS — plan compliance + dual-storage invariant intact
-- [ ] F2 quality PASS — no dead helpers / drift / missed guards
+- [x] F2 quality PASS — verdict: PASS WITH NOTES — see `.sisyphus/evidence/F2-quality.md`
  - [x] F3 manual QA PASS — full test + real-project smoke (verdict: PASS WITH NOTES — see `.sisyphus/evidence/F3-qa.md`)
 - [ ] F4 scope check PASS — zero out-of-scope edits; invariant holds
 - [ ] Every commit kept `c3c test` exit 0 (verifiable via `.sisyphus/evidence/post-*` logs)
@@ -968,7 +968,7 @@ Pre-commit per: full `c3c test`.
 
 ### Wave FINAL (parallel, after D1)
 - [ ] **F1**: Plan compliance audit — `oracle` + [`kls`]
-- [ ] **F2**: Code quality review — `unspecified-high` + [`kls`, `ai-slop-remover`]
+- [x] **F2**: Code quality review — `unspecified-high` + [`kls`, `ai-slop-remover`] — PASS WITH NOTES (see `.sisyphus/evidence/F2-quality.md`)
 - [ ] **F3**: Real manual QA — `unspecified-high` + [`kls`]
 - [ ] **F4**: Scope + invariant final check — `deep` + [`kls`]
 
@@ -1057,6 +1057,6 @@ subagent: plan
 
 ### Wave FINAL (After ALL implementation, 4 in parallel)
 - [ ] **F1**: Plan compliance + dual-storage invariant audit — `oracle` + [`kls`]
-- [ ] **F2**: Code quality (dead helpers, drift, missed guards) — `unspecified-high` + [`kls`, `ai-slop-remover`]
+- [x] **F2**: Code quality (dead helpers, drift, missed guards) — `unspecified-high` + [`kls`, `ai-slop-remover`] — PASS WITH NOTES (see `.sisyphus/evidence/F2-quality.md`)
 - [ ] **F3**: Real manual QA — full `c3c test` + KLS smoke against real Kotlin project — `unspecified-high` + [`kls`]
 - [ ] **F4**: Scope fidelity + dual-storage invariant final check — `deep` + [`kls`]
