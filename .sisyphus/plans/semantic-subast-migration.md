@@ -960,7 +960,7 @@ Pre-commit per: full `c3c test`.
 - [x] **C10b**: `src/kotlin/types.c3` resolution-paths migration — NO-OP. Same file as C10a; same text-consumer DEFER blocker. Resolved together under C10a rationale.
 - [x] **C10c**: `src/kotlin/types.c3` diagnostic-paths migration — NO-OP. Same file as C10a/b; same text-consumer DEFER blocker. Resolved together under C10a rationale.
 - [x] **C11**: `src/lsp/diagnostics.c3` type_text migration — NO-OP (text-consumer DEFER batch). 22 readers; 15+ are `types::parse_type_text` consumers (lines 727, 778, 891, 1344, 4456, 5208), several are text-helper consumers (`type_text_mentions`, `type_text_is_unit`, `target_text.trim()` for string-compare match-coverage at :2865/3840), 1 text-propagator at :1366-1367. Sole real RENDER feeder is text-pass-through (caller renders). Same blocker as C5e/C8a/C9/C10. Field stays text. Marked done with rationale.
-- [ ] **C11b**: `src/lsp/code_actions.c3` type_text migration (12 readers — MISSING from original plan; added per W0 inventory) — `unspecified-low` + [`kls`]. Depends C1.
+- [x] **C11b**: `src/lsp/code_actions.c3` type_text migration (12 readers) — DONE. 5 RENDER migrated (lines 653/1487/1656/1852/6457) + 7 GATE left as text presence checks. File-local `find_type_ref_child` helper pasted from C5b. 2802 PASS. Commit pending.
 - [ ] **C12**: test fixture migration — `unspecified-low` + [`kls`]. One commit per test file. Depends C10c, C11.
 
 ### Wave D (Optional, gated)

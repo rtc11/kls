@@ -14,6 +14,18 @@ import kls::workspace;
 
 faultdef NO_RECEIVER;
 
+fn uint find_type_ref_child(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != decl_idx) continue;
+		if (child.kind == TYPE_REF) return i;
+	}
+	return ast::NO_PARENT;
+}
+
 /**
  * Handle textDocument/codeAction request.
  *
@@ -650,7 +662,12 @@ fn void classify_subject_cond(ParseResult* ast, String content, uint cond_idx, S
 		AstNode* subj = &ast.nodes[subj_idx];
 		if (subj.kind != NAME_EXPR) return;
 		*subject = subj.name;
-		*label = string::tformat("%s %s", n.extra_text, n.type_text);
+		uint tref_idx = find_type_ref_child(ast, cond_idx);
+		String t = (tref_idx != ast::NO_PARENT && content.len > 0)
+			? ast::type_ref_name(ast, tref_idx, content, tmem)
+			: "";
+		String type_rendered = t.len > 0 ? t : n.type_text;
+		*label = string::tformat("%s %s", n.extra_text, type_rendered);
 		return;
 	}
 
@@ -1472,7 +1489,14 @@ fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Typ
 					}
 				}
 			}
-			if (cap_type.len == 0) cap_type = dn.type_text.len > 0 ? dn.type_text : "Any";
+			if (cap_type.len == 0) {
+				uint dn_tref_idx = find_type_ref_child(ast, decl_idx);
+				String dn_t = (dn_tref_idx != ast::NO_PARENT && doc.content.len > 0)
+					? ast::type_ref_name(ast, dn_tref_idx, doc.content, tmem)
+					: "";
+				String dn_rendered = dn_t.len > 0 ? dn_t : dn.type_text;
+				cap_type = dn_rendered.len > 0 ? dn_rendered : "Any";
+			}
 			mode_a_cap_names[mode_a_cap_count] = nn.name;
 			mode_a_cap_types[mode_a_cap_count] = cap_type;
 			mode_a_cap_count++;
@@ -1641,7 +1665,12 @@ fn Object* try_extract_function(String uri, Document* doc, ParseResult* ast, Typ
 			if (n.kind != PARAM) continue;
 		}
 		enclosing_decl_names[enclosing_decl_count] = n.name;
-		enclosing_decl_types[enclosing_decl_count] = n.type_text.len > 0 ? n.type_text : "Any";
+		uint n_tref_idx = find_type_ref_child(ast, i);
+		String n_t = (n_tref_idx != ast::NO_PARENT && doc.content.len > 0)
+			? ast::type_ref_name(ast, n_tref_idx, doc.content, tmem)
+			: "";
+		String n_rendered = n_t.len > 0 ? n_t : n.type_text;
+		enclosing_decl_types[enclosing_decl_count] = n_rendered.len > 0 ? n_rendered : "Any";
 		enclosing_decl_count++;
 	}
 
@@ -1837,7 +1866,12 @@ fn void add_data_class_actions(Object* actions, String uri, Document* doc, Parse
 		if (n.kind != PARAM) continue;
 		if (n.name.len == 0) continue;
 		prop_names[prop_count] = n.name;
-		prop_types[prop_count] = n.type_text.len > 0 ? n.type_text : "Any";
+		uint p_tref_idx = find_type_ref_child(ast, i);
+		String p_t = (p_tref_idx != ast::NO_PARENT && doc.content.len > 0)
+			? ast::type_ref_name(ast, p_tref_idx, doc.content, tmem)
+			: "";
+		String p_rendered = p_t.len > 0 ? p_t : n.type_text;
+		prop_types[prop_count] = p_rendered.len > 0 ? p_rendered : "Any";
 		prop_count++;
 	}
 	if (prop_count == 0) return;
@@ -6442,7 +6476,12 @@ fn Object* try_lateinit_to_lazy(String uri, Document* doc, ParseResult* ast, Obj
 	out.append("val ");
 	out.append(pd.name);
 	out.append(": ");
-	out.append(pd.type_text);
+	uint pd_tref_idx = find_type_ref_child(ast, pd_idx);
+	String pd_t = (pd_tref_idx != ast::NO_PARENT && doc.content.len > 0)
+		? ast::type_ref_name(ast, pd_tref_idx, doc.content, tmem)
+		: "";
+	String pd_rendered = pd_t.len > 0 ? pd_t : pd.type_text;
+	out.append(pd_rendered);
 	out.append(" by lazy { TODO(\"Initialize ");
 	out.append(pd.name);
 	out.append("\") }");

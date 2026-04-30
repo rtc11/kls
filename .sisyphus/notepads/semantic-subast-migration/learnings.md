@@ -190,3 +190,31 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - `c3c build` clean.
 - `c3c test`: 2802 passed / 0 failed / 0 skipped.
 - Single commit, scope = hover.c3 + notepad + plan only.
+
+## 2026-04-30 C11b — code_actions migration
+
+### Per-site classification (12 sites total)
+- **RENDER (5)**: 653 (TYPE_CHECK_EXPR `is T` label), 1475 (extract-fn captured-var type), 1644 (extract-fn enclosing-decl type), 1840 (data-class ctor PARAM type for toString/equals/hashCode codegen), 6445 (lateinit→lazy PROPERTY_DECL annotation in code-action edit text). All migrated to dual-storage `find_type_ref_child` + `ast::type_ref_name` + text fallback.
+- **GATE (7)**: 2554 / 3329 / 3453 / 4474 / 5269 / 6433 — pure presence checks (`type_text.len > 0`/`== 0`). 3454 — text-equality `== "Unit"` (also gate-style; still text-based, same idea). All left untouched — gates are redundant with sub-AST anyway, but text path stays alive until Wave D explicit removal.
+- **DEFER (0)**: zero text-consumer / MemberDecl-cache sites in this file. Surprising — code_actions.c3 either renders or gates, never propagates type-text into a downstream parser.
+
+### Source threading
+- ZERO new fn params. All 5 RENDER sites already had `doc.content` (sites 1475/1644/1840/6445) or `content` param (site 653 in `classify_subject_cond`) in scope. Matched C5c/C5d convention: variable name kept as-is (`content` or `doc.content`), no rename.
+- ParseResult also already in scope as `ast` everywhere.
+
+### Helpers
+- Pasted `find_type_ref_child` (file-local) only — no `find_return_type_ref_child` needed because zero FUN_DECL return-type renderers in code_actions.c3 (return types here are GATEd via `fun_node.type_text.len > 0`, not rendered).
+- Helper placed after `faultdef NO_RECEIVER;` at line 16.
+
+### Surprises
+- TYPE_CHECK_EXPR `is T` labelling at :653 is a RENDER, not GATE. `n` is the TYPE_CHECK_EXPR itself; `find_type_ref_child(ast, cond_idx)` works because parser calls `attach_type_ref_child_from_text` for type-check (per C5c notepad note: parser.c3:2321 + 3996).
+- Sites 1475/1644/1840 looked initially like text-propagators (array population) but the consumer is purely string-concat into generated code (e.g. `param: $type` insertion). Migrating at population point gives byte-identical output and avoids touching any deeper layer.
+- Site 3454 (`fun_node.type_text == "Unit"`) is a text-equality check; treated as GATE because migrating would require comparing rendered TYPE_REF text to "Unit" — same effect, more code, no benefit until Wave D.
+
+### Counts
+- 5 RENDER / 7 GATE / 0 DEFER. Inverse ratio of definition.c3 (0/7/8) and similar to hover.c3 (8/1/2).
+
+### Verification
+- `c3c build` clean.
+- `c3c test`: 2802 passed, 0 failed, 0 skipped.
+- Single commit, scope = code_actions.c3 + notepad + plan only.
