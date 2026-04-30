@@ -73,3 +73,23 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - Use-site target handling stays implicit in parser shape: targets like `get:` / `set:` / `field:` live in `ANNOTATION_ENTRY.type_text`, so helper ignores them and simple-name matching stays aligned with legacy `AstNode.has_annotation` semantics.
 - Dual storage still required in Wave B1: kept `AstNode.has_annotation` text-based fast path unchanged because receiver method has no `ParseResult*`; sub-AST helper exists beside it for staged consumer migration, Wave D removes text fallback later.
 - Deferred `annotation_args_text` in `ast.c3`: `ParseResult` has no source slice/bytes field, so helper cannot reconstruct annotation arg text there without producer/storage changes outside B1 scope. Snapshot test keeps passthrough renderer with defer note.
+
+## 2026-04-30 B6 — hover JVM annotation migration
+
+- `append_jvm_annotations` in `src/lsp/hover.c3` migrated to sub-AST: added `ParseResult* pr` param, derived `idx` via `ast::node_index(pr, node)` to avoid threading idx through every `build_signature` caller (12 callers, several rely on default `node_idx=0`).
+- Dropped `node.annotation_text.len == 0` early-return — `has_annotation_ast` short-circuits via children iter.
+- Single caller at line 559 (inside `build_signature`) updated to pass `pr`.
+- 2802 PASS.
+
+## 2026-04-30 B5 — semantic_tokens annotation migration
+
+- `compute_modifiers` had single caller (`build_name_table` line 122). Threaded `ParseResult* pr, uint idx` plus existing `AstNode* n`. Caller already had `pr` + loop var `i` in scope → zero-friction.
+- Dropped `n.annotation_text.len > 0` guard — `has_annotation_ast` short-circuits on `child_count == 0` so guard was redundant.
+- Concurrency note: parallel B6 (hover.c3) was mid-edit during B5. `git stash` raced — stash captured intermediate hover.c3 state which failed to build (`Implicitly casting 'ParseResult*' to 'AstNode*'`). Resolved by isolating semantic_tokens diff via `git diff stash@{0}^ stash@{0} -- <file> | git apply` and waiting for B6 to settle (it auto-committed during stash dance, branch went 5→6 ahead). Lesson: when parallel agents touch sibling files, use file-scoped stash or just commit-and-test-quick rather than full repo stash.
+- Tests: 2802 PASS, 0 FAIL after commit `c04fe55`.
+
+## 2026-04-30 C1 — type_ref_name renderer
+- Added `type_ref_name(ParseResult* result, uint type_ref_idx, String source, Allocator alloc)` in `src/kotlin/ast.c3`. Strategy uses source-slice reconstruction from `AstNode.start_offset..end_offset` for byte-identical parity with legacy `type_text`.
+- `ParseResult` still has no stored source field, so helper cannot be `ParseResult*`-only today; caller must pass `String source`. This matches prior A1/B1 finding that ast.c3 renderers needing exact text must receive source explicitly.
+- Source-slice strategy naturally covers plain dotted refs, generic args, function types (`extra_text` markers `function` / `receiver` / `param` / `return`), intersection types (`intersection`), variance (`MOD_IN`/`MOD_OUT`), `suspend`, star projections, and nullable suffixes because parser already set exact TYPE_REF span in producer.
+- Updated snapshot guard to replace TYPE_REF passthrough stub with real renderer call; parity assertion now proves `type_text` remains byte-identical to sub-AST span text for all fixture TYPE_REF nodes.

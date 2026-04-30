@@ -101,8 +101,8 @@ fn String render_annotation_args_stub(ParseResult* pr, int annot_idx) {
 	return pr.nodes[(uint)annot_idx].annotation_text;
 }
 
-fn String render_type_ref_stub(ParseResult* pr, int type_ref_idx) {
-	return pr.nodes[(uint)type_ref_idx].type_text;
+fn String render_type_ref_real(ParseResult* pr, uint type_ref_idx, String source) {
+	return ast::type_ref_name(pr, type_ref_idx, source, tmem);
 }
 
 fn uint find_delegate_child(ParseResult* pr, uint type_ref_idx) {
@@ -111,16 +111,17 @@ fn uint find_delegate_child(ParseResult* pr, uint type_ref_idx) {
 
 fn void test_snapshot_type_ref_dual_storage() @test {
 	@pool() {
-		ParseResult* pr = do_parse(dual_storage_fixture());
+		String source = dual_storage_fixture();
+		ParseResult* pr = do_parse(source);
 		defer free_result(pr);
 		assert(pr.error_count == 0, "expected no parse errors, got %d", (int)pr.error_count);
 		uint checked = 0;
 		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
 			if (n.kind != TYPE_REF || n.type_text.len == 0) continue;
-			assert(n.type_text == render_type_ref_stub(pr, (int)i),
+			assert(n.type_text == render_type_ref_real(pr, i, source),
 				"TYPE_REF %d mismatch: '%s' vs '%s'", (int)i, n.type_text,
-				render_type_ref_stub(pr, (int)i));
+				render_type_ref_real(pr, i, source));
 			checked++;
 		}
 		assert(checked > 0, "expected TYPE_REF nodes in fixture");

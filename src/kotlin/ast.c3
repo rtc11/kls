@@ -525,6 +525,20 @@ fn bool has_delegate_child(ParseResult* result, uint parent_idx) {
 }
 
 /**
+ * Reconstruct TYPE_REF source-equivalent text from source slice.
+ * ParseResult does not retain source bytes, so caller supplies `source`.
+ */
+fn String type_ref_name(ParseResult* result, uint type_ref_idx, String source, Allocator alloc) {
+	if (type_ref_idx >= result.node_count) return "";
+	AstNode* type_ref = &result.nodes[type_ref_idx];
+	if (type_ref.kind != TYPE_REF) return "";
+	uint start = type_ref.start_offset;
+	uint end = type_ref.end_offset;
+	if (end <= start || end > source.len) return "";
+	return source[start:end - start].copy(alloc);
+}
+
+/**
  * Walk up from a LAMBDA_EXPR (by index) to its enclosing CALL_EXPR.
  * Handles both forms:
  *   - Direct child of CALL_EXPR (legacy synthesized form)
