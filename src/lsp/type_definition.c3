@@ -82,7 +82,7 @@ fn Object*? handle_type_definition(DocumentStore* store, WorkspaceIndex* workspa
 	TypeInfo* ti = store.get_types(uri) ?? null;
 
 	// Resolve the type of the thing under the cursor
-	String type_name = resolve_type_name(pr, ti, tok);
+	String type_name = resolve_type_name(pr, ti, tok, doc.content);
 
 	if (type_name.len == 0) {
 		log::debug("[typedef] could not resolve type for '%s'", target_name);
@@ -124,11 +124,49 @@ fn Object*? handle_type_definition(DocumentStore* store, WorkspaceIndex* workspa
 // ── Type name resolution ──────────────────────────────────────────
 
 /**
+ * Find the first direct TYPE_REF child of a declaration node.
+ * Used to recover the type-annotation sub-AST for PARAM and any decl
+ * whose producer attaches a TYPE_REF child via attach_type_ref_child_from_text.
+ * Returns ast::NO_PARENT when no TYPE_REF child exists (e.g. PROPERTY_DECL
+ * still on text-only path pre-Wave D).
+ */
+fn uint find_type_ref_child(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != decl_idx) continue;
+		if (child.kind == TYPE_REF) return i;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
+ * Find the FUN_DECL return-type TYPE_REF child (extra_text == "return").
+ * Param TYPE_REFs live under PARAM nodes, not directly under FUN_DECL,
+ * so a plain TYPE_REF child of FUN_DECL is the return type — but the
+ * producer also marks it explicitly so we filter on that for clarity.
+ */
+fn uint find_return_type_ref_child(ParseResult* pr, uint fun_idx) {
+	if (fun_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[fun_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_REF) continue;
+		if (child.extra_text == "return") return i;
+	}
+	return ast::NO_PARENT;
+}
+
+/**
  * Resolve the type name of the symbol under the cursor.
  * Checks: declaration type annotations, TypeInfo inferred types,
  * dot-expression member types.
  */
-fn String resolve_type_name(ParseResult* pr, TypeInfo* ti, Token tok) {
+fn String resolve_type_name(ParseResult* pr, TypeInfo* ti, Token tok, String source) {
 	String target = tok.text;
 
 	// 1. Check if this token IS a type name (class/interface/object usage)
@@ -150,9 +188,13 @@ fn String resolve_type_name(ParseResult* pr, TypeInfo* ti, Token tok) {
 		if (n.name != target) continue;
 		if (n.name_line != tok.line || n.name_col != tok.col) continue;
 
-		// Found the declaration - extract its type
-		if (n.type_text.len > 0) {
-			TypeRef tr = types::parse_type_text(n.type_text);
+		// Found the declaration - extract its type via direct TYPE_REF child
+		uint type_ref_idx = find_type_ref_child(pr, i);
+		String type_text = type_ref_idx != ast::NO_PARENT
+			? ast::type_ref_name(pr, type_ref_idx, source, tmem)
+			: "";
+		if (type_text.len > 0) {
+			TypeRef tr = types::parse_type_text(type_text);
 			if (tr.name.len > 0 && tr.kind != UNKNOWN) {
 				return tr.name;
 			}
@@ -160,8 +202,12 @@ fn String resolve_type_name(ParseResult* pr, TypeInfo* ti, Token tok) {
 
 		// For functions, the type is the return type
 		if (n.kind == FUN_DECL) {
-			if (n.type_text.len > 0) {
-				TypeRef tr = types::parse_type_text(n.type_text);
+			uint return_type_idx = find_return_type_ref_child(pr, i);
+			String fn_type_text = return_type_idx != ast::NO_PARENT
+				? ast::type_ref_name(pr, return_type_idx, source, tmem)
+				: "";
+			if (fn_type_text.len > 0) {
+				TypeRef tr = types::parse_type_text(fn_type_text);
 				if (tr.name.len > 0) return tr.name;
 			}
 			// No explicit return type - check TypeInfo
