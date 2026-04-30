@@ -404,7 +404,12 @@ fn String? infer_type_from_initializer(ParseResult* pr, TypeInfo* ti, uint prop_
 				// Function call: look up the FUN_DECL's return type
 				if (try decl = definition::find_declaration_in_file(pr, init_expr.name, init_expr.name_offset, true)) {
 					if (decl.type_text.len > 0) {
-						return decl.type_text;
+						uint decl_idx = ast::node_index(pr, decl);
+						uint return_type_idx = find_return_type_ref_child(pr, decl_idx);
+						String t = return_type_idx != ast::NO_PARENT && content.len > 0
+							? ast::type_ref_name(pr, return_type_idx, content, tmem)
+							: "";
+						return t.len > 0 ? t : decl.type_text;
 					}
 				}
 			}
@@ -414,7 +419,12 @@ fn String? infer_type_from_initializer(ParseResult* pr, TypeInfo* ti, uint prop_
 			if (init_expr.name.len > 0) {
 				if (try decl = definition::find_declaration_in_file(pr, init_expr.name, init_expr.name_offset, false)) {
 					if (decl.type_text.len > 0) {
-						return decl.type_text;
+						uint decl_idx = ast::node_index(pr, decl);
+						uint type_ref_idx = find_type_ref_child(pr, decl_idx);
+						String t = type_ref_idx != ast::NO_PARENT && content.len > 0
+							? ast::type_ref_name(pr, type_ref_idx, content, tmem)
+							: "";
+						return t.len > 0 ? t : decl.type_text;
 					}
 				}
 			}
@@ -433,7 +443,12 @@ fn String? infer_type_from_initializer(ParseResult* pr, TypeInfo* ti, uint prop_
 		case TYPE_CAST_EXPR:
 			// Cast: `x as Foo` → Foo
 			if (init_expr.type_text.len > 0) {
-				return init_expr.type_text;
+				uint cast_idx = ast::node_index(pr, init_expr);
+				uint type_ref_idx = find_type_ref_child(pr, cast_idx);
+				String t = type_ref_idx != ast::NO_PARENT && content.len > 0
+					? ast::type_ref_name(pr, type_ref_idx, content, tmem)
+					: "";
+				return t.len > 0 ? t : init_expr.type_text;
 			}
 
 		case DOT_EXPR:
@@ -515,7 +530,14 @@ fn String? infer_dot_expr_type(ParseResult* pr, TypeInfo* ti, uint idx, AstNode*
 	// Check if the DOT_EXPR's right-side name resolves to a known decl
 	if (node.name.len > 0) {
 		if (try decl = definition::find_declaration_in_file(pr, node.name, node.name_offset, false)) {
-			if (decl.type_text.len > 0) return decl.type_text;
+			if (decl.type_text.len > 0) {
+				uint decl_idx = ast::node_index(pr, decl);
+				uint type_ref_idx = find_type_ref_child(pr, decl_idx);
+				String t = type_ref_idx != ast::NO_PARENT && content.len > 0
+					? ast::type_ref_name(pr, type_ref_idx, content, tmem)
+					: "";
+				return t.len > 0 ? t : decl.type_text;
+			}
 		}
 	}
 
@@ -842,14 +864,28 @@ fn String? infer_expr_type_string(ParseResult* pr, TypeInfo* ti, uint idx, AstNo
 				char first = node.name[0];
 				if (first >= 'A' && first <= 'Z') return node.name;
 				if (try decl = definition::find_declaration_in_file(pr, node.name, node.name_offset, true)) {
-					if (decl.type_text.len > 0) return decl.type_text;
+					if (decl.type_text.len > 0) {
+						uint decl_idx = ast::node_index(pr, decl);
+						uint return_type_idx = find_return_type_ref_child(pr, decl_idx);
+						String t = return_type_idx != ast::NO_PARENT && content.len > 0
+							? ast::type_ref_name(pr, return_type_idx, content, tmem)
+							: "";
+						return t.len > 0 ? t : decl.type_text;
+					}
 				}
 			}
 
 		case NAME_EXPR:
 			if (node.name.len > 0) {
 				if (try decl = definition::find_declaration_in_file(pr, node.name, node.name_offset, false)) {
-					if (decl.type_text.len > 0) return decl.type_text;
+					if (decl.type_text.len > 0) {
+						uint decl_idx = ast::node_index(pr, decl);
+						uint type_ref_idx = find_type_ref_child(pr, decl_idx);
+						String t = type_ref_idx != ast::NO_PARENT && content.len > 0
+							? ast::type_ref_name(pr, type_ref_idx, content, tmem)
+							: "";
+						return t.len > 0 ? t : decl.type_text;
+					}
 				}
 			}
 
@@ -863,7 +899,13 @@ fn String? infer_expr_type_string(ParseResult* pr, TypeInfo* ti, uint idx, AstNo
 			return infer_when_type(pr, ti, node, content);
 
 		case TYPE_CAST_EXPR:
-			if (node.type_text.len > 0) return node.type_text;
+			if (node.type_text.len > 0) {
+				uint type_ref_idx = find_type_ref_child(pr, idx);
+				String t = type_ref_idx != ast::NO_PARENT && content.len > 0
+					? ast::type_ref_name(pr, type_ref_idx, content, tmem)
+					: "";
+				return t.len > 0 ? t : node.type_text;
+			}
 
 		case DOT_EXPR:
 			return infer_dot_expr_type(pr, ti, idx, node, content);
@@ -913,7 +955,11 @@ fn void collect_smart_cast_hints(Object* hints, ParseResult* pr, String content,
 		String cast_type = "";
 
 		if (cond.kind == TYPE_CHECK_EXPR && cond.extra_text == "is") {
-			cast_type = cond.type_text;
+			uint type_ref_idx = find_type_ref_child(pr, condition_idx);
+			String rendered = type_ref_idx != ast::NO_PARENT && content.len > 0
+				? ast::type_ref_name(pr, type_ref_idx, content, tmem)
+				: "";
+			cast_type = rendered.len > 0 ? rendered : cond.type_text;
 			// Find subject NAME_EXPR child
 			for (uint j = 0; j < pr.node_count; j++) {
 				if (pr.nodes[j].parent != condition_idx) continue;
@@ -1702,4 +1748,35 @@ fn uint offset_to_col(String content, uint offset) {
  */
 fn Object*? handle_inlay_hint_resolve(Object* hint) {
 	return hint;
+}
+
+// ── Sub-AST TYPE_REF lookup helpers (C5c migration) ───────────────────
+//
+// Locate the TYPE_REF child of a declaration node so consumers can call
+// `ast::type_ref_name(pr, ref_idx, source, alloc)` for byte-identical
+// rendering against the dual-storage `type_text` field.
+
+fn uint find_type_ref_child(ParseResult* pr, uint decl_idx) {
+	if (decl_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[decl_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != decl_idx) continue;
+		if (child.kind == TYPE_REF) return i;
+	}
+	return ast::NO_PARENT;
+}
+
+fn uint find_return_type_ref_child(ParseResult* pr, uint fun_idx) {
+	if (fun_idx >= pr.node_count) return ast::NO_PARENT;
+	AstNode* decl = &pr.nodes[fun_idx];
+	if (decl.child_count == 0) return ast::NO_PARENT;
+	for (uint i = 0; i < pr.node_count; i++) {
+		AstNode* child = &pr.nodes[i];
+		if (child.parent != fun_idx) continue;
+		if (child.kind != TYPE_REF) continue;
+		if (child.extra_text == "return") return i;
+	}
+	return ast::NO_PARENT;
 }

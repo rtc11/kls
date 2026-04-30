@@ -121,3 +121,19 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - `build_signature_help` now threads existing `source` into `append_params` and resolves FUN_DECL return type through `find_return_type_ref_child(pr, decl_idx)` + `ast::type_ref_name(pr, return_type_idx, source, tmem)`.
 - `append_params` now resolves PARAM annotations through `find_type_ref_child(pr, i)` + `ast::type_ref_name(pr, type_ref_idx, source, tmem)`.
 - Legacy `decl.type_text` / `child.type_text` fallback stays when source empty or TYPE_REF missing, so signature labels stay byte-identical.
+
+## 2026-04-30 C5c — inlay_hints migration
+- Migrated 8 of 12 non-gate `.type_text` reader sites in `src/lsp/inlay_hints.c3` to dual-storage with `ast::type_ref_name` + text fallback. File-local helpers `find_type_ref_child` + `find_return_type_ref_child` pasted from C5b template.
+- Source threading: ZERO new params. All migrated reader fns already had `String content` in scope (`infer_type_from_initializer`, `infer_dot_expr_type`, `infer_expr_type_string`, `collect_smart_cast_hints`). The C5b/C5a "thread `String source`" pattern was unnecessary here — `content` IS the source. Kept variable name `content` to avoid invasive rename.
+- Per-site decisions:
+  - 301 (PROPERTY_DECL gate), 589 (FUN_DECL gate), 1201 (lambda PARAM gate): **STAYED ON TEXT** (presence checks; migrating to `find_type_ref_child(...) != NO_PARENT` doesn't help dual-storage retirement since text path stays alive equally either way). Future Wave D needs to migrate these alongside text-field deletion.
+  - 406 (CALL_EXPR initializer → fn return): `find_return_type_ref_child` (decl is FUN_DECL via `is_call=true`).
+  - 416 (NAME_EXPR initializer → var type): `find_type_ref_child` (decl is PROPERTY_DECL/PARAM via `is_call=false`).
+  - 435 (TYPE_CAST_EXPR initializer): `find_type_ref_child(pr, cast_idx)` — TYPE_CAST_EXPR has TYPE_REF child via `attach_type_ref_child_from_text`.
+  - 518 (DOT_EXPR fallback decl type): `find_type_ref_child` (decl from `is_call=false` lookup).
+  - 845 (CALL_EXPR in `infer_expr_type_string`): `find_return_type_ref_child` (FUN_DECL).
+  - 852 (NAME_EXPR in `infer_expr_type_string`): `find_type_ref_child`.
+  - 866 (TYPE_CAST_EXPR in `infer_expr_type_string`): `find_type_ref_child(pr, idx)` — `idx` already in scope as fn param.
+  - 916 (TYPE_CHECK_EXPR `cond.type_text`): `find_type_ref_child(pr, condition_idx)` — verified `attach_type_ref_child_from_text` at parser.c3:2321 + 3996.
+  - 1361 (PARAM type_text inside `resolve_lambda_callee_param_type`): **DEFERRED**. This fn has no `source` in scope. Threading would require adding `String source` to fn signature; sole external caller `src/lsp/hover.c3:169` (`resolve_lambda_param_type` chain) would also need the param — but hover.c3 modification is forbidden by C5c scope. Legacy text path retained. Recommend bundling 1361 with C5f (hover migration) which already touches hover.c3.
+- Build clean, 2802 PASS / 0 FAIL preserved.
