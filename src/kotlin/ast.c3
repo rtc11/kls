@@ -457,6 +457,41 @@ fn bool param_has_default(AstNode* param) {
 }
 
 /**
+ * Get child node index of PARAM default expression, or NO_PARENT.
+ * PARAM children are ordered as optional TYPE_REF first, then adopted
+ * default-expression sub-AST roots.
+ */
+fn uint param_default_expr(ParseResult* result, uint param_idx) {
+	if (param_idx >= result.node_count) return NO_PARENT;
+	AstNode* param = &result.nodes[param_idx];
+	if (param.kind != PARAM || param.child_count == 0) return NO_PARENT;
+	for (uint i = param.children_start; i < result.node_count; i++) {
+		AstNode* child = &result.nodes[i];
+		if (child.parent != param_idx) continue;
+		if (child.kind == TYPE_REF) continue;
+		return i;
+	}
+	return NO_PARENT;
+}
+
+/**
+ * Get child node index of supertype delegate expression, or NO_PARENT.
+ * Supertype TYPE_REF may have delegate expression child tagged with
+ * extra_text == "delegate".
+ */
+fn uint supertype_delegate_expr(ParseResult* result, uint type_ref_idx) {
+	if (type_ref_idx >= result.node_count) return NO_PARENT;
+	AstNode* type_ref = &result.nodes[type_ref_idx];
+	if (type_ref.kind != TYPE_REF || type_ref.child_count == 0) return NO_PARENT;
+	for (uint i = type_ref.children_start; i < result.node_count; i++) {
+		AstNode* child = &result.nodes[i];
+		if (child.parent != type_ref_idx) continue;
+		if (child.extra_text == "delegate") return i;
+	}
+	return NO_PARENT;
+}
+
+/**
  * Walk up from a LAMBDA_EXPR (by index) to its enclosing CALL_EXPR.
  * Handles both forms:
  *   - Direct child of CALL_EXPR (legacy synthesized form)

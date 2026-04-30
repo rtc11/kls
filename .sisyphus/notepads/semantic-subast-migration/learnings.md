@@ -47,3 +47,18 @@
 - Surprising pattern: many `.type_text` / `.extra_text` reads in tests and producer-adjacent helper code dominate raw counts; `annotation_text` current live consumers appear concentrated almost entirely in parser tests plus `ast::has_annotation`.
 - Snapshot guard added in `test/dual_storage_snapshot_test.c3`; smoke proof confirmed guard trips on intentional renderer drift (`TYPE_REF 5 mismatch: 'T' vs 'BROKEN'`).
 
+
+## 2026-04-30 W0 — Inventory contradicts plan estimates
+
+Plan-time blast-radius numbers (241/77/13) came from Metis without actually grepping. Real W0 inventory: 283/40/197. extra_text especially undercounted because plan didn't account for operator-string OUT-OF-SCOPE noise dominating. **Lesson**: Always run W0 BEFORE drafting per-file task targets. For future plans, Metis estimates ≠ ground truth; W0/inventory is the ground truth.
+
+## 2026-04-30 A1 — param default + supertype delegate sub-AST helpers
+- Added `fn uint param_default_expr(ParseResult* pr, uint param_idx)` in `src/kotlin/ast.c3`; walks direct PARAM children and returns first non-`TYPE_REF` child, or `ast::NO_PARENT`. Child-order rule from `parse_param_with_mods`: optional type-annotation `TYPE_REF` attached first, default-expression roots adopted after `parse_expression(...)`.
+- Added `fn uint supertype_delegate_expr(ParseResult* pr, uint type_ref_idx)` in `src/kotlin/ast.c3`; walks direct TYPE_REF children and returns child whose `extra_text == "delegate"`, or `ast::NO_PARENT`. Parser tags delegate expression root itself before `adopt_children(ref_idx, delegate_children_start)`.
+- Real snapshot renderers in `test/dual_storage_snapshot_test.c3` now reconstruct source from sub-AST byte spans using `AstNode.start_offset` and `AstNode.end_offset`; subtree end chosen as max `end_offset` across root + descendants. This proves parser-kept text fields still match sub-AST coverage for PARAM defaults and supertype delegates.
+
+## 2026-04-30 A1-fix — supertype-delegate marker vs source-text distinction
+- Supertype-delegate has MARKER dual storage only: delegate expression child keeps `extra_text = "delegate"`; there is no parallel source-text field on enclosing supertype `TYPE_REF`.
+- PARAM-default has SOURCE-TEXT dual storage: `PARAM.extra_text` stores source slice while child sub-AST stores parsed expression.
+- Snapshot guard must distinguish invariants: PARAM default checks rendered source == stored source text; supertype delegate checks marker presence plus rendered subtree text non-empty. Do not conflate marker and source-text paths.
+- Future Wave A4 delegate consumers in `src/lsp/code_actions.c3` and `src/lsp/diagnostics.c3` only need `extra_text == "delegate"` reads replaced with `supertype_delegate_expr(pr, idx) != NO_PARENT`; no source-text migration exists for delegate.

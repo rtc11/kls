@@ -56,18 +56,42 @@ fun <T> bounded(x: T): T & Any = x!!
 `;
 }
 
-fn String render_param_default_stub(ParseResult* pr, int param_idx) {
-	return pr.nodes[(uint)param_idx].extra_text;
+fn bool is_descendant_or_self(ParseResult* pr, uint root_idx, uint node_idx) {
+	uint cur = node_idx;
+	while (cur != ast::NO_PARENT) {
+		if (cur == root_idx) return true;
+		cur = pr.nodes[cur].parent;
+	}
+	return false;
 }
 
-fn String render_supertype_delegate_stub(ParseResult* pr, int type_ref_idx) {
-	uint parent_idx = (uint)type_ref_idx;
+
+fn uint subtree_end_offset(ParseResult* pr, uint root_idx) {
+	if (root_idx >= pr.node_count) return 0;
+	uint end = pr.nodes[root_idx].end_offset;
 	for (uint i = 0; i < pr.node_count; i++) {
-		if (pr.nodes[i].parent == parent_idx && pr.nodes[i].extra_text == "delegate") {
-			return pr.nodes[i].extra_text;
+		if (!is_descendant_or_self(pr, root_idx, i)) continue;
+		if (pr.nodes[i].end_offset > end) {
+			end = pr.nodes[i].end_offset;
 		}
 	}
-	return "";
+	return end;
+}
+
+fn String render_subtree(ParseResult* pr, uint root_idx, String source) {
+	if (root_idx == ast::NO_PARENT || root_idx >= pr.node_count) return "";
+	uint start = pr.nodes[root_idx].start_offset;
+	uint end = subtree_end_offset(pr, root_idx);
+	if (end <= start || end > source.len) return "";
+	return source[start:end - start];
+}
+
+fn String render_param_default_real(ParseResult* pr, uint param_idx, String source) {
+	return render_subtree(pr, ast::param_default_expr(pr, param_idx), source);
+}
+
+fn String render_supertype_delegate_real(ParseResult* pr, uint type_ref_idx, String source) {
+	return render_subtree(pr, ast::supertype_delegate_expr(pr, type_ref_idx), source);
 }
 
 fn String render_annotation_args_stub(ParseResult* pr, int annot_idx) {
@@ -79,12 +103,7 @@ fn String render_type_ref_stub(ParseResult* pr, int type_ref_idx) {
 }
 
 fn uint find_delegate_child(ParseResult* pr, uint type_ref_idx) {
-	for (uint i = 0; i < pr.node_count; i++) {
-		if (pr.nodes[i].parent == type_ref_idx && pr.nodes[i].extra_text == "delegate") {
-			return i;
-		}
-	}
-	return ast::NO_PARENT;
+	return ast::supertype_delegate_expr(pr, type_ref_idx);
 }
 
 fn void test_snapshot_type_ref_dual_storage() @test {
@@ -125,16 +144,17 @@ fn void test_snapshot_annotation_dual_storage() @test {
 
 fn void test_snapshot_param_default_dual_storage() @test {
 	@pool() {
-		ParseResult* pr = do_parse(dual_storage_fixture());
+		String source = dual_storage_fixture();
+		ParseResult* pr = do_parse(source);
 		defer free_result(pr);
 		assert(pr.error_count == 0, "expected no parse errors, got %d", (int)pr.error_count);
 		uint checked = 0;
 		for (uint i = 0; i < pr.node_count; i++) {
 			AstNode* n = &pr.nodes[i];
 			if (n.kind != PARAM || n.extra_text.len == 0 || n.child_count == 0) continue;
-			assert(n.extra_text == render_param_default_stub(pr, (int)i),
+			assert(n.extra_text == render_param_default_real(pr, i, source),
 				"PARAM %d mismatch: '%s' vs '%s'", (int)i, n.extra_text,
-				render_param_default_stub(pr, (int)i));
+				render_param_default_real(pr, i, source));
 			checked++;
 		}
 		assert(checked >= 2, "expected defaulted PARAM nodes in fixture, got %d", (int)checked);
@@ -143,7 +163,8 @@ fn void test_snapshot_param_default_dual_storage() @test {
 
 fn void test_snapshot_supertype_delegate_dual_storage() @test {
 	@pool() {
-		ParseResult* pr = do_parse(dual_storage_fixture());
+		String source = dual_storage_fixture();
+		ParseResult* pr = do_parse(source);
 		defer free_result(pr);
 		assert(pr.error_count == 0, "expected no parse errors, got %d", (int)pr.error_count);
 		uint checked = 0;
@@ -152,10 +173,13 @@ fn void test_snapshot_supertype_delegate_dual_storage() @test {
 			if (n.kind != TYPE_REF) continue;
 			uint delegate_child = find_delegate_child(pr, i);
 			if (delegate_child == ast::NO_PARENT) continue;
-			assert(pr.nodes[delegate_child].extra_text == render_supertype_delegate_stub(pr, (int)i),
-				"delegate TYPE_REF %d mismatch: '%s' vs '%s'", (int)i,
-				pr.nodes[delegate_child].extra_text,
-				render_supertype_delegate_stub(pr, (int)i));
+			assert(pr.nodes[delegate_child].extra_text == "delegate",
+				"expected delegate marker on child %d, got '%s'", (int)delegate_child,
+				pr.nodes[delegate_child].extra_text);
+			String rendered = render_supertype_delegate_real(pr, i, source);
+			assert(rendered.len > 0,
+				"delegate TYPE_REF %d sub-AST renders empty text (sub-AST broken or detached)",
+				(int)i);
 			checked++;
 		}
 		assert(checked >= 2, "expected delegated supertypes in fixture, got %d", (int)checked);
