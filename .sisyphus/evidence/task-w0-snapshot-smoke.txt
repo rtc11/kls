@@ -143,6 +143,12 @@ Testing kls::document_test::open_and_get .......................................
 Testing kls::document_test::overwrite_on_reopen ................................................................ [[0;32mPASS[0m]
 Testing kls::document_test::update_content ..................................................................... [[0;32mPASS[0m]
 Testing kls::document_test::update_nonexistent_is_safe ......................................................... [[0;32mPASS[0m]
+Testing kls::dual_storage_snapshot_test::test_snapshot_annotation_dual_storage ................................. [[0;32mPASS[0m]
+Testing kls::dual_storage_snapshot_test::test_snapshot_param_default_dual_storage .............................. [[0;32mPASS[0m]
+Testing kls::dual_storage_snapshot_test::test_snapshot_supertype_delegate_dual_storage ......................... [[0;32mPASS[0m]
+Testing kls::dual_storage_snapshot_test::test_snapshot_type_ref_dual_storage ................................... [[0;31mFAIL[0m]
+
+Test failed ^^^ ( dual_storage_snapshot_test.c3:99 ) TYPE_REF 5 mismatch: 'T' vs 'BROKEN'
 Testing kls::kotlin::lexer_next_all_test::block_comment_emitted ................................................ [[0;32mPASS[0m]
 Testing kls::kotlin::lexer_next_all_test::block_comment_then_keyword ........................................... [[0;32mPASS[0m]
 Testing kls::kotlin::lexer_next_all_test::doc_comment_emitted .................................................. [[0;32mPASS[0m]
@@ -2798,9 +2804,9 @@ Testing kls::test::workspace_test::symbol_has_correct_position .................
 Testing kls::test::workspace_test::uri_to_path_no_prefix ....................................................... [[0;32mPASS[0m]
 Testing kls::test::workspace_test::uri_to_path_strips_file_prefix .............................................. [[0;32mPASS[0m]
 
-2798 tests run.
+2802 tests run.
 
-Test Result: [0;32mPASSED[0m: 2798 passed, 0 failed, 0 skipped.
+Test Result: [0;31mFAILED[0m: 2801 passed, 1 failed, 0 skipped.
 Program linked to executable 'build/testrun'.
 Launching ./build/testrun
-Program completed with exit code 0.
+Program completed with exit code 1.
