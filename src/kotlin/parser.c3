@@ -4442,8 +4442,7 @@ fn void Parser.skip_type_ref(Parser* self) {
 				while (self.eat(QUEST)) {} // nullable
 			}
 		}
-
-		}
+	}
 
 	// Intersection type (definitely non-nullable): T & Any
 	if (self.eat(AMP)) {
@@ -4564,47 +4563,6 @@ fn void Parser.skip_string_tokens(Parser* self) {
 }
 
 /**
- * Skip a parameter default value expression.
- * Similar to parse_expression_body but also stops at comma and closing paren.
- */
-fn void Parser.skip_param_default(Parser* self) {
-	int depth = 0;
-	while (!self.at_eof()) {
-		// Skip string literals atomically (they may contain RCURL from templates)
-		if (self.at(STRING_OPEN) || self.at(MULTILINE_STRING_OPEN)) {
-			self.skip_string_tokens();
-			continue;
-		}
-		if (self.at(LCURL)) { depth++; self.advance(); continue; }
-		if (self.at(RCURL)) {
-			if (depth == 0) return;
-			depth--;
-			self.advance();
-			continue;
-		}
-		if (self.at(LPAREN)) { depth++; self.advance(); continue; }
-		if (self.at(RPAREN)) {
-			if (depth == 0) return; // enclosing parameter list
-			depth--;
-			self.advance();
-			continue;
-		}
-		if (self.at(LSQUARE)) { depth++; self.advance(); continue; }
-		if (self.at(RSQUARE)) {
-			if (depth == 0) return;
-			depth--;
-			self.advance();
-			continue;
-		}
-
-		// At depth 0, comma ends the default value
-		if (depth == 0 && self.at(COMMA)) return;
-
-		self.advance();
-	}
-}
-
-/**
  * Skip a property accessor: get() = ... or set(value) { ... }
  */
 /**
@@ -4687,7 +4645,7 @@ fn void Parser.parse_property_accessor(Parser* self) {
 
 	// Optional accessor modifiers / annotations (e.g. `private set`, `@JvmName("x") get`).
 	// Reuses parse_modifiers; populates self.last_annotations + returns flag bits.
-		ulong accessor_mods = ast::MOD_NONE;
+	ulong accessor_mods = ast::MOD_NONE;
 	if (self.at(AT) || is_accessor_modifier_keyword(self.current.kind)) {
 		accessor_mods = self.parse_modifiers();
 	}
@@ -4763,50 +4721,6 @@ fn void Parser.parse_property_accessor(Parser* self) {
 	self.adopt_children(idx, children_start);
 	self.node_end(idx);
 }
-
-/**
- * Skip a delegation expression after 'by'.
- * Handles nested parens, angle brackets, and curly braces for
- * complex delegation expressions (e.g., lambdas, generic calls).
- */
-fn void Parser.skip_delegation_expression(Parser* self) {
-	int paren_depth = 0;
-	int angle_depth = 0;
-	int curl_depth = 0;
-	while (!self.at_eof()) {
-		if (self.at(LPAREN)) { paren_depth++; self.advance(); continue; }
-		if (self.at(RPAREN)) {
-			if (paren_depth == 0) return;
-			paren_depth--;
-			self.advance();
-			continue;
-		}
-		if (self.at(LANGLE)) { angle_depth++; self.advance(); continue; }
-		if (self.at(RANGLE)) {
-			if (angle_depth > 0) angle_depth--;
-			self.advance();
-			continue;
-		}
-		if (self.at(LCURL)) {
-			if (paren_depth == 0 && angle_depth == 0 && curl_depth == 0) return;
-			curl_depth++;
-			self.advance();
-			continue;
-		}
-		if (self.at(RCURL)) {
-			if (curl_depth == 0) return;
-			curl_depth--;
-			self.advance();
-			continue;
-		}
-		// At top level (no nesting), comma/where terminates delegation
-		if (paren_depth == 0 && angle_depth == 0 && curl_depth == 0) {
-			if (self.at(COMMA) || self.at(KW_WHERE)) return;
-		}
-		self.advance();
-	}
-}
-
 // ── Token classification helpers ───────────────────────────────────
 
 /**
