@@ -492,6 +492,21 @@ fn uint supertype_delegate_expr(ParseResult* result, uint type_ref_idx) {
 }
 
 /**
+ * True if parent has direct child tagged with extra_text == "delegate".
+ */
+fn bool has_delegate_child(ParseResult* result, uint parent_idx) {
+	if (parent_idx >= result.node_count) return false;
+	AstNode* parent = &result.nodes[parent_idx];
+	if (parent.child_count == 0) return false;
+	for (uint i = parent.children_start; i < result.node_count; i++) {
+		AstNode* child = &result.nodes[i];
+		if (child.parent != parent_idx) continue;
+		if (child.extra_text == "delegate") return true;
+	}
+	return false;
+}
+
+/**
  * Walk up from a LAMBDA_EXPR (by index) to its enclosing CALL_EXPR.
  * Handles both forms:
  *   - Direct child of CALL_EXPR (legacy synthesized form)

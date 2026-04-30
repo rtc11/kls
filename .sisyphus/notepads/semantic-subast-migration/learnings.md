@@ -62,3 +62,8 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - PARAM-default has SOURCE-TEXT dual storage: `PARAM.extra_text` stores source slice while child sub-AST stores parsed expression.
 - Snapshot guard must distinguish invariants: PARAM default checks rendered source == stored source text; supertype delegate checks marker presence plus rendered subtree text non-empty. Do not conflate marker and source-text paths.
 - Future Wave A4 delegate consumers in `src/lsp/code_actions.c3` and `src/lsp/diagnostics.c3` only need `extra_text == "delegate"` reads replaced with `supertype_delegate_expr(pr, idx) != NO_PARENT`; no source-text migration exists for delegate.
+
+## 2026-04-30 A4 — delegate marker is on child, not parent
+- Delegate marker set on delegate expression subtree root, then that root adopted as child of PROPERTY_DECL or supertype TYPE_REF.
+- `has_delegate_child(pr, parent_idx)` fits parent-child scan for PROPERTY_DECL delegate checks.
+- Self-marker checks where node already bound as child stay direct `extra_text == "delegate"`; no helper needed.
