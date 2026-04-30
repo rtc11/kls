@@ -151,3 +151,21 @@ Plan-time blast-radius numbers (241/77/13) came from Metis without actually grep
 - **`build_fun_signature` cleanup**: hoisted `ast::node_index(pr, fun_node)` out of the parent-check loop (was called per-iteration). Cosmetic, but matches B6 lesson.
 - `c3c build` clean. `c3c test`: 2802 PASS / 0 FAIL.
 - Single commit, scope = completion.c3 + notepad + plan only.
+
+## 2026-04-30 C5e — definition migration
+- Per-site classification: 15 sites total = **0 RENDER / 8 DEFER / 7 GATE**. Definition.c3 contains ZERO type-string renderers; every `.type_text` read either gates or feeds a text-consumer (`strip_type_suffix`, raw `<`/`?` slice loops, `types::parse_type_text`, or `MemberDecl` cache reads).
+- **No helpers added, no source threading**: zero render sites → no `find_*_type_ref_child` paste needed, no `String content` param threading. File modified ONLY for TODO/rationale comments.
+- Per-site breakdown (post-edit line numbers):
+  - 553 (GATE) + 554 (DEFER): `score_param_types` strips PARAM type via `strip_type_suffix`; raw text-consumer feeding name comparison. Single TODO(wave-D) comment block above gate.
+  - 2381 (GATE) + 2382 (DEFER): cross-file return-type extraction via raw `<`/`?` slice loop. TODO(wave-D) above gate.
+  - 2464 (DEFER): `find_method_return_class` reads `MemberDecl.type_text` from workspace cache. MemberDecl has no AST link → defer until C7 workspace.c3 cache restructure.
+  - 2646 (GATE) + 2647 (DEFER): `find_var_decl_type` scope-walk raw slice on `<`/`?`. TODO(wave-D).
+  - 2693 (GATE) + 2694 (DEFER): `find_receiver_decl_type` calls `types::parse_type_text` text-consumer. TODO(wave-D).
+  - 2768 (GATE) + 2770 (DEFER): `find_receiver_type_for_call_def` PARAM `parse_type_text`. TODO(wave-D).
+  - 2832 (GATE) + 2834 (DEFER): `find_lambda_receiver_in_workspace` cross-file PARAM `parse_type_text`. TODO(wave-D).
+  - 3339 (DEFER) + 3340 (DEFER): `MemberDecl.type_text` + `parse_type_text` member-type lookup. MemberDecl cache defer.
+- **Counts**: GATE = 7 (lines 553, 2381, 2646, 2693, 2768, 2832 — and 3339 is gate-coupled-to-MemberDecl-defer, classified DEFER), DEFER = 8 (554, 2382, 2464, 2647, 2694, 2770, 2834, 3340). One additional "MemberDecl gate-defer" (3339) is annotated under the same comment block as 3340.
+- **Surprise**: definition.c3 is purely a *consumer* of type information for resolution logic, not a *renderer*. Unlike completion/inlay_hints/signature_help/call_hierarchy which produce display strings, definition only uses type text to (a) compare class names, (b) re-parse into TypeRef for further resolution, or (c) read from MemberDecl cache. **Zero migration possible without sub-AST → TypeRef builder.**
+- All 8 DEFER sites annotated with `// TODO(wave-D): <reason>` blocks. Cross-cutting blockers: (a) sub-AST → TypeRef builder doesn't exist (covers 6 sites); (b) MemberDecl cache lacks AST link (covers 3 sites incl. 3339+3340 pair). Both blockers also documented for C5d.
+- `c3c build` clean. `c3c test`: 2802 PASS / 0 FAIL.
+- Single commit, scope = definition.c3 + notepad + plan only.

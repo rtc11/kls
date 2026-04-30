@@ -548,6 +548,8 @@ fn int score_param_types(ParseResult* pr, uint fun_idx, String[] arg_types) {
 		if (n.parent != fun_idx) continue;
 		if (n.kind != PARAM) continue;
 
+		// TODO(wave-D): text-consumer — strip_type_suffix(n.type_text) raw-scans for '<'/'?' to compare class names.
+		// Migrate when sub-AST → TypeRef builder exists; until then, gate stays on text and feeds raw type_text.
 		if (arg_types[arg_idx].len > 0 && n.type_text.len > 0) {
 			String param_type = strip_type_suffix(n.type_text);
 			String arg_type = strip_type_suffix(arg_types[arg_idx]);
@@ -2374,6 +2376,8 @@ fn String resolve_call_receiver_class(ParseResult* pr, WorkspaceIndex* workspace
 							AstNode* fn_node = &cross_pr.nodes[p];
 							if (fn_node.kind != FUN_DECL) continue;
 							if (fn_node.name != callee) continue;
+							// TODO(wave-D): text-consumer — raw-scans return type for '<'/'?' to extract class name.
+							// Migrate when sub-AST → TypeRef builder exists; until then, gate + raw scan stay on text.
 							if (fn_node.type_text.len == 0) continue;
 							String rt = fn_node.type_text;
 							for (usz q = 0; q < rt.len; q++) {
@@ -2455,6 +2459,8 @@ fn String find_method_return_class(WorkspaceIndex* workspace,
 			MemberDecl* m = members.get_ref(i);
 			if (m.node_kind != FUN_DECL) continue;
 			if (m.name != method_name) continue;
+			// TODO(wave-D): MemberDecl cache has no AST link (no pr/idx) — workspace.member_cache stores raw text only.
+			// Migrate when MemberDecl carries a sub-AST handle (touches src/workspace.c3 cache build path).
 			String rt = m.type_text;
 			if (rt.len == 0) continue;
 			// Strip generics: "ConsumedStream<K, V>" -> "ConsumedStream"
@@ -2635,6 +2641,8 @@ fn String find_variable_type_in_ast(ParseResult* pr, uint ref_offset, String var
 			if (n.parent != current) continue;
 			if (n.kind != PROPERTY_DECL && n.kind != PARAM) continue;
 			if (n.name != var_name) continue;
+			// TODO(wave-D): text-consumer — scope-walk var-type lookup raw-scans type_text for '<'/'?'.
+			// Migrate when sub-AST → TypeRef builder exists; gate + raw slice stay on text until then.
 			if (n.type_text.len > 0) {
 				String t = n.type_text;
 				for (usz k = 0; k < t.len; k++) {
@@ -2680,6 +2688,8 @@ fn TypeRef find_receiver_decl_type(ParseResult* pr, TypeInfo* ti, String var_nam
 			if (ti != null && ti.has_type[k]) {
 				return ti.node_types[k];
 			}
+			// TODO(wave-D): text-consumer — types::parse_type_text(n.type_text) re-parses text into TypeRef.
+			// Migrate when sub-AST → TypeRef builder exists; gate stays on text until then.
 			if (n.type_text.len > 0) {
 				return types::parse_type_text(n.type_text);
 			}
@@ -2753,6 +2763,8 @@ fn String find_receiver_type_for_call_def(ParseResult* pr, uint call_idx) {
 			AstNode* p = &pr.nodes[j];
 			if (p.parent != i) continue;
 			if (p.kind != PARAM) continue;
+			// TODO(wave-D): text-consumer — types::parse_type_text(p.type_text) re-parses PARAM type text into TypeRef.
+			// Migrate when sub-AST → TypeRef builder exists; gate + parse stay on text until then.
 			if (p.type_text.len == 0) continue;
 
 			TypeRef tref = types::parse_type_text(p.type_text);
@@ -2815,6 +2827,8 @@ fn String find_lambda_receiver_in_workspace(WorkspaceIndex* workspace, DocumentS
 						AstNode* p = &cross_pr.nodes[k];
 						if (p.parent != j) continue;
 						if (p.kind != PARAM) continue;
+						// TODO(wave-D): text-consumer — cross-file PARAM type re-parsed via types::parse_type_text.
+						// Migrate when sub-AST → TypeRef builder exists; gate + parse stay on text until then.
 						if (p.type_text.len == 0) continue;
 
 						TypeRef tref = types::parse_type_text(p.type_text);
@@ -3320,6 +3334,8 @@ fn TypeRef resolve_dot_expr_type(ParseResult* pr, TypeInfo* ti, WorkspaceIndex* 
 			for (usz i = 0; i < members.len(); i++) {
 				MemberDecl* m = &(*members)[i];
 				if (m.name != member_name) continue;
+				// TODO(wave-D): MemberDecl cache has no AST link — workspace.member_cache stores raw type_text only.
+				// Migrate when MemberDecl carries a sub-AST handle (touches src/workspace.c3 cache build path).
 				if (m.type_text.len > 0) {
 					return types::parse_type_text(m.type_text);
 				}

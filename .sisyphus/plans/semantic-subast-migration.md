@@ -948,7 +948,7 @@ Pre-commit per: full `c3c test`.
 - [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - [x] C5c: `src/lsp/inlay_hints.c3` — 8 reader sites migrated to `ast::type_ref_name` with text fallback; 3 gate sites stayed on text (rationale in learnings); site 1361 deferred to C5f (would require modifying hover.c3 caller).
   - [x] C5d: `src/lsp/completion.c3` — 8 RENDER sites migrated to `ast::type_ref_name` with text fallback; 7 sites deferred (MemberDecl cache lacks AST link, parse_type_text text-consumer); 2 gate sites kept (TYPE_PARAM intersection bound rendering); rationale in learnings.
-  - C5e: `src/lsp/definition.c3`
+  - [x] C5e: `src/lsp/definition.c3` — 0 RENDER / 8 DEFER (text-consumer + MemberDecl) / 7 GATE; 15 sites annotated with TODO(wave-D) or rationale; no helpers needed (zero render sites); fallback preserved unchanged.
   - C5f: `src/lsp/hover.c3`
   - C5g: `src/lsp/semantic_tokens.c3`
   - Each `unspecified-low` + [`kls`]. Each Depends C1.
@@ -1036,7 +1036,7 @@ subagent: plan
 - [x] C5b: `src/lsp/signature_help.c3` — migrated return + param type rendering to `ast::type_ref_name` with text fallback
   - C5c: `src/lsp/inlay_hints.c3`
   - [x] C5d: `src/lsp/completion.c3`
-  - C5e: `src/lsp/definition.c3`
+  - [x] C5e: `src/lsp/definition.c3` — 0 RENDER / 8 DEFER / 7 GATE; annotated only.
   - C5f: `src/lsp/hover.c3`
   - C5g: `src/lsp/semantic_tokens.c3`
   - Each: `unspecified-low` + [`kls`].
