@@ -314,32 +314,26 @@ fn Object* execute_query_index_with_store(DocumentStore* store, WorkspaceIndex* 
 	result.set("root_path", workspace.root_path);
 	result.set("symbol_count", (int)workspace.symbols.len());
 
-	// Count files
 	int file_count = 0;
-	@pool() {
-		foreach (key : workspace.files.tkeys()) {
-			file_count++;
-		}
-	};
+	foreach (key : workspace.files.tkeys()) {
+		file_count++;
+	}
 	result.set("file_count", file_count);
 
 	if (query.len == 0) {
-		// Summary mode: list files
 		Object* files_arr = object::new_obj(tmem);
-		@pool() {
-			foreach (key : workspace.files.tkeys()) {
-				WorkspaceFile* wf = workspace.files.get_ref(key) ?? null;
-				if (wf == null) continue;
-				Object* f = object::new_obj(tmem);
-				f.set("uri", wf.uri);
-				f.set("package", wf.package_name);
-				if (wf.module_name.len > 0) {
-					f.set("module", wf.module_name);
-				}
-				f.set("symbol_count", (int)wf.symbol_count);
-				files_arr.push(f);
+		foreach (key : workspace.files.tkeys()) {
+			WorkspaceFile* wf = workspace.files.get_ref(key) ?? null;
+			if (wf == null) continue;
+			Object* f = object::new_obj(tmem);
+			f.set("uri", wf.uri);
+			f.set("package", wf.package_name);
+			if (wf.module_name.len > 0) {
+				f.set("module", wf.module_name);
 			}
-		};
+			f.set("symbol_count", (int)wf.symbol_count);
+			files_arr.push(f);
+		}
 		result.set("files", files_arr);
 	} else {
 		// Query mode: find symbols matching name
@@ -463,27 +457,25 @@ fn Object* execute_list_documents(DocumentStore* store) {
 	Object* docs_arr = object::new_obj(tmem);
 	int count = 0;
 	if (store != null) {
-		@pool() {
-			foreach (&doc : store.docs.tvalues()) {
-				Object* d = object::new_obj(tmem);
-				d.set("uri", doc.uri);
-				d.set("language_id", doc.language_id);
-				d.set("version", doc.version);
-				d.set("byte_count", (int)doc.content.len);
+		foreach (&doc : store.docs.tvalues()) {
+			Object* d = object::new_obj(tmem);
+			d.set("uri", doc.uri);
+			d.set("language_id", doc.language_id);
+			d.set("version", doc.version);
+			d.set("byte_count", (int)doc.content.len);
 
-				// Count newlines for line count
-				int line_count = 1;
-				for (usz i = 0; i < doc.content.len; i++) {
-					if (doc.content[i] == '\n') line_count++;
-				}
-				d.set("line_count", line_count);
-				d.set("has_ast", doc.cached_ast != null);
-				d.set("has_types", doc.cached_types != null);
-				d.set("has_tokens", doc.cached_tokens != null);
-				docs_arr.push(d);
-				count++;
+			// Count newlines for line count
+			int line_count = 1;
+			for (usz i = 0; i < doc.content.len; i++) {
+				if (doc.content[i] == '\n') line_count++;
 			}
-		};
+			d.set("line_count", line_count);
+			d.set("has_ast", doc.cached_ast != null);
+			d.set("has_types", doc.cached_types != null);
+			d.set("has_tokens", doc.cached_tokens != null);
+			docs_arr.push(d);
+			count++;
+		}
 	}
 	result.set("count", count);
 	result.set("documents", docs_arr);
